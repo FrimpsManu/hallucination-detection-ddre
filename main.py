@@ -1,9 +1,10 @@
 import json
 import os
+import time
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-from src.baseline_core import build_nbc_features, predict_one_sentence
+from src.baseline_core import build_nbc_features, predict_one_sentence_iterative
 
 
 def load_data():
@@ -39,10 +40,11 @@ def main():
             indent=2,
         )
 
-    print("Running test on 50 samples...\n")
+    print("Running iterative baseline test on 50 samples...\n")
 
     correct = 0
     total = min(50, len(data))
+    total_steps = 0
 
     for i in range(total):
         sample = data[i]
@@ -51,26 +53,38 @@ def main():
         evidence = sample["wiki_bio_text"]
         gold = sample["label"]
 
-        P, score, bucket = predict_one_sentence(
+        results = predict_one_sentence_iterative(
             sentence,
             evidence,
             tokenizer,
             model,
             pos_features,
             neg_features,
+            P0=0.5,
+            C_M=28,
+            C_FA=96,
+            C_retrieve=1,
+
         )
 
-        pred = 1 if P >= 0.5 else 0
+        pred = results["prediction"]
+        P = results["posterior"]
+        steps_used = results["steps_used"]
+
+        total_steps += steps_used
 
         if pred == gold:
             correct += 1
 
         print(
             f"[{i+1}] Gold: {gold} | Pred: {pred} | "
-            f"P: {P:.4f} | Score: {score:.2f} | Bucket: {bucket}"
+            f"P: {P:.4f} | Steps: {steps_used}"
         )
 
+    elapsed = time.time() - start_time
     print(f"\nAccuracy on first {total} samples: {correct / total:.4f}")
+    print(f"Average steps used: {total_steps / total:.2f}")
+    print(f"Elapsed time: {elapsed:.2f} seconds")
 
 
 if __name__ == "__main__":
