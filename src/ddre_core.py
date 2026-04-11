@@ -4,8 +4,13 @@ from src.utils import split_text, get_entailment_score
 
 
 class DDREModel:
-    def __init__(self):
-        self.model = LogisticRegression(max_iter=1000)
+    def __init__(self, threshold=0.4):
+        self.model = LogisticRegression(
+            max_iter=1000,
+            class_weight="balanced",
+            random_state=42,
+        )
+        self.threshold = threshold
 
     def featurize(self, sentence, evidence, tokenizer, nli_model):
         segments = split_text(evidence)
@@ -15,13 +20,33 @@ class DDREModel:
             score = get_entailment_score(seg, sentence, tokenizer, nli_model)
             scores.append(score)
 
-        max_score = max(scores) if scores else 0.0
-        avg_score = sum(scores) / len(scores) if scores else 0.0
+        if scores:
+            max_score = max(scores)
+            avg_score = sum(scores) / len(scores)
+            min_score = min(scores)
+            std_score = float(np.std(scores))
+        else:
+            max_score = 0.0
+            avg_score = 0.0
+            min_score = 0.0
+            std_score = 0.0
+
         sent_len = len(sentence.split())
         evidence_len = len(evidence.split())
         num_segments = len(segments)
 
-        return np.array([max_score, avg_score, sent_len, evidence_len, num_segments], dtype=float)
+        return np.array(
+            [
+                max_score,
+                avg_score,
+                min_score,
+                std_score,
+                num_segments,
+                sent_len,
+                evidence_len,
+            ],
+            dtype=float,
+        )
 
     def fit(self, data, tokenizer, nli_model, max_samples=200):
         X = []
@@ -53,7 +78,8 @@ class DDREModel:
         p_factual = probs[1]
 
         ratio = p_factual / max(p_hallucinated, 1e-8)
-        pred = 1 if ratio >= 1.0 else 0
+
+        pred = 1 if p_factual >= self.threshold else 0
 
         return {
             "prediction": pred,
