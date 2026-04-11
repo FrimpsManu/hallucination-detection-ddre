@@ -1,0 +1,13 @@
+{
+  "train_samples": 50,
+  "eval_samples": 20,
+  "baseline": {
+    "accuracy": 0.85,
+    "avg_steps": 1.0,
+    "elapsed_time": 87.8894431591034
+  },
+  "ddre": {
+    "accuracy": 0.7,
+    "elapsed_time": 96.34322428703308
+  }
+}
