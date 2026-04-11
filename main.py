@@ -46,6 +46,8 @@ def main():
     total = min(50, len(data))
     total_steps = 0
 
+    start_time = time.time()
+
     for i in range(total):
         sample = data[i]
 
