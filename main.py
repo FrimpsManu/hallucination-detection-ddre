@@ -116,7 +116,7 @@ def main():
 
     data = load_data()
 
-    train_samples = 50
+    train_samples = 150
     eval_samples = 20
 
     train_data = data[:train_samples]

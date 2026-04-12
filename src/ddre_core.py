@@ -4,7 +4,7 @@ from src.utils import split_text, get_entailment_score
 
 
 class DDREModel:
-    def __init__(self, threshold=0.4):
+    def __init__(self, threshold=0.6):
         self.model = LogisticRegression(
             max_iter=1000,
             class_weight="balanced",
@@ -25,11 +25,13 @@ class DDREModel:
             avg_score = sum(scores) / len(scores)
             min_score = min(scores)
             std_score = float(np.std(scores))
+            top_k_avg = float(np.mean(sorted(scores, reverse=True)[:3]))
         else:
             max_score = 0.0
             avg_score = 0.0
             min_score = 0.0
             std_score = 0.0
+            top_k_avg = 0.0
 
         sent_len = len(sentence.split())
         evidence_len = len(evidence.split())
@@ -41,6 +43,7 @@ class DDREModel:
                 avg_score,
                 min_score,
                 std_score,
+                top_k_avg,
                 num_segments,
                 sent_len,
                 evidence_len,
@@ -78,7 +81,6 @@ class DDREModel:
         p_factual = probs[1]
 
         ratio = p_factual / max(p_hallucinated, 1e-8)
-
         pred = 1 if p_factual >= self.threshold else 0
 
         return {
