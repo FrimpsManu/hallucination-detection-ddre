@@ -4,10 +4,10 @@
   "baseline": {
     "accuracy": 0.85,
     "avg_steps": 1.0,
-    "elapsed_time": 87.8894431591034
+    "elapsed_time": 105.99101042747498
   },
   "ddre": {
-    "accuracy": 0.7,
-    "elapsed_time": 96.34322428703308
+    "accuracy": 0.35,
+    "elapsed_time": 103.6873025894165
   }
 }
