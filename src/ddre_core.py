@@ -21,17 +21,28 @@ class DDREModel:
             scores.append(score)
 
         if scores:
-            max_score = max(scores)
-            avg_score = sum(scores) / len(scores)
-            min_score = min(scores)
+            sorted_scores = sorted(scores, reverse=True)
+
+            max_score = sorted_scores[0]
+            avg_score = float(np.mean(scores))
+            min_score = sorted_scores[-1]
             std_score = float(np.std(scores))
-            top_k_avg = float(np.mean(sorted(scores, reverse=True)[:3]))
+            median_score = float(np.median(scores))
+            top_k_avg = float(np.mean(sorted_scores[:3])) if len(sorted_scores) >= 3 else avg_score
+            top1_top2_gap = float(sorted_scores[0] - sorted_scores[1]) if len(sorted_scores) >= 2 else sorted_scores[0]
+
+            prop_above_20 = sum(s >= 20 for s in scores) / len(scores)
+            prop_above_30 = sum(s >= 30 for s in scores) / len(scores)
         else:
             max_score = 0.0
             avg_score = 0.0
             min_score = 0.0
             std_score = 0.0
+            median_score = 0.0
             top_k_avg = 0.0
+            top1_top2_gap = 0.0
+            prop_above_20 = 0.0
+            prop_above_30 = 0.0
 
         sent_len = len(sentence.split())
         evidence_len = len(evidence.split())
@@ -43,7 +54,11 @@ class DDREModel:
                 avg_score,
                 min_score,
                 std_score,
+                median_score,
                 top_k_avg,
+                top1_top2_gap,
+                prop_above_20,
+                prop_above_30,
                 num_segments,
                 sent_len,
                 evidence_len,

@@ -1,13 +1,13 @@
 {
-  "train_samples": 50,
+  "train_samples": 150,
   "eval_samples": 20,
   "baseline": {
-    "accuracy": 0.85,
-    "avg_steps": 1.0,
-    "elapsed_time": 105.99101042747498
+    "accuracy": 0.75,
+    "avg_steps": 1.1,
+    "elapsed_time": 137.87450098991394
   },
   "ddre": {
-    "accuracy": 0.35,
-    "elapsed_time": 103.6873025894165
+    "accuracy": 0.7,
+    "elapsed_time": 138.68081188201904
   }
 }
