@@ -117,8 +117,8 @@ def main():
 
     data = load_data()
 
-    train_samples = 150
-    eval_samples = 50
+    train_samples = 300
+    eval_samples = 100
 
     train_data = data[:train_samples]
     eval_data = data[train_samples:train_samples + eval_samples]
@@ -155,7 +155,7 @@ def main():
         neg_features=neg_features,
     )
 
-    thresholds = [0.5, 0.55, 0.6, 0.65]
+    thresholds = [0.55, 0.6, 0.65, 0.7, 0.75]
     ddre_results_all = []
 
     for th in thresholds:

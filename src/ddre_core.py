@@ -20,6 +20,8 @@ class DDREModel:
             score = get_entailment_score(seg, sentence, tokenizer, nli_model)
             scores.append(score)
 
+        eps = 1e-6
+
         if scores:
             sorted_scores = sorted(scores, reverse=True)
 
@@ -33,6 +35,8 @@ class DDREModel:
 
             prop_above_20 = sum(s >= 20 for s in scores) / len(scores)
             prop_above_30 = sum(s >= 30 for s in scores) / len(scores)
+
+            log_ratio_feature = float(np.log(max_score + eps) / (avg_score + eps))
         else:
             max_score = 0.0
             avg_score = 0.0
@@ -43,6 +47,7 @@ class DDREModel:
             top1_top2_gap = 0.0
             prop_above_20 = 0.0
             prop_above_30 = 0.0
+            log_ratio_feature
 
         sent_len = len(sentence.split())
         evidence_len = len(evidence.split())
@@ -59,6 +64,7 @@ class DDREModel:
                 top1_top2_gap,
                 prop_above_20,
                 prop_above_30,
+                log_ratio_feature,
                 num_segments,
                 sent_len,
                 evidence_len,
