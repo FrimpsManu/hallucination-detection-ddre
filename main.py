@@ -6,6 +6,7 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 from src.baseline_core import build_nbc_features, predict_one_sentence_iterative
 from src.ddre_core import DDREModel
+from src.evaluation import classification_metrics, latency_metrics
 
 
 def load_data():
@@ -16,7 +17,9 @@ def load_data():
 def run_baseline(eval_data, tokenizer, model, pos_features, neg_features):
     print("\nRunning iterative baseline...\n")
 
-    correct = 0
+    y_true = []
+    y_pred = []
+
     total = len(eval_data)
     total_steps = 0
 
@@ -44,24 +47,25 @@ def run_baseline(eval_data, tokenizer, model, pos_features, neg_features):
         P = result["posterior"]
         steps_used = result["steps_used"]
 
+        y_true.append(gold)
+        y_pred.append(pred)
         total_steps += steps_used
-
-        if pred == gold:
-            correct += 1
 
         print(
             f"[Baseline {i+1}] Gold: {gold} | Pred: {pred} | "
             f"P: {P:.4f} | Steps: {steps_used}"
         )
 
-    elapsed = time.time() - start_time
-    accuracy = correct / total if total > 0 else 0.0
+    end_time = time.time()
+
     avg_steps = total_steps / total if total > 0 else 0.0
 
+    class_results = classification_metrics(y_true, y_pred, positive_label=0)
+    lat_results = latency_metrics(start_time, end_time, total, avg_steps=avg_steps)
+
     return {
-        "accuracy": accuracy,
-        "avg_steps": avg_steps,
-        "elapsed_time": elapsed,
+        **class_results,
+        **lat_results,
     }
 
 
@@ -73,7 +77,9 @@ def run_ddre(train_data, eval_data, tokenizer, model, threshold=0.6):
 
     print("\nRunning DDRE evaluation...\n")
 
-    correct = 0
+    y_true = []
+    y_pred = []
+
     total = len(eval_data)
 
     start_time = time.time()
@@ -89,20 +95,22 @@ def run_ddre(train_data, eval_data, tokenizer, model, threshold=0.6):
         ratio = result["ratio"]
         p_factual = result["p_factual"]
 
-        if pred == gold:
-            correct += 1
+        y_true.append(gold)
+        y_pred.append(pred)
 
         print(
             f"[DDRE {i+1}] Gold: {gold} | Pred: {pred} | "
             f"Ratio: {ratio:.4f} | P_factual: {p_factual:.4f}"
         )
 
-    elapsed = time.time() - start_time
-    accuracy = correct / total if total > 0 else 0.0
+    end_time = time.time()
+
+    class_results = classification_metrics(y_true, y_pred, positive_label=0)
+    lat_results = latency_metrics(start_time, end_time, total, avg_steps=1.0)
 
     return {
-        "accuracy": accuracy,
-        "elapsed_time": elapsed,
+        **class_results,
+        **lat_results,
         "threshold": threshold,
     }
 
@@ -117,7 +125,7 @@ def main():
 
     data = load_data()
 
-    train_samples = 300
+    train_samples = 200
     eval_samples = 100
 
     train_data = data[:train_samples]
@@ -155,7 +163,7 @@ def main():
         neg_features=neg_features,
     )
 
-    thresholds = [0.55, 0.6, 0.65, 0.7, 0.75]
+    thresholds = [0.5, 0.55, 0.6, 0.65, 0.7, 0.75]
     ddre_results_all = []
 
     for th in thresholds:
@@ -168,7 +176,7 @@ def main():
         )
         ddre_results_all.append(result)
 
-    best_ddre = max(ddre_results_all, key=lambda x: x["accuracy"])
+    best_ddre = max(ddre_results_all, key=lambda x: x["f1_score"])
 
     comparison = {
         "train_samples": train_samples,
@@ -184,13 +192,22 @@ def main():
     print("\n" + "=" * 70)
     print("FINAL COMPARISON")
     print("=" * 70)
-    print(f"Baseline Accuracy: {baseline_results['accuracy']:.4f}")
-    print(f"Baseline Avg Steps: {baseline_results['avg_steps']:.2f}")
-    print(f"Baseline Time: {baseline_results['elapsed_time']:.2f} seconds")
+    print("BASELINE")
+    print(f"Precision: {baseline_results['precision']:.4f}")
+    print(f"Recall:    {baseline_results['recall']:.4f}")
+    print(f"F1-score:  {baseline_results['f1_score']:.4f}")
+    print(f"Avg Steps: {baseline_results['avg_steps']:.2f}")
+    print(f"Total Time: {baseline_results['total_inference_time']:.2f} seconds")
+    print(f"Avg Time/Sample: {baseline_results['avg_inference_time_per_sample']:.4f} seconds")
     print("-" * 70)
-    print(f"Best DDRE Accuracy: {best_ddre['accuracy']:.4f}")
-    print(f"Best DDRE Threshold: {best_ddre['threshold']:.2f}")
-    print(f"Best DDRE Time: {best_ddre['elapsed_time']:.2f} seconds")
+    print("BEST DDRE")
+    print(f"Threshold: {best_ddre['threshold']:.2f}")
+    print(f"Precision: {best_ddre['precision']:.4f}")
+    print(f"Recall:    {best_ddre['recall']:.4f}")
+    print(f"F1-score:  {best_ddre['f1_score']:.4f}")
+    print(f"Avg Steps: {best_ddre['avg_steps']:.2f}")
+    print(f"Total Time: {best_ddre['total_inference_time']:.2f} seconds")
+    print(f"Avg Time/Sample: {best_ddre['avg_inference_time_per_sample']:.4f} seconds")
     print("=" * 70)
 
 
