@@ -1,21 +1,21 @@
 {
-  "train_samples": 50,
+  "train_samples": 150,
   "pos_features": [
     1,
+    22,
     6,
+    4,
     1,
-    1,
-    1,
-    1,
-    1,
+    7,
+    4,
     1,
     1,
     1
   ],
   "neg_features": [
     1,
-    41,
-    5,
+    98,
+    15,
     2,
     1,
     1,

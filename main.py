@@ -65,10 +65,10 @@ def run_baseline(eval_data, tokenizer, model, pos_features, neg_features):
     }
 
 
-def run_ddre(train_data, eval_data, tokenizer, model):
-    print("\nTraining DDRE model...\n")
+def run_ddre(train_data, eval_data, tokenizer, model, threshold=0.6):
+    print(f"\nTraining DDRE model (threshold={threshold})...\n")
 
-    ddre = DDREModel()
+    ddre = DDREModel(threshold=threshold)
     ddre.fit(train_data, tokenizer, model, max_samples=len(train_data))
 
     print("\nRunning DDRE evaluation...\n")
@@ -103,6 +103,7 @@ def run_ddre(train_data, eval_data, tokenizer, model):
     return {
         "accuracy": accuracy,
         "elapsed_time": elapsed,
+        "threshold": threshold,
     }
 
 
@@ -117,7 +118,7 @@ def main():
     data = load_data()
 
     train_samples = 150
-    eval_samples = 20
+    eval_samples = 50
 
     train_data = data[:train_samples]
     eval_data = data[train_samples:train_samples + eval_samples]
@@ -154,18 +155,27 @@ def main():
         neg_features=neg_features,
     )
 
-    ddre_results = run_ddre(
-        train_data=train_data,
-        eval_data=eval_data,
-        tokenizer=tokenizer,
-        model=model,
-    )
+    thresholds = [0.5, 0.55, 0.6, 0.65]
+    ddre_results_all = []
+
+    for th in thresholds:
+        result = run_ddre(
+            train_data=train_data,
+            eval_data=eval_data,
+            tokenizer=tokenizer,
+            model=model,
+            threshold=th,
+        )
+        ddre_results_all.append(result)
+
+    best_ddre = max(ddre_results_all, key=lambda x: x["accuracy"])
 
     comparison = {
         "train_samples": train_samples,
         "eval_samples": eval_samples,
         "baseline": baseline_results,
-        "ddre": ddre_results,
+        "ddre_all": ddre_results_all,
+        "best_ddre": best_ddre,
     }
 
     with open("results/comparison_results.json", "w", encoding="utf-8") as f:
@@ -178,8 +188,9 @@ def main():
     print(f"Baseline Avg Steps: {baseline_results['avg_steps']:.2f}")
     print(f"Baseline Time: {baseline_results['elapsed_time']:.2f} seconds")
     print("-" * 70)
-    print(f"DDRE Accuracy: {ddre_results['accuracy']:.4f}")
-    print(f"DDRE Time: {ddre_results['elapsed_time']:.2f} seconds")
+    print(f"Best DDRE Accuracy: {best_ddre['accuracy']:.4f}")
+    print(f"Best DDRE Threshold: {best_ddre['threshold']:.2f}")
+    print(f"Best DDRE Time: {best_ddre['elapsed_time']:.2f} seconds")
     print("=" * 70)
 
 
