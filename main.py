@@ -67,7 +67,7 @@ def run_baseline(eval_data, tokenizer, model, pos_features, neg_features):
         **class_results,
         **lat_results,
     }
-
+   
 
 def run_ddre(train_data, eval_data, tokenizer, model, threshold=0.6):
     print(f"\nTraining DDRE model (threshold={threshold})...\n")
