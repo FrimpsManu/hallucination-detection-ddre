@@ -1,5 +1,8 @@
 import numpy as np
 from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
 from src.utils import split_text, get_entailment_score
 
 
@@ -12,14 +15,23 @@ class DDREModel:
 
         r(x) = [P(F|x) / P(H|x)] * [P(H) / P(F)].
 
-    This makes the density-ratio interpretation explicit rather than treating
-    raw posterior odds as a class-conditional density ratio.
+    Features are standardized before logistic regression because the feature
+    vector mixes probabilities, counts, and text-length statistics at very
+    different numerical scales.
     """
 
     def __init__(self, threshold=0.5, random_state=42):
-        self.model = LogisticRegression(
-            max_iter=2000,
-            random_state=random_state,
+        self.model = Pipeline(
+            [
+                ("scale", StandardScaler()),
+                (
+                    "clf",
+                    LogisticRegression(
+                        max_iter=2000,
+                        random_state=random_state,
+                    ),
+                ),
+            ]
         )
         self.threshold = threshold
         self.p_factual_prior = None
@@ -51,7 +63,7 @@ class DDREModel:
             prop_above_20 = float(np.mean(np.asarray(scores) >= 20.0))
             prop_above_30 = float(np.mean(np.asarray(scores) >= 30.0))
 
-            # True log ratio of the strongest evidence score to the mean score.
+            # True log ratio of strongest evidence score to mean evidence score.
             log_ratio_feature = float(
                 np.log(max_score + eps) - np.log(avg_score + eps)
             )
@@ -133,7 +145,7 @@ class DDREModel:
         x, nli_calls = self.featurize(sentence, evidence, tokenizer, nli_model)
         probs = self.model.predict_proba(x.reshape(1, -1))[0]
 
-        classes = list(self.model.classes_)
+        classes = list(self.model.named_steps["clf"].classes_)
         p_hallucinated_post = float(probs[classes.index(0)])
         p_factual_post = float(probs[classes.index(1)])
 
@@ -142,7 +154,9 @@ class DDREModel:
         prior_odds_correction = self.p_hallucinated_prior / self.p_factual_prior
         density_ratio = posterior_odds * prior_odds_correction
 
-        # Convert density ratio back to posterior probability using empirical priors.
+        # Convert the estimated density ratio back to a posterior using the
+        # empirical training priors. Algebraically this recovers the classifier
+        # posterior while retaining an explicit, interpretable density ratio.
         numerator = density_ratio * self.p_factual_prior
         denominator = numerator + self.p_hallucinated_prior
         p_factual = numerator / max(denominator, eps)
