@@ -39,6 +39,55 @@ def classification_metrics(y_true, y_pred, y_score=None, positive_label=0):
     return metrics
 
 
+def bootstrap_metric_ci(
+    y_true,
+    y_pred,
+    metric="f1",
+    positive_label=0,
+    n_bootstrap=2000,
+    confidence=0.95,
+    random_state=42,
+):
+    """Non-parametric bootstrap confidence interval for a classification metric."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    if len(y_true) == 0:
+        return {"lower": 0.0, "upper": 0.0, "confidence": confidence}
+
+    rng = np.random.default_rng(random_state)
+    values = []
+
+    for _ in range(n_bootstrap):
+        idx = rng.integers(0, len(y_true), len(y_true))
+        yt = y_true[idx]
+        yp = y_pred[idx]
+
+        if metric == "f1":
+            value = f1_score(yt, yp, pos_label=positive_label, zero_division=0)
+        elif metric == "precision":
+            value = precision_score(yt, yp, pos_label=positive_label, zero_division=0)
+        elif metric == "recall":
+            value = recall_score(yt, yp, pos_label=positive_label, zero_division=0)
+        elif metric == "accuracy":
+            value = accuracy_score(yt, yp)
+        else:
+            raise ValueError(f"Unsupported bootstrap metric: {metric}")
+
+        values.append(value)
+
+    alpha = 1.0 - confidence
+    lower = float(np.quantile(values, alpha / 2.0))
+    upper = float(np.quantile(values, 1.0 - alpha / 2.0))
+
+    return {
+        "lower": lower,
+        "upper": upper,
+        "confidence": confidence,
+        "n_bootstrap": n_bootstrap,
+    }
+
+
 def latency_metrics(sample_times, nli_calls=None, avg_steps=None):
     sample_times = np.asarray(sample_times, dtype=float)
 
