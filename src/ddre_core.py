@@ -2,8 +2,7 @@ import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-
-from src.utils import split_text, get_entailment_score
+from tqdm import tqdm
 
 
 class DDREModel:
@@ -14,10 +13,6 @@ class DDREModel:
     ratio p(x|factual) / p(x|hallucinated) using the empirical training priors:
 
         r(x) = [P(F|x) / P(H|x)] * [P(H) / P(F)].
-
-    Features are standardized before logistic regression because the feature
-    vector mixes probabilities, counts, and text-length statistics at very
-    different numerical scales.
     """
 
     def __init__(self, threshold=0.5, random_state=42):
@@ -37,13 +32,21 @@ class DDREModel:
         self.p_factual_prior = None
         self.p_hallucinated_prior = None
 
-    def featurize(self, sentence, evidence, tokenizer, nli_model):
-        segments = split_text(evidence)
-
-        scores = [
-            get_entailment_score(seg, sentence, tokenizer, nli_model)
-            for seg in segments
-        ]
+    def featurize(
+        self,
+        sentence,
+        evidence,
+        scorer,
+        *,
+        use_cache=True,
+        write_cache=True,
+    ):
+        scores, segments = scorer.score_evidence(
+            sentence,
+            evidence,
+            use_cache=use_cache,
+            write_cache=write_cache,
+        )
 
         eps = 1e-8
 
@@ -62,8 +65,6 @@ class DDREModel:
             )
             prop_above_20 = float(np.mean(np.asarray(scores) >= 20.0))
             prop_above_30 = float(np.mean(np.asarray(scores) >= 30.0))
-
-            # True log ratio of strongest evidence score to mean evidence score.
             log_ratio_feature = float(
                 np.log(max_score + eps) - np.log(avg_score + eps)
             )
@@ -104,20 +105,19 @@ class DDREModel:
 
         return features, len(segments)
 
-    def fit(self, data, tokenizer, nli_model, max_samples=None):
+    def fit(self, data, scorer, max_samples=None):
         X = []
         y = []
 
         subset = data if max_samples is None else data[:max_samples]
 
-        for idx, item in enumerate(subset, start=1):
-            print(f"DDRE training sample {idx}/{len(subset)}")
-
+        for item in tqdm(subset, desc="Building DDRE training features", unit="sample"):
             feat, _ = self.featurize(
                 item["sentence"],
                 item["wiki_bio_text"],
-                tokenizer,
-                nli_model,
+                scorer,
+                use_cache=True,
+                write_cache=True,
             )
             X.append(feat)
             y.append(item["label"])
@@ -138,11 +138,25 @@ class DDREModel:
         self.model.fit(X, y)
         return self
 
-    def predict_one(self, sentence, evidence, tokenizer, nli_model, threshold=None):
+    def predict_one(
+        self,
+        sentence,
+        evidence,
+        scorer,
+        threshold=None,
+        *,
+        use_cache=False,
+    ):
         if self.p_factual_prior is None or self.p_hallucinated_prior is None:
             raise RuntimeError("DDREModel must be fit before prediction.")
 
-        x, nli_calls = self.featurize(sentence, evidence, tokenizer, nli_model)
+        x, nli_calls = self.featurize(
+            sentence,
+            evidence,
+            scorer,
+            use_cache=use_cache,
+            write_cache=use_cache,
+        )
         probs = self.model.predict_proba(x.reshape(1, -1))[0]
 
         classes = list(self.model.named_steps["clf"].classes_)
@@ -154,9 +168,6 @@ class DDREModel:
         prior_odds_correction = self.p_hallucinated_prior / self.p_factual_prior
         density_ratio = posterior_odds * prior_odds_correction
 
-        # Convert the estimated density ratio back to a posterior using the
-        # empirical training priors. Algebraically this recovers the classifier
-        # posterior while retaining an explicit, interpretable density ratio.
         numerator = density_ratio * self.p_factual_prior
         denominator = numerator + self.p_hallucinated_prior
         p_factual = numerator / max(denominator, eps)
