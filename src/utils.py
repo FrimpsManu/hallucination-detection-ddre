@@ -1,47 +1,43 @@
 import hashlib
 import os
 import sqlite3
-from contextlib import nullcontext
 
 import torch
 from tqdm import tqdm
 
 
-SCORE_VERSION = "entailment-softmax-temp5-v1"
+SCORE_VERSION = "wang-emnlp23-temp5-seg400-overlap100-v1"
 
 
-def split_text(text, segment_length=300, overlap_length=50):
-    words = text.split()[:4000]
+def split_text(text, segment_length=400, overlap_length=100):
+    """Match Wang et al.'s document segmentation defaults (m=400, step=300)."""
+    words = str(text).split()[:4000]
+    if not words:
+        return []
+
     segments = []
-
     start = 0
     step = segment_length - overlap_length
+    if step <= 0:
+        raise ValueError("segment_length must be greater than overlap_length")
 
     while start < len(words):
         end = start + segment_length
-        segment = words[start:end]
-
-        if not segment:
-            break
-
-        segments.append(" ".join(segment))
-
         if end >= len(words):
-            break
-
+            # The released implementation uses the final segment_length words.
+            segment = words[-segment_length:]
+        else:
+            segment = words[start:end]
+        segments.append(" ".join(segment))
         start += step
 
-    return segments
+    # The released split_text can create a duplicate tail span. Removing exact
+    # duplicates does not change max-document entailment but avoids redundant NLI.
+    return list(dict.fromkeys(segments))
 
 
 class EntailmentScorer:
-    """Batched NLI scorer with an optional persistent SQLite cache.
-
-    Training and validation may safely reuse cached NLI scores because those
-    scores are deterministic features of the claim/evidence pair. Final test
-    latency measurements should set use_cache=False and write_cache=False so
-    wall-clock measurements reflect real model inference rather than cache I/O.
-    """
+    """Batched DeBERTa NLI scorer with a persistent deterministic cache."""
 
     def __init__(
         self,
@@ -75,29 +71,31 @@ class EntailmentScorer:
         self.conn.commit()
 
     def _find_entailment_index(self):
-        for index, label in self.model.config.id2label.items():
+        id2label = self.model.config.id2label
+        for index, label in id2label.items():
             normalized = str(label).lower()
             if "entail" in normalized and "not" not in normalized and "contra" not in normalized:
                 return int(index)
-        raise ValueError(
-            "Could not identify the entailment class from model.config.id2label."
-        )
+
+        # The exact model used by Wang et al. exposes entailment as label 0.
+        # We only use this fallback when labels are generic LABEL_0/LABEL_1/...
+        generic = all(str(label).upper().startswith("LABEL_") for label in id2label.values())
+        if generic and 0 in [int(i) for i in id2label.keys()]:
+            return 0
+        raise ValueError("Could not identify entailment class from model.config.id2label")
 
     def _cache_key(self, premise, hypothesis):
         payload = "\0".join(
-            [self.model_name, SCORE_VERSION, premise, hypothesis]
+            [self.model_name, SCORE_VERSION, str(premise), str(hypothesis)]
         ).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
     def _lookup_db(self, keys):
         found = {}
-        if not keys:
-            return found
-
-        # Stay well below SQLite's parameter-count limit.
-        chunk_size = 500
-        for start in range(0, len(keys), chunk_size):
-            chunk = keys[start : start + chunk_size]
+        for start in range(0, len(keys), 500):
+            chunk = keys[start : start + 500]
+            if not chunk:
+                continue
             placeholders = ",".join("?" for _ in chunk)
             rows = self.conn.execute(
                 f"SELECT cache_key, score FROM nli_scores WHERE cache_key IN ({placeholders})",
@@ -109,7 +107,6 @@ class EntailmentScorer:
     def _infer_batch(self, pairs):
         premises = [premise for premise, _ in pairs]
         hypotheses = [hypothesis for _, hypothesis in pairs]
-
         inputs = self.tokenizer(
             premises,
             hypotheses,
@@ -124,7 +121,7 @@ class EntailmentScorer:
 
         probs = torch.softmax(outputs.logits / 5.0, dim=-1)
         scores = probs[:, self.entailment_index] * 100.0
-        return [float(value) for value in scores.detach().cpu().tolist()]
+        return [float(x) for x in scores.detach().cpu().tolist()]
 
     def score_pairs(
         self,
@@ -132,107 +129,76 @@ class EntailmentScorer:
         *,
         use_cache=True,
         write_cache=True,
-        batch_size=None,
         show_progress=False,
         description="NLI inference",
     ):
-        """Score (premise, hypothesis) pairs while preserving input order."""
         if not pairs:
             return []
 
-        batch_size = max(1, int(batch_size or self.batch_size))
-        keys = [self._cache_key(premise, hypothesis) for premise, hypothesis in pairs]
+        keys = [self._cache_key(p, h) for p, h in pairs]
         results = [None] * len(pairs)
 
         if use_cache:
-            unresolved_keys = []
-            for index, key in enumerate(keys):
+            unresolved = []
+            for i, key in enumerate(keys):
                 if key in self._memory_cache:
-                    results[index] = self._memory_cache[key]
+                    results[i] = self._memory_cache[key]
                 else:
-                    unresolved_keys.append(key)
-
-            db_hits = self._lookup_db(list(dict.fromkeys(unresolved_keys)))
+                    unresolved.append(key)
+            db_hits = self._lookup_db(list(dict.fromkeys(unresolved)))
             self._memory_cache.update(db_hits)
-            for index, key in enumerate(keys):
-                if results[index] is None and key in db_hits:
-                    results[index] = db_hits[key]
+            for i, key in enumerate(keys):
+                if results[i] is None and key in db_hits:
+                    results[i] = db_hits[key]
 
-        missing_indices = [i for i, value in enumerate(results) if value is None]
-        batches = range(0, len(missing_indices), batch_size)
-        if show_progress and missing_indices:
-            batches = tqdm(
-                batches,
-                total=(len(missing_indices) + batch_size - 1) // batch_size,
+        missing = [i for i, value in enumerate(results) if value is None]
+        starts = range(0, len(missing), self.batch_size)
+        if show_progress and missing:
+            starts = tqdm(
+                starts,
+                total=(len(missing) + self.batch_size - 1) // self.batch_size,
                 desc=description,
                 unit="batch",
             )
 
-        for start in batches:
-            batch_indices = missing_indices[start : start + batch_size]
-            batch_pairs = [pairs[i] for i in batch_indices]
+        for start in starts:
+            indices = missing[start : start + self.batch_size]
+            batch_pairs = [pairs[i] for i in indices]
             batch_scores = self._infer_batch(batch_pairs)
-
-            rows_to_write = []
-            for index, score in zip(batch_indices, batch_scores):
-                key = keys[index]
-                results[index] = score
-                if use_cache or write_cache:
-                    self._memory_cache[key] = score
+            rows = []
+            for i, score in zip(indices, batch_scores):
+                key = keys[i]
+                results[i] = score
+                self._memory_cache[key] = score
                 if write_cache:
-                    rows_to_write.append(
-                        (key, self.model_name, SCORE_VERSION, float(score))
-                    )
-
-            # Commit each completed batch. If a long run is interrupted, all
-            # previously finished batches remain available on the next run.
-            if rows_to_write:
+                    rows.append((key, self.model_name, SCORE_VERSION, score))
+            if rows:
                 self.conn.executemany(
                     """
                     INSERT OR REPLACE INTO nli_scores
                     (cache_key, model_name, score_version, score)
                     VALUES (?, ?, ?, ?)
                     """,
-                    rows_to_write,
+                    rows,
                 )
                 self.conn.commit()
 
-        return [float(value) for value in results]
+        return [float(x) for x in results]
 
-    def score_evidence(
-        self,
-        sentence,
-        evidence,
-        *,
-        use_cache=True,
-        write_cache=True,
-    ):
-        segments = split_text(evidence)
-        pairs = [(segment, sentence) for segment in segments]
+    def score_document(self, claim, page_content, *, use_cache=True, write_cache=True):
+        """Return Wang et al.'s document score: max entailment across text spans."""
+        segments = split_text(page_content, segment_length=400, overlap_length=100)
+        if not segments:
+            return 0.0, 0
+        pairs = [(segment, claim) for segment in segments]
         scores = self.score_pairs(
             pairs,
             use_cache=use_cache,
             write_cache=write_cache,
         )
-        return scores, segments
+        return max(scores), len(segments)
 
-    def warm_cache(self, data, description="Precomputing train/validation NLI features"):
-        """Batch all unique NLI pairs from a dataset and persist them.
-
-        This is the expensive stage on a first run. Subsequent runs resume from
-        the existing SQLite cache and infer only pairs that are still missing.
-        """
-        pairs = []
-        seen = set()
-
-        for item in tqdm(data, desc="Indexing NLI pairs", unit="sample"):
-            sentence = item["sentence"]
-            for segment in split_text(item["wiki_bio_text"]):
-                key = self._cache_key(segment, sentence)
-                if key not in seen:
-                    seen.add(key)
-                    pairs.append((segment, sentence))
-
+    def warm_pairs(self, pairs, description="Precomputing NLI scores"):
         before = self.cache_size()
         self.score_pairs(
             pairs,
@@ -242,9 +208,8 @@ class EntailmentScorer:
             description=description,
         )
         after = self.cache_size()
-
         return {
-            "unique_pairs_requested": len(pairs),
+            "pairs_requested": len(pairs),
             "cache_rows_before": before,
             "cache_rows_after": after,
             "new_scores_computed": max(0, after - before),
@@ -258,27 +223,3 @@ class EntailmentScorer:
         if getattr(self, "conn", None) is not None:
             self.conn.close()
             self.conn = None
-
-
-def get_entailment_score(premise, hypothesis, tokenizer, model):
-    """Backward-compatible one-pair scorer without persistent caching."""
-    device = next(model.parameters()).device
-    inputs = tokenizer(
-        premise,
-        hypothesis,
-        truncation=True,
-        max_length=512,
-        return_tensors="pt",
-    ).to(device)
-
-    with torch.inference_mode():
-        outputs = model(**inputs)
-
-    probs = torch.softmax(outputs.logits[0] / 5.0, dim=-1).detach().cpu()
-
-    for index, label in model.config.id2label.items():
-        normalized = str(label).lower()
-        if "entail" in normalized and "not" not in normalized and "contra" not in normalized:
-            return float(probs[int(index)].item() * 100.0)
-
-    raise ValueError("Could not identify entailment class in model.config.id2label.")
