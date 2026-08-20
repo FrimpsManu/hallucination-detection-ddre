@@ -71,7 +71,15 @@ __pypackages__/
 .pyre/
 .pytype/
 
+# Wang et al. released raw experimental artifacts are downloaded locally.
+# Do not duplicate their large dataset in this repository.
+data/wang/
+
 # Project-local persistent inference cache. This can be large and is machine-local.
 results/*.sqlite
 results/*.sqlite-wal
 results/*.sqlite-shm
+
+# Debug-only smoke outputs are not publication artifacts.
+results/smoke_*.json
+results/smoke_*.csv
