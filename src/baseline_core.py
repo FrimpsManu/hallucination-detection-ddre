@@ -1,4 +1,3 @@
-import math
 from dataclasses import dataclass
 
 
@@ -10,9 +9,15 @@ class DetectionResult:
     nli_calls: int
 
 
-def discretize_score(score):
-    """Match the released Wang code's 10-bin mapping for 0-100 entailment scores."""
-    bucket = int((float(score) - 0.1) / 10.0)
+def discretize_nbc_score(score):
+    """Match NBC_feature.py: int(round(score, 1) / 10), clamped defensively."""
+    bucket = int(round(float(score), 1) / 10.0)
+    return max(0, min(bucket, 9))
+
+
+def discretize_document_score(score):
+    """Match released main.py: int((round(score, 1) - 0.1) / 10)."""
+    bucket = int((round(float(score), 1) - 0.1) / 10.0)
     return max(0, min(bucket, 9))
 
 
@@ -37,9 +42,9 @@ def build_nbc_histograms(pos_pairs, neg_pairs, scorer):
     )
 
     for score in pos_scores:
-        pos_hist[discretize_score(score)] += 1
+        pos_hist[discretize_nbc_score(score)] += 1
     for score in neg_scores:
-        neg_hist[discretize_score(score)] += 1
+        neg_hist[discretize_nbc_score(score)] += 1
 
     # Wang et al. use Laplace smoothing (+1 per bin).
     pos_hist = [x + 1 for x in pos_hist]
@@ -58,7 +63,6 @@ def bayes_update(p_factual, p_feature_given_factual, p_feature_given_hallucinate
 
 
 def stop_cost(p_factual, c_miss, c_false_alarm):
-    # Miss: call a hallucination factual. False alarm: call factual hallucinated.
     return min(
         (1.0 - p_factual) * c_miss,
         p_factual * c_false_alarm,
@@ -79,7 +83,6 @@ class BSEDetector:
 
     mode="eq8" implements Equation 8 from the paper literally by weighting the
     next-step stop risk by the predictive probability of each feature bucket.
-    Keeping both prevents us from silently changing the published baseline.
     """
 
     def __init__(
@@ -140,9 +143,7 @@ class BSEDetector:
     def continue_cost(self, p_factual):
         if self.mode == "official":
             expected_p = self._official_expected_next_posterior(p_factual)
-            future_risk = stop_cost(
-                expected_p, self.c_miss, self.c_false_alarm
-            )
+            future_risk = stop_cost(expected_p, self.c_miss, self.c_false_alarm)
         else:
             future_risk = self._eq8_expected_next_stop_risk(p_factual)
         return self.c_retrieve + future_risk
@@ -158,8 +159,6 @@ class BSEDetector:
         nli_calls = 0
 
         for document in subclaim.documents[: self.max_docs]:
-            # The released code checks stop-vs-continue before retrieving/scoring
-            # the next external document.
             if not self.should_continue(p_factual):
                 break
 
@@ -172,7 +171,7 @@ class BSEDetector:
             documents_used += 1
             nli_calls += segment_calls
 
-            bucket = discretize_score(score)
+            bucket = discretize_document_score(score)
             p1, p0 = self._bucket_likelihoods(bucket)
             p_factual = bayes_update(p_factual, p1, p0)
 
@@ -190,8 +189,6 @@ class BSEDetector:
             self.detect_subclaim(subclaim, scorer, use_cache=use_cache)
             for subclaim in record.subclaims
         ]
-
-        # Equation 9: sentence factuality is the least-factual subclaim.
         p_factual = min(result.p_factual for result in subclaim_results)
         return DetectionResult(
             p_factual=float(p_factual),
