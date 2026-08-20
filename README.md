@@ -2,9 +2,24 @@
 
 Research code for an in-progress study comparing sequential Bayesian evidence accumulation with a lightweight classifier-based density-ratio estimator for sentence-level hallucination detection.
 
+## Research objective
+
+The objective of this work is to develop a retrieval-aware hallucination-detection framework that **reduces computational cost while improving factuality detection performance** relative to sequential Bayesian evidence accumulation. The broader motivation is to support more reliable, lower-latency LLM-based enterprise customer-service systems.
+
 ## Research question
 
-Can density-ratio estimation provide a computationally efficient alternative to sequential Bayesian evidence accumulation for hallucination detection while preserving or improving detection performance?
+**Can a retrieval-aware density-ratio estimation framework reduce the computational cost of hallucination detection while improving factuality detection performance compared with sequential Bayesian evidence accumulation?**
+
+## Hypothesis
+
+We hypothesize that classifier-based density-ratio estimation can replace repeated sequential probability updates with a learned evidence-consistency decision mechanism, thereby:
+
+1. reducing computational cost, measured through inference latency, NLI evidence evaluations, and evidence-processing steps; and
+2. improving factuality detection performance, measured through hallucination precision, recall, F1, macro-F1, ROC-AUC, and PR-AUC.
+
+### Interpretation of "factual accuracy"
+
+The current experiment evaluates **factuality detection**: whether a generated sentence is correctly classified as factual or hallucinated. Therefore, the paper should interpret improved "factual accuracy" at this stage as improved accuracy/reliability of factuality validation, not as direct evidence that the underlying LLM generates more factual responses. Demonstrating that the framework directly increases the factual accuracy of generated responses would require an additional end-to-end experiment in which detected hallucinations are rejected, regenerated, corrected, or otherwise prevented from reaching the user.
 
 ## Dataset and labels
 
@@ -132,6 +147,8 @@ The final test-set comparison reports:
 - total and average NLI calls per sample
 
 The positive class for precision, recall, and F1 is **hallucinated (`0`)**.
+
+These metrics directly test the two parts of the hypothesis: **detection quality** and **computational cost**.
 
 ## Current status
 
