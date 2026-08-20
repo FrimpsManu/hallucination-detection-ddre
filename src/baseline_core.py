@@ -1,168 +1,203 @@
-from tqdm import tqdm
+import math
+from dataclasses import dataclass
 
-from src.utils import split_text
+
+@dataclass
+class DetectionResult:
+    p_factual: float
+    prediction: int
+    documents_used: int
+    nli_calls: int
 
 
 def discretize_score(score):
-    bucket = int((score - 0.1) / 10)
+    """Match the released Wang code's 10-bin mapping for 0-100 entailment scores."""
+    bucket = int((float(score) - 0.1) / 10.0)
     return max(0, min(bucket, 9))
 
 
-def bayes_update(P, p_given_1, p_given_0):
-    denominator = (1 - P) * p_given_0 + P * p_given_1
-    if denominator <= 0:
-        return P
-    return (P * p_given_1) / denominator
+def build_nbc_histograms(pos_pairs, neg_pairs, scorer):
+    """Estimate P(f|factual) and P(f|hallucinated) from Wang's NBC data."""
+    pos_hist = [0] * 10
+    neg_hist = [0] * 10
 
-
-def min_cost(P, C_M, C_FA):
-    """Minimum expected misclassification cost at posterior P=P(factual)."""
-    return min((1 - P) * C_M, P * C_FA)
-
-
-def expected_next_risk(P, pos_features, neg_features, C_M=28, C_FA=96):
-    """Expected Bayes risk after observing one additional evidence segment."""
-    total_pos = sum(pos_features)
-    total_neg = sum(neg_features)
-
-    expected_risk = 0.0
-    predictive_mass = 0.0
-
-    for bucket in range(10):
-        p_given_1 = pos_features[bucket] / total_pos
-        p_given_0 = neg_features[bucket] / total_neg
-
-        predictive_prob = P * p_given_1 + (1 - P) * p_given_0
-        if predictive_prob <= 0:
-            continue
-
-        next_P = bayes_update(P, p_given_1, p_given_0)
-        expected_risk += predictive_prob * min_cost(next_P, C_M, C_FA)
-        predictive_mass += predictive_prob
-
-    if predictive_mass <= 0:
-        return min_cost(P, C_M, C_FA)
-
-    return expected_risk / predictive_mass
-
-
-def should_continue(P, pos_features, neg_features, C_M=28, C_FA=96, C_retrieve=1):
-    stop_cost = min_cost(P, C_M, C_FA)
-    continue_cost = C_retrieve + expected_next_risk(
-        P,
-        pos_features,
-        neg_features,
-        C_M=C_M,
-        C_FA=C_FA,
+    pos_scores = scorer.score_pairs(
+        [(item["premise"], item["hypothesis"]) for item in pos_pairs],
+        use_cache=True,
+        write_cache=True,
+        show_progress=True,
+        description="NBC factual pairs",
     )
-    return stop_cost > continue_cost, stop_cost, continue_cost
+    neg_scores = scorer.score_pairs(
+        [(item["premise"], item["hypothesis"]) for item in neg_pairs],
+        use_cache=True,
+        write_cache=True,
+        show_progress=True,
+        description="NBC hallucinated pairs",
+    )
+
+    for score in pos_scores:
+        pos_hist[discretize_score(score)] += 1
+    for score in neg_scores:
+        neg_hist[discretize_score(score)] += 1
+
+    # Wang et al. use Laplace smoothing (+1 per bin).
+    pos_hist = [x + 1 for x in pos_hist]
+    neg_hist = [x + 1 for x in neg_hist]
+    return pos_hist, neg_hist, pos_scores, neg_scores
 
 
-def build_nbc_features(data, scorer, max_samples=None):
-    """Estimate score-bucket likelihoods using cached training NLI features."""
-    pos_features = [0] * 10
-    neg_features = [0] * 10
-
-    subset = data if max_samples is None else data[:max_samples]
-
-    for item in tqdm(subset, desc="Building Bayesian training distributions", unit="sample"):
-        sentence = item["sentence"]
-        evidence = item["wiki_bio_text"]
-        label = item["label"]
-
-        scores, _ = scorer.score_evidence(
-            sentence,
-            evidence,
-            use_cache=True,
-            write_cache=True,
-        )
-        max_score = max(scores) if scores else 0.0
-        bucket = discretize_score(max_score)
-
-        if label == 1:
-            pos_features[bucket] += 1
-        else:
-            neg_features[bucket] += 1
-
-    # Laplace smoothing prevents zero-probability buckets.
-    pos_features = [x + 1 for x in pos_features]
-    neg_features = [x + 1 for x in neg_features]
-
-    return pos_features, neg_features
+def bayes_update(p_factual, p_feature_given_factual, p_feature_given_hallucinated):
+    denominator = (
+        p_factual * p_feature_given_factual
+        + (1.0 - p_factual) * p_feature_given_hallucinated
+    )
+    if denominator <= 0:
+        return p_factual
+    return (p_factual * p_feature_given_factual) / denominator
 
 
-def predict_one_sentence_iterative(
-    sentence,
-    evidence,
-    scorer,
-    pos_features,
-    neg_features,
-    P0=0.5,
-    C_M=28,
-    C_FA=96,
-    C_retrieve=1,
-    max_steps=None,
-    use_cache=False,
-):
-    """Sequential Bayesian hallucination detector.
+def stop_cost(p_factual, c_miss, c_false_alarm):
+    # Miss: call a hallucination factual. False alarm: call factual hallucinated.
+    return min(
+        (1.0 - p_factual) * c_miss,
+        p_factual * c_false_alarm,
+    )
 
-    Test-time scoring is uncached by default so latency represents real NLI
-    inference. The method remains sequential because the stop/continue decision
-    after one evidence segment determines whether the next segment is evaluated.
+
+def cost_based_prediction(p_factual, c_miss, c_false_alarm):
+    factual_cost = (1.0 - p_factual) * c_miss
+    hallucination_cost = p_factual * c_false_alarm
+    return 1 if factual_cost < hallucination_cost else 0
+
+
+class BSEDetector:
+    """Wang et al. Bayesian sequential estimation over retrieved documents.
+
+    mode="official" reproduces the released repository's one-step look-ahead:
+    it averages the ten possible next posteriors and then evaluates stop risk.
+
+    mode="eq8" implements Equation 8 from the paper literally by weighting the
+    next-step stop risk by the predictive probability of each feature bucket.
+    Keeping both prevents us from silently changing the published baseline.
     """
-    P = P0
-    segments = split_text(evidence)
 
-    if max_steps is None:
-        max_steps = len(segments)
+    def __init__(
+        self,
+        pos_hist,
+        neg_hist,
+        *,
+        mode="official",
+        p0=0.5,
+        c_miss=28,
+        c_false_alarm=96,
+        c_retrieve=1,
+        max_docs=10,
+    ):
+        if mode not in {"official", "eq8"}:
+            raise ValueError("mode must be 'official' or 'eq8'")
+        self.pos_hist = list(pos_hist)
+        self.neg_hist = list(neg_hist)
+        self.mode = mode
+        self.p0 = float(p0)
+        self.c_miss = float(c_miss)
+        self.c_false_alarm = float(c_false_alarm)
+        self.c_retrieve = float(c_retrieve)
+        self.max_docs = int(max_docs)
+        self.total_pos = float(sum(self.pos_hist))
+        self.total_neg = float(sum(self.neg_hist))
 
-    total_pos = sum(pos_features)
-    total_neg = sum(neg_features)
-
-    used_steps = 0
-    history = []
-
-    for seg in segments[:max_steps]:
-        score = scorer.score_pairs(
-            [(seg, sentence)],
-            use_cache=use_cache,
-            write_cache=use_cache,
-        )[0]
-        bucket = discretize_score(score)
-
-        p_given_1 = pos_features[bucket] / total_pos
-        p_given_0 = neg_features[bucket] / total_neg
-
-        P = bayes_update(P, p_given_1, p_given_0)
-        used_steps += 1
-
-        continue_flag, stop_cost, continue_cost = should_continue(
-            P,
-            pos_features,
-            neg_features,
-            C_M=C_M,
-            C_FA=C_FA,
-            C_retrieve=C_retrieve,
+    def _bucket_likelihoods(self, bucket):
+        return (
+            self.pos_hist[bucket] / self.total_pos,
+            self.neg_hist[bucket] / self.total_neg,
         )
 
-        history.append(
-            {
-                "score": score,
-                "bucket": bucket,
-                "posterior": P,
-                "stop_cost": stop_cost,
-                "continue_cost": continue_cost,
-                "continue": continue_flag,
-            }
+    def _official_expected_next_posterior(self, p_factual):
+        values = []
+        for bucket in range(10):
+            p1, p0 = self._bucket_likelihoods(bucket)
+            values.append(bayes_update(p_factual, p1, p0))
+        return sum(values) / len(values)
+
+    def _eq8_expected_next_stop_risk(self, p_factual):
+        expected = 0.0
+        total_mass = 0.0
+        for bucket in range(10):
+            p1, p0 = self._bucket_likelihoods(bucket)
+            predictive = p_factual * p1 + (1.0 - p_factual) * p0
+            if predictive <= 0:
+                continue
+            next_p = bayes_update(p_factual, p1, p0)
+            expected += predictive * stop_cost(
+                next_p, self.c_miss, self.c_false_alarm
+            )
+            total_mass += predictive
+        if total_mass <= 0:
+            return stop_cost(p_factual, self.c_miss, self.c_false_alarm)
+        return expected / total_mass
+
+    def continue_cost(self, p_factual):
+        if self.mode == "official":
+            expected_p = self._official_expected_next_posterior(p_factual)
+            future_risk = stop_cost(
+                expected_p, self.c_miss, self.c_false_alarm
+            )
+        else:
+            future_risk = self._eq8_expected_next_stop_risk(p_factual)
+        return self.c_retrieve + future_risk
+
+    def should_continue(self, p_factual):
+        return stop_cost(
+            p_factual, self.c_miss, self.c_false_alarm
+        ) > self.continue_cost(p_factual)
+
+    def detect_subclaim(self, subclaim, scorer, *, use_cache=True):
+        p_factual = self.p0
+        documents_used = 0
+        nli_calls = 0
+
+        for document in subclaim.documents[: self.max_docs]:
+            # The released code checks stop-vs-continue before retrieving/scoring
+            # the next external document.
+            if not self.should_continue(p_factual):
+                break
+
+            score, segment_calls = scorer.score_document(
+                subclaim.text,
+                document.page_content,
+                use_cache=use_cache,
+                write_cache=use_cache,
+            )
+            documents_used += 1
+            nli_calls += segment_calls
+
+            bucket = discretize_score(score)
+            p1, p0 = self._bucket_likelihoods(bucket)
+            p_factual = bayes_update(p_factual, p1, p0)
+
+        return DetectionResult(
+            p_factual=float(p_factual),
+            prediction=cost_based_prediction(
+                p_factual, self.c_miss, self.c_false_alarm
+            ),
+            documents_used=documents_used,
+            nli_calls=nli_calls,
         )
 
-        if not continue_flag:
-            break
+    def detect_sentence(self, record, scorer, *, use_cache=True):
+        subclaim_results = [
+            self.detect_subclaim(subclaim, scorer, use_cache=use_cache)
+            for subclaim in record.subclaims
+        ]
 
-    return {
-        "posterior": P,
-        "prediction": 1 if P >= 0.5 else 0,
-        "steps_used": used_steps,
-        "nli_calls": used_steps,
-        "history": history,
-    }
+        # Equation 9: sentence factuality is the least-factual subclaim.
+        p_factual = min(result.p_factual for result in subclaim_results)
+        return DetectionResult(
+            p_factual=float(p_factual),
+            prediction=cost_based_prediction(
+                p_factual, self.c_miss, self.c_false_alarm
+            ),
+            documents_used=sum(r.documents_used for r in subclaim_results),
+            nli_calls=sum(r.nli_calls for r in subclaim_results),
+        )
