@@ -1,4 +1,6 @@
-from src.utils import split_text, get_entailment_score
+from tqdm import tqdm
+
+from src.utils import split_text
 
 
 def discretize_score(score):
@@ -19,11 +21,7 @@ def min_cost(P, C_M, C_FA):
 
 
 def expected_next_risk(P, pos_features, neg_features, C_M=28, C_FA=96):
-    """Expected Bayes risk after observing one additional evidence segment.
-
-    We integrate the future decision risk over all possible discretized
-    entailment-score buckets using the current predictive distribution.
-    """
+    """Expected Bayes risk after observing one additional evidence segment."""
     total_pos = sum(pos_features)
     total_neg = sum(neg_features)
 
@@ -60,28 +58,25 @@ def should_continue(P, pos_features, neg_features, C_M=28, C_FA=96, C_retrieve=1
     return stop_cost > continue_cost, stop_cost, continue_cost
 
 
-def build_nbc_features(data, tokenizer, model, max_samples=None):
-    """Estimate score-bucket likelihoods for factual and hallucinated classes."""
+def build_nbc_features(data, scorer, max_samples=None):
+    """Estimate score-bucket likelihoods using cached training NLI features."""
     pos_features = [0] * 10
     neg_features = [0] * 10
 
     subset = data if max_samples is None else data[:max_samples]
 
-    for idx, item in enumerate(subset, start=1):
-        print(f"Processing baseline training sample {idx}/{len(subset)}")
-
+    for item in tqdm(subset, desc="Building Bayesian training distributions", unit="sample"):
         sentence = item["sentence"]
         evidence = item["wiki_bio_text"]
         label = item["label"]
 
-        segments = split_text(evidence)
-        max_score = 0.0
-
-        for seg in segments:
-            score = get_entailment_score(seg, sentence, tokenizer, model)
-            max_score = max(max_score, score)
-
-        # Use the maximum evidence entailment score, not the final segment score.
+        scores, _ = scorer.score_evidence(
+            sentence,
+            evidence,
+            use_cache=True,
+            write_cache=True,
+        )
+        max_score = max(scores) if scores else 0.0
         bucket = discretize_score(max_score)
 
         if label == 1:
@@ -99,8 +94,7 @@ def build_nbc_features(data, tokenizer, model, max_samples=None):
 def predict_one_sentence_iterative(
     sentence,
     evidence,
-    tokenizer,
-    model,
+    scorer,
     pos_features,
     neg_features,
     P0=0.5,
@@ -108,12 +102,13 @@ def predict_one_sentence_iterative(
     C_FA=96,
     C_retrieve=1,
     max_steps=None,
+    use_cache=False,
 ):
     """Sequential Bayesian hallucination detector.
 
-    Evidence is processed segment-by-segment. After each observation, the
-    posterior is updated and the detector decides whether another evidence
-    evaluation is worth its retrieval/computation cost.
+    Test-time scoring is uncached by default so latency represents real NLI
+    inference. The method remains sequential because the stop/continue decision
+    after one evidence segment determines whether the next segment is evaluated.
     """
     P = P0
     segments = split_text(evidence)
@@ -128,7 +123,11 @@ def predict_one_sentence_iterative(
     history = []
 
     for seg in segments[:max_steps]:
-        score = get_entailment_score(seg, sentence, tokenizer, model)
+        score = scorer.score_pairs(
+            [(seg, sentence)],
+            use_cache=use_cache,
+            write_cache=use_cache,
+        )[0]
         bucket = discretize_score(score)
 
         p_given_1 = pos_features[bucket] / total_pos
