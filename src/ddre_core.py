@@ -8,9 +8,10 @@ from src.baseline_core import DetectionResult, cost_based_prediction
 class ULSIFDensityRatio:
     """Direct density-ratio estimator using unconstrained LSIF (uLSIF).
 
-    We estimate r(s) = p(s | factual) / p(s | hallucinated) directly from
-    continuous DeBERTa entailment scores, rather than estimating both class
-    densities separately or discretizing scores into ten bins.
+    Estimates r(s) = p(s | factual) / p(s | hallucinated) directly from
+    continuous DeBERTa entailment scores. Hyperparameters are selected with the
+    standard held-out uLSIF objective, using identical kernel centers for every
+    candidate within a fold so hyperparameter comparisons are reproducible.
     """
 
     def __init__(self, max_centers=100, random_state=42):
@@ -32,7 +33,8 @@ class ULSIFDensityRatio:
         squared = (x - centers.T) ** 2
         return np.exp(-squared / (2.0 * sigma * sigma))
 
-    def _choose_centers(self, factual_x, rng):
+    def _choose_centers(self, factual_x, seed):
+        rng = np.random.default_rng(seed)
         n = min(self.max_centers, len(factual_x))
         indices = rng.choice(len(factual_x), size=n, replace=False)
         return factual_x[indices].copy()
@@ -79,39 +81,47 @@ class ULSIFDensityRatio:
         h_indices = np.arange(len(hallucinated_x))
         rng.shuffle(f_indices)
         rng.shuffle(h_indices)
-        f_folds = np.array_split(f_indices, min(folds, len(f_indices)))
-        h_folds = np.array_split(h_indices, min(folds, len(h_indices)))
-        n_folds = min(len(f_folds), len(h_folds))
+        n_folds = min(folds, len(factual_x), len(hallucinated_x))
+        if n_folds < 2:
+            raise ValueError("uLSIF cross-validation requires at least two folds")
+        f_folds = np.array_split(f_indices, n_folds)
+        h_folds = np.array_split(h_indices, n_folds)
+
+        fold_data = []
+        for fold in range(n_folds):
+            f_val_idx = f_folds[fold]
+            h_val_idx = h_folds[fold]
+            f_train_idx = np.concatenate(
+                [f_folds[i] for i in range(n_folds) if i != fold]
+            )
+            h_train_idx = np.concatenate(
+                [h_folds[i] for i in range(n_folds) if i != fold]
+            )
+            f_train = factual_x[f_train_idx]
+            h_train = hallucinated_x[h_train_idx]
+            centers = self._choose_centers(
+                f_train, self.random_state + 1000 + fold
+            )
+            fold_data.append(
+                (
+                    f_train,
+                    h_train,
+                    factual_x[f_val_idx],
+                    hallucinated_x[h_val_idx],
+                    centers,
+                )
+            )
 
         best = None
         self.cv_table = []
-
         for sigma in sigma_grid:
             for lam in lambda_grid:
                 fold_scores = []
-                for fold in range(n_folds):
-                    f_val_idx = f_folds[fold]
-                    h_val_idx = h_folds[fold]
-                    f_train_idx = np.concatenate(
-                        [f_folds[i] for i in range(n_folds) if i != fold]
-                    )
-                    h_train_idx = np.concatenate(
-                        [h_folds[i] for i in range(n_folds) if i != fold]
-                    )
-                    f_train = factual_x[f_train_idx]
-                    h_train = hallucinated_x[h_train_idx]
-                    centers = self._choose_centers(f_train, rng)
+                for f_train, h_train, f_val, h_val, centers in fold_data:
                     alpha = self._solve(f_train, h_train, centers, sigma, lam)
                     fold_scores.append(
-                        self._objective(
-                            factual_x[f_val_idx],
-                            hallucinated_x[h_val_idx],
-                            centers,
-                            alpha,
-                            sigma,
-                        )
+                        self._objective(f_val, h_val, centers, alpha, sigma)
                     )
-
                 cv_score = float(np.mean(fold_scores))
                 row = {"sigma": sigma, "lambda": lam, "cv_objective": cv_score}
                 self.cv_table.append(row)
@@ -120,8 +130,7 @@ class ULSIFDensityRatio:
 
         self.sigma = float(best["sigma"])
         self.lam = float(best["lambda"])
-        final_rng = np.random.default_rng(self.random_state)
-        self.centers = self._choose_centers(factual_x, final_rng)
+        self.centers = self._choose_centers(factual_x, self.random_state)
         self.alpha = self._solve(
             factual_x,
             hallucinated_x,
@@ -140,13 +149,7 @@ class ULSIFDensityRatio:
 
 
 class DDREDetector:
-    """Sequential retrieval using directly estimated evidence density ratios.
-
-    Each retrieved document contributes a directly estimated likelihood ratio.
-    Under the same conditional-independence assumption used by the Bayesian NBC
-    baseline, log density ratios add across evidence. We stop once the posterior
-    exits a validation-selected uncertainty interval [lower, upper].
-    """
+    """Sequential retrieval using directly estimated evidence density ratios."""
 
     def __init__(
         self,
