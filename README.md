@@ -187,4 +187,4 @@ For debugging only, a smaller compatible model may be passed with `--model-name`
 
 ## Research status
 
-This is active research code. Numerical claims for the paper or SIAM CSE27 abstract should come only from a successful Wang-aligned full experiment and should be reported even if the DDRE hypothesis is not supported.
+This is active research code. Numerical claims for the paper should come only from a successful Wang-aligned full experiment and should be reported even if the DDRE hypothesis is not supported.
