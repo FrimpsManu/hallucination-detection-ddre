@@ -22,6 +22,8 @@ The proposed method does **not** receive easier evidence than the BSE baseline. 
 
 The comparison changes only the **statistical evidence-accumulation / stopping mechanism**.
 
+The Wang artifacts are pinned to source commit `3e8fc4d69fbff2c9060bdbb347f2bd94847f75ea` for reproducibility.
+
 ## Published BSE baselines
 
 Two BSE variants are retained deliberately:
@@ -41,7 +43,7 @@ The BSE setup follows the published defaults used in the released `run.sh`:
 - document segmentation: 400 words with 100-word overlap
 - NBC samples: 200 factual + 200 nonfactual examples
 
-For each external document, DeBERTa scores its text spans and the document score is the **maximum entailment score across spans**, matching Wang et al.
+For each external document, DeBERTa scores its text spans and the document score is the **maximum entailment score across spans**, matching Wang et al. The code also preserves the two slightly different discretization formulas used in the authors' released `NBC_feature.py` and `main.py`.
 
 ## Proposed method: uLSIF DDRE
 
@@ -51,7 +53,7 @@ We use unconstrained Least-Squares Importance Fitting (**uLSIF**) to estimate di
 
 `r(s) = p(s | factual) / p(s | hallucinated)`
 
-from the continuous DeBERTa entailment scores in the same Wang NBC factual/nonfactual evidence data used by BSE.
+from the continuous DeBERTa entailment scores in the same Wang NBC factual/nonfactual evidence data used by BSE. Kernel width and regularization are selected by deterministic cross-validation using the uLSIF held-out objective.
 
 Unlike BSE, DDRE does not:
 
@@ -67,7 +69,7 @@ This experiment measures **factuality detection**, not generation correction. Th
 
 ## Primary evaluation
 
-To stay comparable with Wang et al., the experiment reports:
+To stay comparable with Wang et al., the experiment reports the same trapezoidal PR-AUC convention used by their released code:
 
 - nonfactual sentence-level AUC-PR;
 - factual sentence-level AUC-PR;
@@ -84,10 +86,15 @@ We additionally report:
 - macro-F1;
 - MCC;
 - factual/nonfactual precision, recall, and F1;
+- scikit-learn average precision as a secondary PR metric;
 - total and average NLI span evaluations;
 - wall-clock execution time.
 
-The primary computational-overhead measures are **retrieved external documents** and **NLI span evaluations**, because they are hardware-independent. Cached wall-clock time is not presented as live model latency.
+The primary computational-overhead measures are **retrieved external documents** and **NLI span evaluations**, because they are hardware-independent.
+
+### Important retrieval interpretation
+
+The released Wang repository already contains the ordered web pages returned by their original retrieval process. Our experiment consumes those pages sequentially instead of issuing new live Bing searches. Therefore, “retrieved documents” means the number of external documents the decision policy chooses to consume from the released retrieval sequence. This makes BSE and DDRE reproducible on identical evidence. A later deployment experiment should additionally measure live search/network latency.
 
 ## Hypothesis test
 
@@ -125,6 +132,32 @@ data/wang/
 python -m pip install -r requirements.txt
 ```
 
+## Core regression tests
+
+Run the fast math/syntax checks before expensive NLI experiments:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+A GitHub Actions workflow also syntax-checks the research pipeline and runs these core tests on changes to `main`.
+
+## Baseline reproduction sanity check
+
+Before interpreting the new method, reproduce the released Wang BSE behavior on the full evidence set:
+
+```bash
+python scripts/reproduce_wang_baseline.py
+```
+
+This writes:
+
+```text
+results/wang_reproduction.json
+```
+
+The file stores both our reproduced metrics and the Table 1 reference values for `C_M=14, C_FA=24` and `C_M=28, C_FA=96`. Differences should be investigated before using DDRE-vs-BSE results in the paper.
+
 ## Smoke test
 
 After preparing the Wang data:
@@ -133,7 +166,7 @@ After preparing the Wang data:
 python main.py --smoke-test
 ```
 
-Smoke-test artifacts are debugging-only and ignored by Git. **Do not use them in the paper.**
+Smoke-test artifacts are debugging-only and ignored by Git. **Do not use them in the paper.** If the official large model is too slow for a pure code-path check, a smaller model can be supplied explicitly, but those numbers remain debugging-only.
 
 ## Full paper experiment
 
@@ -187,4 +220,4 @@ For debugging only, a smaller compatible model may be passed with `--model-name`
 
 ## Research status
 
-This is active research code. Numerical claims for the paper should come only from a successful Wang-aligned full experiment and should be reported even if the DDRE hypothesis is not supported.
+This is active research code. Numerical claims for the paper or SIAM CSE27 abstract should come only from a successful Wang-aligned full experiment and should be reported even if the DDRE hypothesis is not supported.
