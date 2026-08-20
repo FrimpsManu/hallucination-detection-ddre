@@ -3,6 +3,7 @@
 # environment freeze so the repository remains portable across machines.
 
 numpy>=2.0,<3.0
+scipy>=1.13,<2.0
 scikit-learn>=1.5,<2.0
 torch>=2.5,<3.0
 transformers>=4.45,<6.0
