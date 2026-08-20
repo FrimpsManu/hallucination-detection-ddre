@@ -1,76 +1,123 @@
-# Hallucination Detection with Density-Ratio Estimation
+# Retrieval-Aware Hallucination Detection with Direct Density-Ratio Estimation
 
-Research code for an in-progress study comparing sequential Bayesian evidence accumulation with a lightweight classifier-based density-ratio estimator for sentence-level hallucination detection.
+Research code for an in-progress paper extending Wang et al., **“Hallucination Detection for Generative Large Language Models by Bayesian Sequential Estimation” (EMNLP 2023)**.
 
 ## Research objective
 
-The objective of this work is to develop a retrieval-aware hallucination-detection framework that **reduces computational cost while improving factuality detection performance** relative to sequential Bayesian evidence accumulation. The broader motivation is to support more reliable, lower-latency LLM-based enterprise customer-service systems.
+The objective is to develop a retrieval-aware hallucination-detection framework that **reduces computational overhead while improving factuality-detection performance** relative to Bayesian sequential estimation (BSE). The application motivation is reliable, lower-latency LLM-based enterprise customer-service systems.
 
 ## Research question
 
-**Can a retrieval-aware density-ratio estimation framework reduce the computational cost of hallucination detection while improving factuality detection performance compared with sequential Bayesian evidence accumulation?**
+**Can retrieval-aware direct density-ratio estimation reduce the computational cost of hallucination detection while improving factuality-detection performance compared with Bayesian sequential estimation?**
 
-## Hypothesis
+## Controlled comparison
 
-We hypothesize that classifier-based density-ratio estimation can replace repeated sequential probability updates with a learned evidence-consistency decision mechanism, thereby:
+The proposed method does **not** receive easier evidence than the BSE baseline. Both methods use the same released experimental pipeline from Wang et al.:
 
-1. reducing computational cost, measured through inference latency, NLI evidence evaluations, and evidence-processing steps; and
-2. improving factuality detection performance, measured through hallucination precision, recall, F1, macro-F1, ROC-AUC, and PR-AUC.
+1. SelfCheckGPT generated sentences and human factuality labels;
+2. Wang et al.'s released decomposed subclaims;
+3. Wang et al.'s ordered retrieved web documents for each subclaim;
+4. the same DeBERTa-v3 NLI model and document-entailment scoring rule;
+5. the same separate positive/negative NBC evidence pairs used by the published baseline.
 
-### Interpretation of "factual accuracy"
+The comparison changes only the **statistical evidence-accumulation / stopping mechanism**.
 
-The current experiment evaluates **factuality detection**: whether a generated sentence is correctly classified as factual or hallucinated. Therefore, the paper should interpret improved "factual accuracy" at this stage as improved accuracy/reliability of factuality validation, not as direct evidence that the underlying LLM generates more factual responses. Demonstrating that the framework directly increases the factual accuracy of generated responses would require an additional end-to-end experiment in which detected hallucinations are rejected, regenerated, corrected, or otherwise prevented from reaching the user.
+## Published BSE baselines
 
-## Dataset and labels
+Two BSE variants are retained deliberately:
 
-The current experiments use the SelfCheckGPT dataset. Each generated sentence is treated as a sentence-level observation with its corresponding Wikipedia biography as evidence.
+- **`bse_official`** reproduces the behavior of the authors' released GitHub implementation, including its one-step look-ahead calculation.
+- **`bse_equation8`** implements Equation 8 from the EMNLP paper literally by weighting next-step stop risk by the predictive probability of each entailment-feature bin.
 
-- `1`: factual (`accurate` in the source annotations)
-- `0`: hallucinated (`minor inaccurate` or `major inaccurate`)
+This distinction matters because the released code and the written Equation 8 are not mathematically identical. We do not silently replace the published implementation with our preferred interpretation.
 
-Because multiple sentences may share the same biography/evidence, the experiment splits data by `wiki_bio_test_idx`, not by sentence position. This prevents sentences associated with the same biography from appearing in multiple data splits.
+The BSE setup follows the published defaults used in the released `run.sh`:
 
-## Experimental protocol
+- `P0 = 0.5`
+- `C_M = 28`
+- `C_FA = 96`
+- `C_retrieve = 1`
+- maximum retrieved documents per subclaim: `K = 10`
+- document segmentation: 400 words with 100-word overlap
+- NBC samples: 200 factual + 200 nonfactual examples
 
-The paper experiment uses a reproducible biography-level split:
+For each external document, DeBERTa scores its text spans and the document score is the **maximum entailment score across spans**, matching Wang et al.
 
-- 70% train
-- 15% validation
-- 15% test
-- random seed: 42
+## Proposed method: uLSIF DDRE
 
-The training set is used to estimate the Bayesian score distributions and fit the density-ratio model. The validation set is used to select the DDRE decision threshold. The test set remains untouched until final evaluation.
+The proposed method now uses a genuine **Direct Density Ratio Estimator**, not a classifier whose posterior is relabeled as a density ratio.
 
-## Methods
+We use unconstrained Least-Squares Importance Fitting (**uLSIF**) to estimate directly
 
-### Sequential Bayesian baseline
+`r(s) = p(s | factual) / p(s | hallucinated)`
 
-The baseline evaluates evidence segments sequentially, updates a posterior probability after each NLI observation, and uses expected Bayes risk to determine whether evaluating another evidence segment is worth the additional computation cost.
+from the continuous DeBERTa entailment scores in the same Wang NBC factual/nonfactual evidence data used by BSE.
 
-### Classifier-based density-ratio estimator
+Unlike BSE, DDRE does not:
 
-The proposed implementation extracts aggregate NLI evidence statistics and fits standardized logistic regression. Posterior odds are converted to the class-conditional density ratio
+- discretize the continuous entailment score into ten bins;
+- separately estimate both class-conditional densities; or
+- compute a Bayesian expected-risk look-ahead after every retrieved document.
 
-`r(x) = p(x | factual) / p(x | hallucinated)`
+For a sequence of retrieved documents, directly estimated evidence ratios are accumulated in log space. The method stops retrieving evidence when its factuality posterior leaves a validation-selected uncertainty interval. The lower and upper stopping thresholds are selected **only on validation passages**.
 
-using the empirical class-prior correction
+## What “improving factuality” means here
 
-`r(x) = [P(factual | x) / P(hallucinated | x)] * [P(hallucinated) / P(factual)]`.
+This experiment measures **factuality detection**, not generation correction. Therefore, an improvement means that the framework more accurately distinguishes factual from hallucinated generated content. It does not yet prove that the underlying LLM itself generates more factual text. A future end-to-end ECSS experiment can test whether rejecting, correcting, or regenerating detected hallucinations increases factual accuracy delivered to users.
 
-This repository therefore describes the current method precisely as **classifier-based density-ratio estimation**. A canonical direct estimator such as least-squares density-ratio estimation can be added as a separate method in later experiments rather than conflated with the present implementation.
+## Primary evaluation
 
-## Faster, resumable NLI feature computation
+To stay comparable with Wang et al., the experiment reports:
 
-NLI inference is the dominant cost in this experiment. The current pipeline therefore:
+- nonfactual sentence-level AUC-PR;
+- factual sentence-level AUC-PR;
+- sentence-level accuracy;
+- passage-level Pearson correlation;
+- passage-level Spearman correlation;
+- average retrieved documents per sentence;
+- average retrieved documents per subclaim.
 
-1. batches train/validation NLI inference instead of running one model call at a time;
-2. stores deterministic claim/evidence entailment scores in `results/nli_cache.sqlite`;
-3. commits the cache after every completed batch, so an interrupted run resumes rather than starting from zero;
-4. reuses the same cached training features for both the Bayesian and DDRE methods;
-5. keeps final test inference **uncached**, so reported latency still measures real model execution;
-6. reports progress with `tqdm` progress bars.
+We additionally report:
 
-The SQLite cache is local and ignored by Git because it can become large.
+- balanced PR-AUC;
+- balanced accuracy;
+- macro-F1;
+- MCC;
+- factual/nonfactual precision, recall, and F1;
+- total and average NLI span evaluations;
+- wall-clock execution time.
+
+The primary computational-overhead measures are **retrieved external documents** and **NLI span evaluations**, because they are hardware-independent. Cached wall-clock time is not presented as live model latency.
+
+## Hypothesis test
+
+The generated result file explicitly reports whether the primary hypothesis is supported on the held-out test data. The current predeclared rule requires DDRE to:
+
+1. retrieve fewer documents than `bse_official`;
+2. improve factual AUC-PR; and
+3. not reduce balanced PR-AUC.
+
+This prevents us from declaring success by selecting only favorable metrics after seeing the test results.
+
+## Data preparation
+
+The large Wang et al. artifacts are not duplicated in this repository. Download the authors' released data with:
+
+```bash
+python scripts/prepare_wang_data.py
+```
+
+This creates:
+
+```text
+data/wang/
+  NBC/
+  decomposed/
+  selfcheckgpt/
+  webpage/
+```
+
+`data/wang/` is ignored by Git. Please cite Wang et al. and follow the source repository's licensing/citation requirements when using those artifacts.
 
 ## Installation
 
@@ -78,78 +125,66 @@ The SQLite cache is local and ignored by Git because it can become large.
 python -m pip install -r requirements.txt
 ```
 
-## Running the experiment
+## Smoke test
 
-### Quick smoke test
-
-Use this first to verify that the full pipeline works:
+After preparing the Wang data:
 
 ```bash
 python main.py --smoke-test
 ```
 
-It uses small class-stratified subsets of the already leakage-safe train/validation/test splits. Smoke-test outputs are deliberately written to separate files:
+Smoke-test artifacts are debugging-only and ignored by Git. **Do not use them in the paper.**
 
-- `results/smoke_comparison_results.json`
-- `results/smoke_nbc_features.json`
-
-**Do not use smoke-test numbers in the paper.**
-
-### Full publication experiment
+## Full paper experiment
 
 ```bash
 python main.py
 ```
 
-The full run writes:
+The full experiment writes:
 
-- `results/comparison_results.json`
-- `results/nbc_features.json`
-
-### Batch-size tuning
-
-The default batch size is 16 on CUDA and 8 on CPU. If memory permits, a larger batch can improve throughput:
-
-```bash
-python main.py --batch-size 16
+```text
+results/latest_summary.json
+results/latest_predictions.csv
+results/latest_ddre_model.json
 ```
 
-or on a GPU with sufficient memory:
+By default, a successful full run automatically commits and pushes **only these three result artifacts** to the current GitHub branch. Raw Wang data and the NLI cache are never added. To disable automatic result pushing:
 
 ```bash
-python main.py --batch-size 32
+python main.py --no-push-results
 ```
 
-If an out-of-memory error occurs, reduce the batch size.
+## Persistent NLI cache
 
-### Resume behavior
+NLI scoring is expensive. Deterministic claim/span entailment scores are cached locally in:
 
-If a run is interrupted, rerun the same command. Already-computed train/validation NLI scores are loaded from the persistent SQLite cache and only missing scores are inferred.
+```text
+results/wang_nli_cache.sqlite
+```
 
-To intentionally discard the cache and recompute all train/validation NLI features:
+The cache is ignored by Git and reused across BSE/DDRE runs. Delete and rebuild it only when intentionally changing the NLI scoring protocol:
 
 ```bash
 python main.py --rebuild-cache
 ```
 
-## Evaluation
+For a hardware-dependent uncached timing run:
 
-The final test-set comparison reports:
+```bash
+python main.py --live-inference --no-push-results
+```
 
-- hallucination precision
-- hallucination recall
-- hallucination F1
-- macro F1
-- ROC-AUC
-- PR-AUC
-- 95% bootstrap confidence interval for hallucination F1
-- mean, p50, and p95 inference latency
-- total and average NLI calls per sample
+## Model fidelity and development speed
 
-The positive class for precision, recall, and F1 is **hallucinated (`0`)**.
+The default model matches the Wang et al. released implementation:
 
-These metrics directly test the two parts of the hypothesis: **detection quality** and **computational cost**.
+```text
+MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli
+```
 
-## Current status
+For debugging only, a smaller compatible model may be passed with `--model-name`, but **paper results should use the official large model unless the experimental protocol is intentionally changed and reported**.
 
-This is active research code. Numerical claims for the paper or conference abstract should be taken only from results regenerated with the corrected experiment pipeline on `main`.
+## Research status
+
+This is active research code. Numerical claims for the paper or SIAM CSE27 abstract should come only from a successful Wang-aligned full experiment and should be reported even if the DDRE hypothesis is not supported.
