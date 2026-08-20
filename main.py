@@ -1,532 +1,580 @@
 import argparse
+import csv
 import json
 import os
+import subprocess
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import torch
-from sklearn.model_selection import GroupShuffleSplit, train_test_split
-from tqdm import tqdm
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from src.baseline_core import build_nbc_features, predict_one_sentence_iterative
-from src.ddre_core import DDREModel
-from src.evaluation import (
-    bootstrap_metric_ci,
-    classification_metrics,
-    latency_metrics,
-)
+from src.baseline_core import BSEDetector, build_nbc_histograms
+from src.ddre_core import DDREDetector, ULSIFDensityRatio
+from src.evaluation import evaluate_detector, prediction_rows, summarize_method
 from src.utils import EntailmentScorer
+from src.wang_data import (
+    group_split_records,
+    load_nbc_pairs,
+    load_sentence_records,
+)
 
 
 RANDOM_STATE = 42
-MODEL_NAME = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+OFFICIAL_MODEL = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Hallucination detection experiment: Bayesian baseline vs density-ratio estimator."
+        description=(
+            "Paper experiment: Wang et al. Bayesian sequential estimation versus "
+            "retrieval-aware direct density-ratio estimation (uLSIF)."
+        )
     )
+    parser.add_argument("--data-root", default="data/wang")
+    parser.add_argument("--model-name", default=OFFICIAL_MODEL)
+    parser.add_argument("--cache-path", default="results/wang_nli_cache.sqlite")
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--rebuild-cache", action="store_true")
+    parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument(
-        "--smoke-test",
+        "--live-inference",
         action="store_true",
         help=(
-            "Run a small debugging experiment (80 train / 40 validation / 40 test). "
-            "Smoke-test results are written to separate files and must not be used in the paper."
+            "Bypass the NLI cache during final test evaluation. This is much slower "
+            "but gives hardware-dependent wall-clock inference measurements."
         ),
     )
+    parser.add_argument("--validation-fraction", type=float, default=0.20)
+    parser.add_argument("--c-miss", type=float, default=28.0)
+    parser.add_argument("--c-false-alarm", type=float, default=96.0)
+    parser.add_argument("--c-retrieve", type=float, default=1.0)
+    parser.add_argument("--p0", type=float, default=0.5)
+    parser.add_argument("--max-docs", type=int, default=10)
+    parser.add_argument("--nbc-per-class", type=int, default=200)
     parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=None,
-        help="NLI batch size for batched feature precomputation. Defaults to 16 on CUDA and 8 on CPU.",
+        "--quality-tolerance",
+        type=float,
+        default=0.005,
+        help="Validation tolerance when seeking a DDRE configuration that preserves BSE quality.",
     )
     parser.add_argument(
-        "--cache-path",
-        default="results/nli_cache.sqlite",
-        help="Persistent SQLite cache for deterministic NLI entailment scores.",
+        "--retrieval-penalty",
+        type=float,
+        default=0.05,
+        help="Fallback DDRE validation penalty on normalized document cost when no dominating threshold pair exists.",
     )
     parser.add_argument(
-        "--rebuild-cache",
+        "--no-push-results",
         action="store_true",
-        help="Delete the persistent NLI cache before running.",
+        help="Do not automatically commit/push full-run result artifacts to the current GitHub branch.",
     )
     return parser.parse_args()
 
 
-def load_data():
-    with open("data/processed/processed_sentences.json", "r", encoding="utf-8") as f:
-        return json.load(f)
+def clear_cache(cache_path):
+    for suffix in ("", "-wal", "-shm"):
+        path = Path(str(cache_path) + suffix)
+        if path.exists():
+            path.unlink()
 
 
-def group_train_val_test_split(
-    data,
-    train_size=0.70,
-    val_size=0.15,
-    test_size=0.15,
-    random_state=RANDOM_STATE,
+def stratified_subset(records, n_samples, seed):
+    if len(records) <= n_samples:
+        return list(records)
+    rng = np.random.default_rng(seed)
+    by_label = {0: [], 1: []}
+    for record in records:
+        by_label[record.label].append(record)
+
+    selected = []
+    for label in (0, 1):
+        target = max(1, int(round(n_samples * len(by_label[label]) / len(records))))
+        target = min(target, len(by_label[label]))
+        indices = rng.choice(len(by_label[label]), size=target, replace=False)
+        selected.extend(by_label[label][int(i)] for i in indices)
+
+    if len(selected) > n_samples:
+        rng.shuffle(selected)
+        selected = selected[:n_samples]
+    return sorted(selected, key=lambda r: (r.passage_index, r.sentence_index))
+
+
+def evaluate_quiet(detector, records, scorer):
+    results = [
+        detector.detect_sentence(record, scorer, use_cache=True)
+        for record in records
+    ]
+    return summarize_method(records, results), results
+
+
+def tune_ddre_thresholds(
+    ratio_estimator,
+    validation_records,
+    scorer,
+    baseline_metrics,
+    *,
+    p0,
+    c_miss,
+    c_false_alarm,
+    max_docs,
+    quality_tolerance,
+    retrieval_penalty,
 ):
-    """Split by biography ID so evidence from one biography cannot leak across sets."""
-    if not np.isclose(train_size + val_size + test_size, 1.0):
-        raise ValueError("train_size + val_size + test_size must equal 1.0")
+    """Select a retrieval stopping interval on validation data only.
 
-    groups = np.asarray([item["wiki_bio_test_idx"] for item in data])
-    indices = np.arange(len(data))
-
-    outer = GroupShuffleSplit(
-        n_splits=1,
-        train_size=train_size,
-        random_state=random_state,
-    )
-    train_idx, temp_idx = next(outer.split(indices, groups=groups))
-
-    temp_groups = groups[temp_idx]
-    relative_val_size = val_size / (val_size + test_size)
-
-    inner = GroupShuffleSplit(
-        n_splits=1,
-        train_size=relative_val_size,
-        random_state=random_state + 1,
-    )
-    val_rel_idx, test_rel_idx = next(inner.split(temp_idx, groups=temp_groups))
-
-    val_idx = temp_idx[val_rel_idx]
-    test_idx = temp_idx[test_rel_idx]
-
-    train_data = [data[i] for i in train_idx]
-    val_data = [data[i] for i in val_idx]
-    test_data = [data[i] for i in test_idx]
-
-    train_groups = {item["wiki_bio_test_idx"] for item in train_data}
-    val_groups = {item["wiki_bio_test_idx"] for item in val_data}
-    test_groups = {item["wiki_bio_test_idx"] for item in test_data}
-
-    assert train_groups.isdisjoint(val_groups)
-    assert train_groups.isdisjoint(test_groups)
-    assert val_groups.isdisjoint(test_groups)
-
-    metadata = {
-        "random_state": random_state,
-        "train_sentences": len(train_data),
-        "validation_sentences": len(val_data),
-        "test_sentences": len(test_data),
-        "train_biographies": len(train_groups),
-        "validation_biographies": len(val_groups),
-        "test_biographies": len(test_groups),
-        "train_bio_ids": sorted(train_groups),
-        "validation_bio_ids": sorted(val_groups),
-        "test_bio_ids": sorted(test_groups),
-    }
-
-    return train_data, val_data, test_data, metadata
-
-
-def stratified_subset(data, n_samples, random_state):
-    """Deterministic class-stratified subset used only for smoke testing."""
-    if len(data) <= n_samples:
-        return list(data)
-
-    labels = [item["label"] for item in data]
-    if len(set(labels)) < 2:
-        rng = np.random.default_rng(random_state)
-        chosen = rng.choice(len(data), size=n_samples, replace=False)
-        return [data[i] for i in sorted(chosen)]
-
-    _, subset = train_test_split(
-        data,
-        test_size=n_samples,
-        random_state=random_state,
-        stratify=labels,
-    )
-    return list(subset)
-
-
-def factual_prior(data):
-    if not data:
-        return 0.5
-    return sum(item["label"] == 1 for item in data) / len(data)
-
-
-def synchronize_if_cuda():
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-
-
-def run_baseline(eval_data, scorer, pos_features, neg_features, prior):
-    print("\nRunning sequential Bayesian baseline on the untouched test set...")
-
-    y_true = []
-    y_pred = []
-    hallucination_scores = []
-    sample_times = []
-    nli_calls = []
-    steps_used = []
-
-    progress = tqdm(eval_data, desc="Bayesian test inference", unit="sample")
-    for sample in progress:
-        synchronize_if_cuda()
-        start = time.perf_counter()
-        result = predict_one_sentence_iterative(
-            sentence=sample["sentence"],
-            evidence=sample["wiki_bio_text"],
-            scorer=scorer,
-            pos_features=pos_features,
-            neg_features=neg_features,
-            P0=prior,
-            C_M=28,
-            C_FA=96,
-            C_retrieve=1,
-            use_cache=False,
-        )
-        synchronize_if_cuda()
-        elapsed = time.perf_counter() - start
-
-        y_true.append(sample["label"])
-        y_pred.append(result["prediction"])
-        hallucination_scores.append(1.0 - result["posterior"])
-        sample_times.append(elapsed)
-        nli_calls.append(result["nli_calls"])
-        steps_used.append(result["steps_used"])
-        progress.set_postfix(steps=result["steps_used"])
-
-    class_results = classification_metrics(
-        y_true,
-        y_pred,
-        y_score=hallucination_scores,
-        positive_label=0,
-    )
-    class_results["f1_95_ci"] = bootstrap_metric_ci(
-        y_true,
-        y_pred,
-        metric="f1",
-        positive_label=0,
-        random_state=RANDOM_STATE,
-    )
-    lat_results = latency_metrics(
-        sample_times,
-        nli_calls=nli_calls,
-        avg_steps=float(np.mean(steps_used)) if steps_used else 0.0,
-    )
-
-    return {
-        **class_results,
-        **lat_results,
-        "positive_class": "hallucinated",
-        "initial_factual_prior": prior,
-        "latency_cache_used": False,
-    }
-
-
-def collect_ddre_predictions(ddre, data, scorer, threshold, *, use_cache):
-    y_true = []
-    y_pred = []
-    p_factual = []
-    density_ratios = []
-    sample_times = []
-    nli_calls = []
-
-    description = "DDRE cached validation" if use_cache else "DDRE test inference"
-    progress = tqdm(data, desc=description, unit="sample")
-
-    for sample in progress:
-        synchronize_if_cuda()
-        start = time.perf_counter()
-        result = ddre.predict_one(
-            sample["sentence"],
-            sample["wiki_bio_text"],
-            scorer,
-            threshold=threshold,
-            use_cache=use_cache,
-        )
-        synchronize_if_cuda()
-        elapsed = time.perf_counter() - start
-
-        y_true.append(sample["label"])
-        y_pred.append(result["prediction"])
-        p_factual.append(result["p_factual"])
-        density_ratios.append(result["density_ratio"])
-        sample_times.append(elapsed)
-        nli_calls.append(result["nli_calls"])
-
-    return {
-        "y_true": y_true,
-        "y_pred": y_pred,
-        "p_factual": p_factual,
-        "density_ratios": density_ratios,
-        "sample_times": sample_times,
-        "nli_calls": nli_calls,
-    }
-
-
-def select_ddre_threshold(ddre, val_data, scorer):
-    """Tune threshold on cached validation features only; test remains untouched."""
-    print("\nSelecting DDRE threshold on the validation set...")
-
-    validation = collect_ddre_predictions(
-        ddre,
-        val_data,
-        scorer,
-        threshold=0.5,
-        use_cache=True,
-    )
-
-    thresholds = np.round(np.arange(0.10, 0.91, 0.05), 2)
+    Primary rule: among configurations that preserve the BSE official baseline's
+    factual AUC-PR and balanced PR-AUC within a small tolerance, choose the one
+    using the fewest documents. If none qualifies, use a predeclared penalized
+    quality/cost objective and explicitly record that the dominance condition was
+    not achieved on validation data.
+    """
+    lower_grid = np.round(np.arange(0.05, 0.41, 0.05), 2)
+    upper_grid = np.round(np.arange(0.60, 0.96, 0.05), 2)
     candidates = []
 
-    for threshold in thresholds:
-        y_pred = [1 if p >= threshold else 0 for p in validation["p_factual"]]
-        metrics = classification_metrics(
-            validation["y_true"],
-            y_pred,
-            y_score=[1.0 - p for p in validation["p_factual"]],
-            positive_label=0,
-        )
-        candidates.append(
-            {
-                "threshold": float(threshold),
-                "hallucination_f1": metrics["f1_score"],
-                "hallucination_precision": metrics["precision"],
-                "hallucination_recall": metrics["recall"],
+    baseline_factual = baseline_metrics["factual"]["auc_pr"]
+    baseline_balanced = baseline_metrics["balanced_pr_auc"]
+
+    for lower in lower_grid:
+        for upper in upper_grid:
+            if lower >= upper:
+                continue
+            detector = DDREDetector(
+                ratio_estimator,
+                lower_threshold=float(lower),
+                upper_threshold=float(upper),
+                p0=p0,
+                c_miss=c_miss,
+                c_false_alarm=c_false_alarm,
+                max_docs=max_docs,
+            )
+            metrics, _ = evaluate_quiet(detector, validation_records, scorer)
+            avg_docs = metrics["efficiency"]["avg_retrieved_documents_per_sentence"]
+            normalized_docs = avg_docs / max(1.0, float(max_docs))
+            qualifies = (
+                metrics["factual"]["auc_pr"]
+                >= baseline_factual - quality_tolerance
+                and metrics["balanced_pr_auc"]
+                >= baseline_balanced - quality_tolerance
+            )
+            candidate = {
+                "lower": float(lower),
+                "upper": float(upper),
+                "factual_auc_pr": metrics["factual"]["auc_pr"],
+                "nonfactual_auc_pr": metrics["nonfactual"]["auc_pr"],
+                "balanced_pr_auc": metrics["balanced_pr_auc"],
+                "accuracy": metrics["accuracy"],
                 "macro_f1": metrics["macro_f1"],
+                "avg_documents": avg_docs,
+                "avg_nli_span_calls": metrics["efficiency"]["avg_nli_span_calls_per_sentence"],
+                "preserves_baseline_quality": bool(qualifies),
+                "fallback_objective": float(
+                    metrics["balanced_pr_auc"] - retrieval_penalty * normalized_docs
+                ),
             }
+            candidates.append(candidate)
+
+    feasible = [c for c in candidates if c["preserves_baseline_quality"]]
+    if feasible:
+        selected = min(
+            feasible,
+            key=lambda c: (
+                c["avg_documents"],
+                -c["balanced_pr_auc"],
+                -c["factual_auc_pr"],
+            ),
+        )
+        selection_rule = (
+            "minimum retrieval cost among validation configurations preserving "
+            "BSE-official factual and balanced PR-AUC within tolerance"
+        )
+    else:
+        selected = max(
+            candidates,
+            key=lambda c: (
+                c["fallback_objective"],
+                c["balanced_pr_auc"],
+                -c["avg_documents"],
+            ),
+        )
+        selection_rule = (
+            "fallback penalized balanced-PR-AUC/retrieval objective; no DDRE "
+            "threshold pair preserved BSE-official validation quality"
         )
 
-    best = max(
-        candidates,
-        key=lambda x: (
-            x["hallucination_f1"],
-            x["macro_f1"],
-            x["hallucination_precision"],
-        ),
+    return selected, candidates, selection_rule
+
+
+def hypothesis_comparison(ddre, baseline):
+    ddre_docs = ddre["efficiency"]["avg_retrieved_documents_per_sentence"]
+    base_docs = baseline["efficiency"]["avg_retrieved_documents_per_sentence"]
+    ddre_nli = ddre["efficiency"]["avg_nli_span_calls_per_sentence"]
+    base_nli = baseline["efficiency"]["avg_nli_span_calls_per_sentence"]
+
+    retrieval_reduction = (
+        1.0 - ddre_docs / base_docs if base_docs > 0 else None
     )
-
-    return best["threshold"], candidates
-
-
-def run_ddre(train_data, val_data, test_data, scorer):
-    print("\nTraining classifier-based density-ratio estimator from cached features...")
-    ddre = DDREModel(random_state=RANDOM_STATE)
-
-    train_start = time.perf_counter()
-    ddre.fit(train_data, scorer)
-    fit_time = time.perf_counter() - train_start
-
-    threshold, validation_candidates = select_ddre_threshold(
-        ddre,
-        val_data,
-        scorer,
+    nli_reduction = 1.0 - ddre_nli / base_nli if base_nli > 0 else None
+    factual_delta = ddre["factual"]["auc_pr"] - baseline["factual"]["auc_pr"]
+    nonfactual_delta = (
+        ddre["nonfactual"]["auc_pr"] - baseline["nonfactual"]["auc_pr"]
     )
+    balanced_delta = ddre["balanced_pr_auc"] - baseline["balanced_pr_auc"]
 
-    print(f"Selected DDRE threshold from validation set: {threshold:.2f}")
-
-    # The final test evaluation intentionally bypasses the cache. This keeps
-    # latency metrics honest while training/validation remain fast and resumable.
-    test = collect_ddre_predictions(
-        ddre,
-        test_data,
-        scorer,
-        threshold,
-        use_cache=False,
-    )
-
-    hallucination_scores = [1.0 - p for p in test["p_factual"]]
-    class_results = classification_metrics(
-        test["y_true"],
-        test["y_pred"],
-        y_score=hallucination_scores,
-        positive_label=0,
-    )
-    class_results["f1_95_ci"] = bootstrap_metric_ci(
-        test["y_true"],
-        test["y_pred"],
-        metric="f1",
-        positive_label=0,
-        random_state=RANDOM_STATE,
-    )
-
-    lat_results = latency_metrics(
-        test["sample_times"],
-        nli_calls=test["nli_calls"],
-        avg_steps=1.0,
+    supported = (
+        retrieval_reduction is not None
+        and retrieval_reduction > 0
+        and factual_delta > 0
+        and balanced_delta >= 0
     )
 
     return {
-        **class_results,
-        **lat_results,
-        "positive_class": "hallucinated",
-        "selected_threshold": threshold,
-        "validation_threshold_search": validation_candidates,
-        "classifier_fit_time_seconds_excluding_nli_precompute": fit_time,
-        "factual_training_prior": ddre.p_factual_prior,
-        "hallucinated_training_prior": ddre.p_hallucinated_prior,
-        "density_ratio_definition": "p(x|factual) / p(x|hallucinated)",
-        "estimator": "classifier-based density-ratio estimation via logistic regression with empirical-prior correction",
-        "latency_cache_used": False,
+        "primary_baseline": "bse_official",
+        "factual_auc_pr_delta": factual_delta,
+        "nonfactual_auc_pr_delta": nonfactual_delta,
+        "balanced_pr_auc_delta": balanced_delta,
+        "retrieved_documents_reduction_fraction": retrieval_reduction,
+        "nli_span_calls_reduction_fraction": nli_reduction,
+        "hypothesis_supported_on_test": bool(supported),
+        "support_rule": (
+            "DDRE must use fewer retrieved documents, improve factual AUC-PR, "
+            "and not reduce balanced PR-AUC versus BSE official."
+        ),
     }
 
 
-def clear_cache_files(cache_path):
-    for suffix in ("", "-wal", "-shm"):
-        path = cache_path + suffix
-        if os.path.exists(path):
-            os.remove(path)
+def write_csv(path, rows):
+    if not rows:
+        return
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def auto_push_results(paths):
+    """Commit/push only generated result artifacts; never raw data or NLI cache."""
+    try:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True
+        ).strip()
+        subprocess.run(["git", "add", *[str(path) for path in paths]], check=True)
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            check=False,
+        )
+        if staged.returncode == 0:
+            print("No result changes to commit.")
+            return {"pushed": False, "reason": "no changes"}
+
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        subprocess.run(
+            ["git", "commit", "-m", f"research: update full experiment results ({stamp})"],
+            check=True,
+        )
+        subprocess.run(["git", "push", "origin", branch], check=True)
+        print(f"Automatically pushed result artifacts to origin/{branch}.")
+        return {"pushed": True, "branch": branch}
+    except Exception as exc:
+        print(f"WARNING: experiment succeeded but automatic result push failed: {exc}")
+        return {"pushed": False, "reason": str(exc)}
 
 
 def main():
     args = parse_args()
-
     np.random.seed(RANDOM_STATE)
     torch.manual_seed(RANDOM_STATE)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(RANDOM_STATE)
 
-    os.makedirs("results", exist_ok=True)
-
+    Path("results").mkdir(exist_ok=True)
     if args.rebuild_cache:
-        clear_cache_files(args.cache_path)
+        clear_cache(args.cache_path)
 
-    print("Loading NLI model...")
+    print("Loading Wang et al. released experimental artifacts...")
+    records = load_sentence_records(args.data_root, strict=True)
+    validation_records, test_records, split_metadata = group_split_records(
+        records,
+        validation_fraction=args.validation_fraction,
+        random_state=RANDOM_STATE,
+    )
+
+    if args.smoke_test:
+        validation_records = stratified_subset(validation_records, 20, RANDOM_STATE)
+        test_records = stratified_subset(test_records, 40, RANDOM_STATE + 1)
+        print("*** SMOKE TEST: outputs are debugging-only and are not paper results. ***")
+
+    pos_pairs, neg_pairs = load_nbc_pairs(
+        args.data_root,
+        per_class=args.nbc_per_class,
+    )
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    batch_size = args.batch_size or (16 if torch.cuda.is_available() else 8)
-    print(f"Device: {device}")
-    print(f"Batched NLI precompute size: {batch_size}")
+    batch_size = args.batch_size or (8 if torch.cuda.is_available() else 2)
+    print(f"NLI model: {args.model_name}")
+    print(f"Device: {device}; batch size: {batch_size}")
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME).to(device)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    model = AutoModelForSequenceClassification.from_pretrained(args.model_name).to(device)
     model.eval()
-
     scorer = EntailmentScorer(
-        tokenizer=tokenizer,
-        model=model,
-        model_name=MODEL_NAME,
+        tokenizer,
+        model,
+        args.model_name,
         cache_path=args.cache_path,
         batch_size=batch_size,
     )
 
     try:
-        data = load_data()
-        train_data, val_data, test_data, split_metadata = group_train_val_test_split(data)
+        print("\nBuilding the published BSE NBC distributions from Wang's separate NBC data...")
+        pos_hist, neg_hist, factual_nbc_scores, hallucinated_nbc_scores = build_nbc_histograms(
+            pos_pairs,
+            neg_pairs,
+            scorer,
+        )
 
-        if args.smoke_test:
-            train_data = stratified_subset(train_data, 80, RANDOM_STATE)
-            val_data = stratified_subset(val_data, 40, RANDOM_STATE + 1)
-            test_data = stratified_subset(test_data, 40, RANDOM_STATE + 2)
-            print("\n*** SMOKE TEST MODE: results are for debugging only, not the paper. ***")
-
-        execution_sizes = {
-            "train_sentences_used": len(train_data),
-            "validation_sentences_used": len(val_data),
-            "test_sentences_used": len(test_data),
-        }
-
-        print("\nSplit summary:")
-        summary = {k: v for k, v in split_metadata.items() if not k.endswith("_ids")}
-        summary.update(execution_sizes)
-        print(json.dumps(summary, indent=2))
-
+        print("\nFitting genuine direct density-ratio estimator (uLSIF)...")
+        ratio_estimator = ULSIFDensityRatio(random_state=RANDOM_STATE).fit(
+            factual_nbc_scores,
+            hallucinated_nbc_scores,
+        )
         print(
-            "\nPrecomputing reusable NLI features for TRAIN + VALIDATION only. "
-            "This stage is batched and resumable."
+            f"uLSIF selected sigma={ratio_estimator.sigma:.6f}, "
+            f"lambda={ratio_estimator.lam:.6g}"
         )
-        synchronize_if_cuda()
-        cache_start = time.perf_counter()
-        cache_stats = scorer.warm_cache(train_data + val_data)
-        synchronize_if_cuda()
-        cache_precompute_time = time.perf_counter() - cache_start
-        cache_stats["elapsed_seconds_this_run"] = cache_precompute_time
-        print("Cache summary:")
-        print(json.dumps(cache_stats, indent=2))
 
-        print("\nBuilding Bayesian score distributions from cached training features...")
-        pos_features, neg_features = build_nbc_features(
-            train_data,
+        bse_official = BSEDetector(
+            pos_hist,
+            neg_hist,
+            mode="official",
+            p0=args.p0,
+            c_miss=args.c_miss,
+            c_false_alarm=args.c_false_alarm,
+            c_retrieve=args.c_retrieve,
+            max_docs=args.max_docs,
+        )
+        bse_eq8 = BSEDetector(
+            pos_hist,
+            neg_hist,
+            mode="eq8",
+            p0=args.p0,
+            c_miss=args.c_miss,
+            c_false_alarm=args.c_false_alarm,
+            c_retrieve=args.c_retrieve,
+            max_docs=args.max_docs,
+        )
+
+        print("\nEvaluating BSE official implementation on validation data...")
+        bse_val_metrics, _ = evaluate_detector(
+            bse_official,
+            validation_records,
             scorer,
-            max_samples=None,
+            description="BSE official validation",
+            use_cache=True,
         )
 
-        prior = factual_prior(train_data)
-
-        baseline_results = run_baseline(
-            test_data,
+        print("\nTuning DDRE stopping thresholds on validation data only...")
+        selected, threshold_table, selection_rule = tune_ddre_thresholds(
+            ratio_estimator,
+            validation_records,
             scorer,
-            pos_features,
-            neg_features,
-            prior,
+            bse_val_metrics,
+            p0=args.p0,
+            c_miss=args.c_miss,
+            c_false_alarm=args.c_false_alarm,
+            max_docs=args.max_docs,
+            quality_tolerance=args.quality_tolerance,
+            retrieval_penalty=args.retrieval_penalty,
+        )
+        print(
+            f"Selected DDRE interval: [{selected['lower']:.2f}, {selected['upper']:.2f}] "
+            f"({selection_rule})"
         )
 
-        ddre_results = run_ddre(
-            train_data,
-            val_data,
-            test_data,
+        ddre = DDREDetector(
+            ratio_estimator,
+            lower_threshold=selected["lower"],
+            upper_threshold=selected["upper"],
+            p0=args.p0,
+            c_miss=args.c_miss,
+            c_false_alarm=args.c_false_alarm,
+            max_docs=args.max_docs,
+        )
+
+        use_cache_for_test = not args.live_inference
+        print("\nFinal held-out test evaluation: BSE official...")
+        bse_official_metrics, bse_official_results = evaluate_detector(
+            bse_official,
+            test_records,
             scorer,
+            description="BSE official test",
+            use_cache=use_cache_for_test,
+        )
+        print("\nFinal held-out test evaluation: BSE Equation 8...")
+        bse_eq8_metrics, bse_eq8_results = evaluate_detector(
+            bse_eq8,
+            test_records,
+            scorer,
+            description="BSE Eq8 test",
+            use_cache=use_cache_for_test,
+        )
+        print("\nFinal held-out test evaluation: DDRE/uLSIF...")
+        ddre_metrics, ddre_results = evaluate_detector(
+            ddre,
+            test_records,
+            scorer,
+            description="DDRE uLSIF test",
+            use_cache=use_cache_for_test,
         )
 
-        comparison = {
-            "experiment_version": "paper-v2-batched-cache",
-            "run_mode": "smoke-test" if args.smoke_test else "full-publication-experiment",
-            "random_state": RANDOM_STATE,
-            "model_name": MODEL_NAME,
-            "device": str(device),
-            "batch_size": batch_size,
-            "nli_cache": {
-                "path": args.cache_path,
-                "training_validation_only": True,
-                "final_test_latency_uses_cache": False,
-                **cache_stats,
+        comparison = hypothesis_comparison(ddre_metrics, bse_official_metrics)
+        run_timestamp = datetime.now(timezone.utc).isoformat()
+
+        summary = {
+            "experiment_version": "wang-aligned-ddre-v1",
+            "run_timestamp_utc": run_timestamp,
+            "run_mode": "smoke-test" if args.smoke_test else "full-paper-experiment",
+            "research_question": (
+                "Can retrieval-aware direct density-ratio estimation reduce the "
+                "computational cost of hallucination detection while improving "
+                "factuality detection performance compared with Bayesian sequential estimation?"
+            ),
+            "source_baseline": {
+                "paper": "Hallucination Detection for Generative Large Language Models by Bayesian Sequential Estimation",
+                "authors": "Wang et al.",
+                "venue": "EMNLP 2023",
+                "repository": "https://github.com/xhwang22/HallucinationDetection",
+            },
+            "controlled_comparison": {
+                "same_selfcheckgpt_sentences": True,
+                "same_released_subclaims": True,
+                "same_released_retrieved_web_documents": True,
+                "same_nli_model": True,
+                "same_nbc_training_pairs": True,
+                "only_statistical_decision_mechanism_changes": True,
+            },
+            "config": {
+                "model_name": args.model_name,
+                "device": str(device),
+                "batch_size": batch_size,
+                "p0": args.p0,
+                "C_M": args.c_miss,
+                "C_FA": args.c_false_alarm,
+                "C_retrieve": args.c_retrieve,
+                "max_documents_per_subclaim": args.max_docs,
+                "nbc_examples_per_class": args.nbc_per_class,
+                "test_uses_nli_cache": use_cache_for_test,
+                "wall_clock_note": (
+                    "cached wall-clock is not a live model latency benchmark"
+                    if use_cache_for_test
+                    else "live uncached NLI inference"
+                ),
             },
             "split": split_metadata,
-            "execution_sizes": execution_sizes,
-            "label_definition": {
-                "1": "factual (SelfCheckGPT label == accurate)",
-                "0": "hallucinated (minor or major inaccuracy)",
+            "execution_sentences": {
+                "validation": len(validation_records),
+                "test": len(test_records),
             },
-            "baseline": baseline_results,
-            "ddre": ddre_results,
+            "bse_official_validation": bse_val_metrics,
+            "ddre": {
+                "estimator": "uLSIF direct density-ratio estimation",
+                "ratio_definition": "p(entailment_score | factual) / p(entailment_score | hallucinated)",
+                "sigma": ratio_estimator.sigma,
+                "lambda": ratio_estimator.lam,
+                "cv_table": ratio_estimator.cv_table,
+                "selected_lower_threshold": selected["lower"],
+                "selected_upper_threshold": selected["upper"],
+                "threshold_selection_rule": selection_rule,
+                "threshold_validation_table": threshold_table,
+            },
+            "test_metrics": {
+                "bse_official": bse_official_metrics,
+                "bse_equation8": bse_eq8_metrics,
+                "ddre_ulsif": ddre_metrics,
+            },
+            "hypothesis_test": comparison,
         }
 
         if args.smoke_test:
-            comparison_path = "results/smoke_comparison_results.json"
-            features_path = "results/smoke_nbc_features.json"
+            summary_path = Path("results/smoke_summary.json")
+            predictions_path = Path("results/smoke_predictions.csv")
+            model_path = Path("results/smoke_ddre_model.json")
         else:
-            comparison_path = "results/comparison_results.json"
-            features_path = "results/nbc_features.json"
+            summary_path = Path("results/latest_summary.json")
+            predictions_path = Path("results/latest_predictions.csv")
+            model_path = Path("results/latest_ddre_model.json")
 
-        with open(features_path, "w", encoding="utf-8") as f:
+        all_rows = []
+        all_rows.extend(prediction_rows("bse_official", test_records, bse_official_results))
+        all_rows.extend(prediction_rows("bse_equation8", test_records, bse_eq8_results))
+        all_rows.extend(prediction_rows("ddre_ulsif", test_records, ddre_results))
+
+        with summary_path.open("w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+        write_csv(predictions_path, all_rows)
+        with model_path.open("w", encoding="utf-8") as f:
             json.dump(
                 {
-                    "training_sentences": len(train_data),
-                    "factual_prior": prior,
-                    "pos_features": pos_features,
-                    "neg_features": neg_features,
+                    "estimator": "uLSIF",
+                    "sigma": ratio_estimator.sigma,
+                    "lambda": ratio_estimator.lam,
+                    "centers": ratio_estimator.centers.ravel().tolist(),
+                    "alpha": ratio_estimator.alpha.tolist(),
+                    "lower_threshold": selected["lower"],
+                    "upper_threshold": selected["upper"],
                 },
                 f,
                 indent=2,
             )
 
-        with open(comparison_path, "w", encoding="utf-8") as f:
-            json.dump(comparison, f, indent=2)
+        print("\n" + "=" * 88)
+        print("HELD-OUT TEST SUMMARY")
+        print("=" * 88)
+        for name, metrics in (
+            ("BSE official", bse_official_metrics),
+            ("BSE Eq.8", bse_eq8_metrics),
+            ("DDRE/uLSIF", ddre_metrics),
+        ):
+            print(name)
+            print(f"  Factual AUC-PR:       {metrics['factual']['auc_pr']:.4f}")
+            print(f"  Nonfactual AUC-PR:    {metrics['nonfactual']['auc_pr']:.4f}")
+            print(f"  Balanced PR-AUC:      {metrics['balanced_pr_auc']:.4f}")
+            print(f"  Accuracy:             {metrics['accuracy']:.4f}")
+            print(
+                f"  Avg retrieved docs:   "
+                f"{metrics['efficiency']['avg_retrieved_documents_per_sentence']:.3f}"
+            )
+            print(
+                f"  Avg NLI span calls:   "
+                f"{metrics['efficiency']['avg_nli_span_calls_per_sentence']:.3f}"
+            )
+        print("-" * 88)
+        print(
+            "Hypothesis supported on held-out test: "
+            f"{comparison['hypothesis_supported_on_test']}"
+        )
+        if comparison["retrieved_documents_reduction_fraction"] is not None:
+            print(
+                "DDRE document-cost reduction vs BSE official: "
+                f"{100 * comparison['retrieved_documents_reduction_fraction']:.2f}%"
+            )
+        print(
+            "DDRE factual AUC-PR delta vs BSE official: "
+            f"{comparison['factual_auc_pr_delta']:+.4f}"
+        )
+        print("=" * 88)
+        print(f"Summary: {summary_path}")
+        print(f"Predictions: {predictions_path}")
+        print(f"DDRE model: {model_path}")
 
-        print("\n" + "=" * 78)
-        print("FINAL TEST-SET COMPARISON")
-        print("=" * 78)
-        print("Sequential Bayesian baseline")
-        print(f"Hallucination Precision: {baseline_results['precision']:.4f}")
-        print(f"Hallucination Recall:    {baseline_results['recall']:.4f}")
-        print(f"Hallucination F1:        {baseline_results['f1_score']:.4f}")
-        print(f"Macro F1:                {baseline_results['macro_f1']:.4f}")
-        print(f"Avg NLI calls/sample:    {baseline_results['avg_nli_calls_per_sample']:.2f}")
-        print(f"P95 inference latency:   {baseline_results['p95_inference_time']:.4f}s")
-        print("-" * 78)
-        print("Classifier-based density-ratio estimator")
-        print(f"Threshold (validation):  {ddre_results['selected_threshold']:.2f}")
-        print(f"Hallucination Precision: {ddre_results['precision']:.4f}")
-        print(f"Hallucination Recall:    {ddre_results['recall']:.4f}")
-        print(f"Hallucination F1:        {ddre_results['f1_score']:.4f}")
-        print(f"Macro F1:                {ddre_results['macro_f1']:.4f}")
-        print(f"Avg NLI calls/sample:    {ddre_results['avg_nli_calls_per_sample']:.2f}")
-        print(f"P95 inference latency:   {ddre_results['p95_inference_time']:.4f}s")
-        print("=" * 78)
-        print(f"Results written to {comparison_path}")
+        if not args.smoke_test and not args.no_push_results:
+            push_status = auto_push_results(
+                [summary_path, predictions_path, model_path]
+            )
+            print(f"Result push status: {push_status}")
 
     finally:
         scorer.close()
