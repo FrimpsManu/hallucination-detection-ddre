@@ -5,11 +5,13 @@ import numpy as np
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import (
     accuracy_score,
+    auc,
     average_precision_score,
     balanced_accuracy_score,
     confusion_matrix,
     f1_score,
     matthews_corrcoef,
+    precision_recall_curve,
     precision_score,
     recall_score,
     roc_auc_score,
@@ -23,14 +25,14 @@ def _safe_corr(fn, x, y):
     return float(fn(x, y)[0])
 
 
-def summarize_method(records, results, elapsed_seconds=None):
-    """Paper-aligned quality and computational-overhead metrics.
+def _wang_pr_auc(y_binary, score):
+    """Match Wang released code: precision_recall_curve followed by auc(recall, precision)."""
+    precision, recall, _ = precision_recall_curve(y_binary, score)
+    return float(auc(recall, precision))
 
-    Wang et al. report sentence-level AUC-PR for both nonfactual and factual
-    detection, passage-level Pearson/Spearman correlation, accuracy, and the
-    number of retrieved documents. We retain those and add balanced metrics,
-    NLI-span counts, and latency for a stronger modern evaluation.
-    """
+
+def summarize_method(records, results, elapsed_seconds=None):
+    """Paper-aligned quality and computational-overhead metrics."""
     if len(records) != len(results):
         raise ValueError("records/results length mismatch")
 
@@ -55,13 +57,15 @@ def summarize_method(records, results, elapsed_seconds=None):
             "precision": float(precision_score(y_true, y_pred, pos_label=0, zero_division=0)),
             "recall": float(recall_score(y_true, y_pred, pos_label=0, zero_division=0)),
             "f1": float(f1_score(y_true, y_pred, pos_label=0, zero_division=0)),
-            "auc_pr": float(average_precision_score(nonfact_true, p_nonfact)),
+            "auc_pr": _wang_pr_auc(nonfact_true, p_nonfact),
+            "average_precision": float(average_precision_score(nonfact_true, p_nonfact)),
         },
         "factual": {
             "precision": float(precision_score(y_true, y_pred, pos_label=1, zero_division=0)),
             "recall": float(recall_score(y_true, y_pred, pos_label=1, zero_division=0)),
             "f1": float(f1_score(y_true, y_pred, pos_label=1, zero_division=0)),
-            "auc_pr": float(average_precision_score(factual_true, p_factual)),
+            "auc_pr": _wang_pr_auc(factual_true, p_factual),
+            "average_precision": float(average_precision_score(factual_true, p_factual)),
         },
     }
 
@@ -108,7 +112,6 @@ def summarize_method(records, results, elapsed_seconds=None):
             float(elapsed_seconds / len(records)) if records else 0.0
         )
 
-    # Useful single validation score: equal weight to factual and nonfactual PR-AUC.
     metrics["balanced_pr_auc"] = 0.5 * (
         metrics["nonfactual"]["auc_pr"] + metrics["factual"]["auc_pr"]
     )
