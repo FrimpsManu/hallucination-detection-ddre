@@ -44,8 +44,23 @@ def summarize_method(records, results, elapsed_seconds=None):
     nonfact_true = 1 - y_true
     factual_true = y_true
 
+    true_hallucinated = int(np.sum(y_true == 0))
+    true_factual = int(np.sum(y_true == 1))
+    predicted_hallucinated = int(np.sum(y_pred == 0))
+    predicted_factual = int(np.sum(y_pred == 1))
+
     metrics = {
         "sentences": int(len(records)),
+        "class_distribution": {
+            "hallucinated": true_hallucinated,
+            "factual": true_factual,
+            "factual_prevalence": float(true_factual / len(y_true)) if len(y_true) else 0.0,
+        },
+        "prediction_distribution": {
+            "hallucinated": predicted_hallucinated,
+            "factual": predicted_factual,
+            "predicted_factual_fraction": float(predicted_factual / len(y_pred)) if len(y_pred) else 0.0,
+        },
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
         "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
