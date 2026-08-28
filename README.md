@@ -41,9 +41,39 @@ The BSE setup follows the published defaults used in the released `run.sh`:
 - `C_retrieve = 1`
 - maximum retrieved documents per subclaim: `K = 10`
 - document segmentation: 400 words with 100-word overlap
-- NBC samples: 200 factual + 200 nonfactual examples
+- NBC samples: the paper's protocol is s = 200 factual and s = 200 nonfactual
+  examples. The released `NBC_positive.json` / `NBC_negative.json` do not
+  necessarily contain exactly that many, so the reproduction gate records the
+  paper protocol value and the number of pairs actually loaded, separately.
 
 For each external document, DeBERTa scores its text spans and the document score is the **maximum entailment score across spans**, matching Wang et al. The code also preserves the two slightly different discretization formulas used in the authors' released `NBC_feature.py` and `main.py`.
+
+### Deliberate fidelity choices
+
+These look like defects and are not. `tests/test_baseline_fidelity.py` pins each
+one against a literal transcription of the released code, so an "improvement"
+fails the suite.
+
+- **The stop/continue test runs before the first retrieval.** Released
+  `main.py:226-233` initializes `P = P0`, computes `stop_cost` and `search_cost`,
+  and only then enters the webpage loop. Because every subclaim starts at `P0`
+  and the NBC histograms are global, this first decision is a dataset-wide
+  constant: either every subclaim retrieves at least one document or none does.
+  `--probe` exists to surface that, not to change it.
+- **The one-step look-ahead averages the ten bins uniformly.** Released
+  `main.py:127-140` does not weight bins by predictive probability. That is the
+  documented divergence from the paper's Equation 8, which is why
+  `bse_equation8` is a separate secondary mode.
+- **Two different discretizers.** `NBC_feature.py:34` uses `int(score/10)` while
+  `main.py:249` uses `int((score-0.1)/10)`. Both are preserved.
+- **Documents are truncated to their first 4000 words.** This is Wang's own
+  `utils.py:78`, not a choice made here.
+
+The one deliberate deviation is that `split_text` removes the duplicate tail
+span the released implementation can emit. Document scores are the maximum over
+spans, so deduplication cannot change any score or decision; it only lowers the
+reported NLI span count relative to the released implementation. Both detectors
+are affected identically.
 
 ## Proposed method: uLSIF DDRE
 
@@ -140,23 +170,73 @@ Run the fast math/syntax checks before expensive NLI experiments:
 python -m unittest discover -s tests -v
 ```
 
+These cover the core BSE/uLSIF math (`tests/test_core_math.py`), the reproduction
+gate's tolerance and verdict logic (`tests/test_reproduction_gate.py`), and
+fidelity against literal transcriptions of Wang's released code
+(`tests/test_baseline_fidelity.py`). The segmentation tests skip when torch is
+not installed, since `src/utils.py` imports it at module scope.
+
 A GitHub Actions workflow also syntax-checks the research pipeline and runs these core tests on changes to `main`.
 
-## Baseline reproduction sanity check
+## Gate 1: baseline reproduction
 
-Before interpreting the new method, reproduce the released Wang BSE behavior on the full evidence set:
+`bse_official` is only usable as a baseline if this repository reproduces the
+released implementation. That is checked, not assumed.
+
+### Cheap probe first
+
+```bash
+python scripts/reproduce_wang_baseline.py --probe
+```
+
+Scores only the released NBC evidence pairs (a few hundred NLI calls), builds
+the Laplace-smoothed histograms, and reports whether `bse_official` retrieves
+any documents at all under each published cost setting. Writes
+`results/wang_probe.json` and exits non-zero if either configuration would
+retrieve nothing. Run this before committing to the full pass.
+
+### Full gate
 
 ```bash
 python scripts/reproduce_wang_baseline.py
 ```
 
-This writes:
+Reproduces both published cost settings on the complete released evidence set,
+compares every metric against Table 1, and writes `results/wang_reproduction.json`
+containing the published value, the reproduced value, the signed delta, the
+relative delta, and a PASS/WARN/FAIL status per metric, plus full provenance
+(repository commit, Wang data commit, Python and library versions, device, batch
+size, model and tokenizer configuration, scoring/cache version). Exits non-zero
+on FAIL.
 
-```text
-results/wang_reproduction.json
-```
+Table 1's evidence count is the **average number of retrieved documents per
+sentence**. Average documents per subclaim is reported as a diagnostic and is
+never compared against Table 1.
 
-The file stores both our reproduced metrics and the Table 1 reference values for `C_M=14, C_FA=24` and `C_M=28, C_FA=96`. Differences should be investigated before using DDRE-vs-BSE results in the paper.
+### Predeclared tolerances
+
+Frozen in `src/reproduction_gate.py` before any run and pinned by a test, so a
+run can be shown to have been judged against them rather than the other way
+round. They are not sampling-error bands: this reproduces one fixed experiment
+on one fixed dataset, so they express how much environmental drift — dependency
+versions, batching, device numerics — we are willing to call "reproduced".
+
+| Metric | PASS | WARN | FAIL |
+|---|---|---|---|
+| Factual AUC-PR | abs delta <= 0.01 | <= 0.03 | > 0.03 |
+| Nonfactual AUC-PR | abs delta <= 0.01 | <= 0.03 | > 0.03 |
+| Accuracy | abs delta <= 0.01 | <= 0.03 | > 0.03 |
+| Passage Pearson | abs delta <= 0.02 | <= 0.05 | > 0.05 |
+| Passage Spearman | abs delta <= 0.02 | <= 0.05 | > 0.05 |
+| Evidence Num (docs/sentence) | rel delta <= 5% | <= 10% | > 10% |
+
+Zero retrieval is an unconditional FAIL regardless of every other metric: a
+baseline that consumes no evidence returns `P = P0` for every sentence and
+cannot serve as a comparator. The overall verdict is the worst status across all
+metrics and both cost configurations. A WARN exits zero, but Gate 2 must not
+begin until the discrepancy has a written explanation. A FAIL is a stop
+condition — investigate before running or interpreting any DDRE comparison, and
+do not change baseline control flow to make the gate pass.
 
 ## Smoke test
 
