@@ -4,10 +4,13 @@ These run without torch, scipy, or sklearn so they execute in the minimal CI
 environment.
 """
 
+import pathlib
 import unittest
 
 from src.reproduction_gate import (
     COMPARED_METRICS,
+    OFFICIAL_NLI_MODEL,
+    PINNED_WANG_SOURCE_COMMIT,
     PUBLISHED_TABLE1,
     STATUS_FAIL,
     STATUS_PASS,
@@ -18,6 +21,8 @@ from src.reproduction_gate import (
     compare_metric,
     evaluate_configuration,
     evaluate_gate,
+    evaluate_protocol_preconditions,
+    format_preconditions,
     format_report,
     worst_status,
 )
@@ -35,6 +40,30 @@ def perfect_reproduction(config_name):
 
 def perfect_gate_input():
     return {name: perfect_reproduction(name) for name in PUBLISHED_TABLE1}
+
+
+def provenance(
+    model_name=OFFICIAL_NLI_MODEL,
+    source_commit=PINNED_WANG_SOURCE_COMMIT,
+    source_available=True,
+    truncation_matches=True,
+    tokenizer_limit=512,
+):
+    """A provenance block of the shape src.provenance.collect_provenance returns."""
+    return {
+        "wang_data": {"available": source_available, "source_commit": source_commit},
+        "nli_model": {
+            "model_name": model_name,
+            "nli_max_length_configured": 512,
+            "tokenizer_model_max_length": tokenizer_limit,
+            "truncation_matches_wang": truncation_matches,
+            "truncation_note": "note",
+        },
+    }
+
+
+def passing_preconditions():
+    return evaluate_protocol_preconditions(provenance())
 
 
 class TestFrozenTolerances(unittest.TestCase):
@@ -160,7 +189,7 @@ class TestConfigurationVerdict(unittest.TestCase):
 
 class TestGateVerdict(unittest.TestCase):
     def test_exact_reproduction_of_both_configurations_passes(self):
-        report = evaluate_gate(perfect_gate_input())
+        report = evaluate_gate(perfect_gate_input(), passing_preconditions())
         self.assertEqual(report["overall_verdict"], STATUS_PASS)
         self.assertEqual(report["failed_metrics"], [])
         self.assertEqual(report["warned_metrics"], [])
@@ -169,19 +198,19 @@ class TestGateVerdict(unittest.TestCase):
     def test_overall_verdict_is_worst_across_configurations(self):
         payload = perfect_gate_input()
         payload["CM_14_CFA_24"]["accuracy"] = 0.8024 - 0.02  # WARN band
-        report = evaluate_gate(payload)
+        report = evaluate_gate(payload, passing_preconditions())
         self.assertEqual(report["overall_verdict"], STATUS_WARN)
         self.assertIn("CM_14_CFA_24.accuracy", report["warned_metrics"])
 
         payload["CM_28_CFA_96"]["factual_auc_pr"] = 0.6196 - 0.10  # FAIL band
-        report = evaluate_gate(payload)
+        report = evaluate_gate(payload, passing_preconditions())
         self.assertEqual(report["overall_verdict"], STATUS_FAIL)
         self.assertIn("CM_28_CFA_96.factual_auc_pr", report["failed_metrics"])
 
     def test_zero_retrieval_in_one_configuration_fails_the_gate(self):
         payload = perfect_gate_input()
         payload["CM_14_CFA_24"]["total_retrieved_documents"] = 0
-        report = evaluate_gate(payload)
+        report = evaluate_gate(payload, passing_preconditions())
         self.assertEqual(report["overall_verdict"], STATUS_FAIL)
         self.assertIn("CM_14_CFA_24.zero_retrieval", report["failed_metrics"])
 
@@ -189,10 +218,10 @@ class TestGateVerdict(unittest.TestCase):
         payload = perfect_gate_input()
         del payload["CM_14_CFA_24"]
         with self.assertRaises(KeyError):
-            evaluate_gate(payload)
+            evaluate_gate(payload, passing_preconditions())
 
     def test_report_renders(self):
-        text = format_report(evaluate_gate(perfect_gate_input()))
+        text = format_report(evaluate_gate(perfect_gate_input(), passing_preconditions()))
         self.assertIn("OVERALL VERDICT: PASS", text)
         self.assertIn("evidence_num_per_sentence", text)
         self.assertIn("average_retrieved_documents_per_sentence", text)
@@ -200,3 +229,119 @@ class TestGateVerdict(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProtocolPreconditions(unittest.TestCase):
+    def test_official_model_constant(self):
+        self.assertEqual(
+            OFFICIAL_NLI_MODEL,
+            "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
+        )
+
+    def test_pinned_commit_matches_the_download_script(self):
+        """The gate and scripts/prepare_wang_data.py must pin the same commit."""
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "prepare_wang_data",
+            str(pathlib.Path(__file__).resolve().parents[1] / "scripts" / "prepare_wang_data.py"),
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.SOURCE_COMMIT, PINNED_WANG_SOURCE_COMMIT)
+
+    def test_all_preconditions_satisfied(self):
+        result = evaluate_protocol_preconditions(provenance())
+        self.assertEqual(result["official_model"], STATUS_PASS)
+        self.assertEqual(result["wang_source_commit"], STATUS_PASS)
+        self.assertEqual(result["truncation_equivalence"], STATUS_PASS)
+        self.assertEqual(result["overall"], STATUS_PASS)
+        self.assertEqual(result["failures"], [])
+
+    def test_non_official_model_fails(self):
+        result = evaluate_protocol_preconditions(
+            provenance(model_name="cross-encoder/nli-deberta-v3-small")
+        )
+        self.assertEqual(result["official_model"], STATUS_FAIL)
+        self.assertEqual(result["overall"], STATUS_FAIL)
+        self.assertIn("official_model", result["failures"])
+
+    def test_missing_source_provenance_fails(self):
+        result = evaluate_protocol_preconditions(
+            provenance(source_available=False, source_commit=None)
+        )
+        self.assertEqual(result["wang_source_commit"], STATUS_FAIL)
+        self.assertEqual(result["overall"], STATUS_FAIL)
+
+    def test_different_source_commit_fails(self):
+        result = evaluate_protocol_preconditions(provenance(source_commit="deadbeef" * 5))
+        self.assertEqual(result["wang_source_commit"], STATUS_FAIL)
+        self.assertEqual(result["overall"], STATUS_FAIL)
+
+    def test_truncation_mismatch_fails(self):
+        result = evaluate_protocol_preconditions(
+            provenance(truncation_matches=False, tokenizer_limit=10**30)
+        )
+        self.assertEqual(result["truncation_equivalence"], STATUS_FAIL)
+        self.assertEqual(result["overall"], STATUS_FAIL)
+
+    def test_unknown_truncation_fails_like_a_mismatch(self):
+        # None means the tokenizer limit could not be read. Equivalence is
+        # unproven, which disqualifies the run just as a known mismatch does.
+        result = evaluate_protocol_preconditions(
+            provenance(truncation_matches=None, tokenizer_limit=None)
+        )
+        self.assertEqual(result["truncation_equivalence"], STATUS_FAIL)
+        self.assertEqual(result["overall"], STATUS_FAIL)
+
+    def test_empty_provenance_fails_every_check(self):
+        result = evaluate_protocol_preconditions({})
+        self.assertEqual(result["overall"], STATUS_FAIL)
+        self.assertEqual(len(result["failures"]), 3)
+
+    def test_several_failures_are_all_reported(self):
+        result = evaluate_protocol_preconditions(
+            provenance(model_name="other", source_available=False, truncation_matches=None)
+        )
+        self.assertEqual(
+            sorted(result["failures"]),
+            ["official_model", "truncation_equivalence", "wang_source_commit"],
+        )
+        self.assertEqual(len(result["failure_messages"]), 3)
+
+    def test_preconditions_render(self):
+        text = format_preconditions(evaluate_protocol_preconditions(provenance(model_name="x")))
+        self.assertIn("official_model", text)
+        self.assertIn("cannot be a formal Gate 1 result", text)
+
+
+class TestPreconditionsGateTheVerdict(unittest.TestCase):
+    def test_perfect_metrics_still_fail_when_preconditions_fail(self):
+        for bad in (
+            provenance(model_name="cross-encoder/nli-deberta-v3-small"),
+            provenance(source_available=False, source_commit=None),
+            provenance(truncation_matches=None, tokenizer_limit=None),
+        ):
+            report = evaluate_gate(
+                perfect_gate_input(), evaluate_protocol_preconditions(bad)
+            )
+            self.assertEqual(report["overall_verdict"], STATUS_FAIL)
+            self.assertFalse(report["formal_gate1_run"])
+            self.assertIn("protocol_preconditions", report["failed_metrics"])
+
+    def test_passing_preconditions_allow_a_formal_pass(self):
+        report = evaluate_gate(perfect_gate_input(), passing_preconditions())
+        self.assertEqual(report["overall_verdict"], STATUS_PASS)
+        self.assertTrue(report["formal_gate1_run"])
+
+    def test_preconditions_are_recorded_in_the_report(self):
+        report = evaluate_gate(perfect_gate_input(), passing_preconditions())
+        self.assertEqual(report["protocol_preconditions"]["overall"], STATUS_PASS)
+        self.assertIn("checks", report["protocol_preconditions"])
+
+    def test_failed_preconditions_are_visible_in_the_rendered_report(self):
+        report = evaluate_gate(
+            perfect_gate_input(),
+            evaluate_protocol_preconditions(provenance(model_name="x")),
+        )
+        self.assertIn("NOT A FORMAL GATE 1 RUN", format_report(report))

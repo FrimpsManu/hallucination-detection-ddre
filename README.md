@@ -213,6 +213,35 @@ Table 1's evidence count is the **average number of retrieved documents per
 sentence**. Average documents per subclaim is reported as a diagnostic and is
 never compared against Table 1.
 
+### Protocol preconditions
+
+Tolerances judge how close the reproduction landed. Preconditions judge whether
+the run was a reproduction at all. Both output files carry a
+`protocol_preconditions` block:
+
+| Check | Requirement |
+|---|---|
+| `official_model` | The NLI model is exactly `MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli`. |
+| `wang_source_commit` | `data/wang/SOURCE.json` records the pinned commit `3e8fc4d69fbff2c9060bdbb347f2bd94847f75ea`. |
+| `truncation_equivalence` | `tokenizer.model_max_length` matches the configured `max_length`, so this repository's explicit truncation is equivalent to Wang's `truncation=True`. |
+
+If any check fails, `overall` is FAIL, the run is stamped
+`formal_gate1_run: false`, and the gate verdict is forced to FAIL however well
+the metrics agree — agreement on the wrong model, the wrong source data, or
+under a different truncation regime is not reproduction. A non-official
+`--model-name` therefore remains usable for diagnostics but can never produce a
+Gate 1 PASS.
+
+A failed `truncation_equivalence` aborts both modes immediately, before any NLI
+inference, since every entailment score would otherwise be computed over
+different inputs than the released implementation used. An unreadable tokenizer
+limit fails the same way as a known mismatch: equivalence is unproven either
+way.
+
+These checks detect a protocol mismatch. They never repair one. **Do not edit
+`src/utils.py` to make a precondition pass** — investigate the mismatch at its
+source.
+
 ### Predeclared tolerances
 
 Frozen in `src/reproduction_gate.py` before any run and pinned by a test, so a
