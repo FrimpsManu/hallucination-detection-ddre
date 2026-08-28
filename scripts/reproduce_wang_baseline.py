@@ -40,16 +40,22 @@ from src.baseline_core import BSEDetector, build_nbc_histograms, stop_cost
 from src.evaluation import evaluate_detector
 from src.provenance import collect_provenance
 from src.reproduction_gate import (
+    OFFICIAL_NLI_MODEL,
     PUBLISHED_TABLE1,
     STATUS_FAIL,
+    STATUS_PASS,
     evaluate_gate,
+    evaluate_protocol_preconditions,
+    format_preconditions,
     format_report,
 )
 from src.utils import SCORE_VERSION, EntailmentScorer
 from src.wang_data import load_nbc_pairs, load_sentence_records
 
 
-OFFICIAL_MODEL = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
+# Single source of truth lives in src/reproduction_gate.py, where the protocol
+# preconditions are enforced.
+OFFICIAL_MODEL = OFFICIAL_NLI_MODEL
 
 # Wang et al. report sampling s = 200 factual and s = 200 nonfactual examples.
 # The released NBC files do not necessarily contain exactly that many; the
@@ -165,7 +171,7 @@ def reproduced_metrics_for_gate(metrics):
     }
 
 
-def run_probe(provenance, nbc_metadata, pos_hist, neg_hist):
+def run_probe(provenance, preconditions, nbc_metadata, pos_hist, neg_hist):
     print("\nProbing first-iteration retrieval behaviour of bse_official...")
     configurations = {}
     any_zero = False
@@ -204,6 +210,8 @@ def run_probe(provenance, nbc_metadata, pos_hist, neg_hist):
             "flow retrieve any evidence on the real NBC histograms?"
         ),
         "provenance": provenance,
+        "protocol_preconditions": preconditions,
+        "formal_gate1_run": preconditions["overall"] == STATUS_PASS,
         "nbc": nbc_metadata,
         "nbc_histograms_laplace_smoothed": {
             "positive": list(pos_hist),
@@ -213,6 +221,8 @@ def run_probe(provenance, nbc_metadata, pos_hist, neg_hist):
         "any_configuration_retrieves_nothing": bool(any_zero),
     }
 
+    # Preconditions were printed by main() moments ago; they are carried in the
+    # JSON report rather than reprinted here.
     print("\n" + "=" * 100)
     print("BASELINE RETRIEVAL PROBE")
     print("=" * 100)
@@ -238,12 +248,21 @@ def run_probe(provenance, nbc_metadata, pos_hist, neg_hist):
             "before running the full gate. Do NOT change bse_official control flow to fix it."
         )
     else:
-        print("RESULT: both configurations retrieve evidence. Proceed to the full gate.")
+        print("RESULT: both configurations retrieve evidence.")
+    if preconditions["overall"] != STATUS_PASS:
+        print(
+            "PROTOCOL: preconditions failed "
+            f"({', '.join(preconditions['failures'])}); this run cannot support a "
+            "formal Gate 1 PASS."
+        )
+    elif not any_zero:
+        print("Proceed to the full gate.")
     print("=" * 100)
-    return report, (1 if any_zero else 0)
+    failed = any_zero or preconditions["overall"] != STATUS_PASS
+    return report, (1 if failed else 0)
 
 
-def run_gate(scorer, provenance, nbc_metadata, pos_hist, neg_hist, records):
+def run_gate(scorer, provenance, preconditions, nbc_metadata, pos_hist, neg_hist, records):
     total_subclaims = sum(len(record.subclaims) for record in records)
     reproduced = {}
     raw_metrics = {}
@@ -268,7 +287,7 @@ def run_gate(scorer, provenance, nbc_metadata, pos_hist, neg_hist, records):
         raw_metrics[name] = metrics
         reproduced[name] = reproduced_metrics_for_gate(metrics)
 
-    gate_report = evaluate_gate(reproduced)
+    gate_report = evaluate_gate(reproduced, preconditions)
 
     report = {
         "mode": "gate",
@@ -311,8 +330,43 @@ def main():
             model=model,
             repo_root=PROJECT_ROOT,
         )
-        truncation_note = provenance["nli_model"]["truncation_note"]
-        print(f"\nTokenizer/model probe: {truncation_note}")
+        preconditions = evaluate_protocol_preconditions(provenance)
+        print()
+        print(format_preconditions(preconditions))
+
+        default_output = (
+            "results/wang_probe.json" if args.probe else "results/wang_reproduction.json"
+        )
+        output_path = Path(args.output or default_output)
+
+        # A truncation mismatch means every entailment score would be computed
+        # over different inputs than the released implementation used, so there
+        # is nothing worth scoring. Abort before spending any NLI compute. The
+        # fix belongs at the source of the mismatch, never in src/utils.py to
+        # make this check pass.
+        if preconditions["truncation_equivalence"] != STATUS_PASS:
+            print(
+                "\nABORTING: truncation equivalence to Wang's truncation=True is not "
+                "established.\n"
+                + "\n".join(
+                    f"  - {message}"
+                    for message in preconditions["failure_messages"]
+                )
+                + "\nNo NLI inference was run. Investigate the mismatch; do not edit "
+                "src/utils.py to silence this check."
+            )
+            report = {
+                "mode": "probe" if args.probe else "gate",
+                "aborted": True,
+                "abort_reason": "truncation_equivalence precondition failed",
+                "provenance": provenance,
+                "protocol_preconditions": preconditions,
+                "formal_gate1_run": False,
+            }
+            with output_path.open("w", encoding="utf-8") as handle:
+                json.dump(report, handle, indent=2)
+            print(f"\nWritten to {output_path}")
+            return 1
 
         pos_pairs, neg_pairs, nbc_metadata = load_nbc_with_counts(
             args.data_root, args.nbc_per_class
@@ -327,17 +381,20 @@ def main():
 
         if args.probe:
             report, exit_code = run_probe(
-                provenance, nbc_metadata, pos_hist, neg_hist
+                provenance, preconditions, nbc_metadata, pos_hist, neg_hist
             )
-            default_output = "results/wang_probe.json"
         else:
             records = load_sentence_records(args.data_root, strict=True)
             report, exit_code = run_gate(
-                scorer, provenance, nbc_metadata, pos_hist, neg_hist, records
+                scorer,
+                provenance,
+                preconditions,
+                nbc_metadata,
+                pos_hist,
+                neg_hist,
+                records,
             )
-            default_output = "results/wang_reproduction.json"
 
-        output_path = Path(args.output or default_output)
         with output_path.open("w", encoding="utf-8") as handle:
             json.dump(report, handle, indent=2)
         print(f"\nWritten to {output_path}")

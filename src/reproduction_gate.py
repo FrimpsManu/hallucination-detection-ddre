@@ -46,6 +46,27 @@ sequential stopping amplifies small discretization differences.
 
 A FAIL is a stop condition: do not proceed to DDRE work on a baseline that
 fails. A WARN exits zero but must have a written explanation before Gate 2.
+
+Protocol preconditions
+----------------------
+Tolerances judge how close the reproduction landed. Preconditions judge whether
+the run was a reproduction at all. A run that scores a different model, against
+different source data, or under a different truncation regime is measuring
+something else, and no metric agreement can make it a valid Gate 1 result.
+
+Three preconditions must hold for a formal Gate 1 run:
+
+``official_model``
+    The NLI model is exactly the one Wang et al. released against.
+``wang_source_commit``
+    ``data/wang/SOURCE.json`` records the pinned released data commit.
+``truncation_equivalence``
+    The tokenizer limit matches the configured ``max_length``, so this
+    repository's explicit truncation is equivalent to Wang's ``truncation=True``.
+
+These detect a protocol mismatch; they never repair one. In particular, a
+truncation mismatch must be investigated at its source, not silenced by
+changing ``src/utils.py`` to match the check.
 """
 
 from collections import OrderedDict
@@ -56,6 +77,14 @@ STATUS_WARN = "WARN"
 STATUS_FAIL = "FAIL"
 
 _SEVERITY = {STATUS_PASS: 0, STATUS_WARN: 1, STATUS_FAIL: 2}
+
+# The only NLI model a formal Gate 1 run may use: the model named in Wang's
+# released main.py argparse default.
+OFFICIAL_NLI_MODEL = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
+
+# The released-artifact commit the experiment is pinned to. Kept in sync with
+# SOURCE_COMMIT in scripts/prepare_wang_data.py; a test asserts they agree.
+PINNED_WANG_SOURCE_COMMIT = "3e8fc4d69fbff2c9060bdbb347f2bd94847f75ea"
 
 TABLE1_EVIDENCE_NUM_DEFINITION = "average_retrieved_documents_per_sentence"
 TABLE1_EVIDENCE_NUM_SOURCE = (
@@ -116,6 +145,114 @@ TOLERANCES = {
     "spearman": {"kind": "absolute", "pass": 0.02, "warn": 0.05},
     "evidence_num_per_sentence": {"kind": "relative", "pass": 0.05, "warn": 0.10},
 }
+
+
+def evaluate_protocol_preconditions(provenance):
+    """Check the protocol preconditions for a formal Gate 1 run.
+
+    Takes the provenance block produced by :func:`src.provenance.collect_provenance`
+    and returns flat PASS/FAIL statuses plus per-check detail. Reports the
+    mismatch; never repairs it.
+    """
+    nli = (provenance or {}).get("nli_model") or {}
+    wang = (provenance or {}).get("wang_data") or {}
+    checks = []
+
+    observed_model = nli.get("model_name")
+    model_ok = observed_model == OFFICIAL_NLI_MODEL
+    checks.append(
+        {
+            "name": "official_model",
+            "status": STATUS_PASS if model_ok else STATUS_FAIL,
+            "expected": OFFICIAL_NLI_MODEL,
+            "observed": observed_model,
+            "message": (
+                "NLI model matches the released Wang reproduction model."
+                if model_ok
+                else (
+                    f"NLI model is {observed_model!r}, not the official "
+                    f"{OFFICIAL_NLI_MODEL!r}. A different model may be useful for "
+                    "diagnostics but cannot produce a valid Gate 1 PASS."
+                )
+            ),
+        }
+    )
+
+    observed_commit = wang.get("source_commit")
+    commit_ok = bool(wang.get("available")) and observed_commit == PINNED_WANG_SOURCE_COMMIT
+    if not wang.get("available"):
+        commit_message = (
+            "data/wang/SOURCE.json is missing or unreadable, so the source data "
+            "cannot be verified. Run scripts/prepare_wang_data.py."
+        )
+    elif commit_ok:
+        commit_message = "Wang source data matches the pinned released commit."
+    else:
+        commit_message = (
+            f"Wang source data records commit {observed_commit!r}, not the pinned "
+            f"{PINNED_WANG_SOURCE_COMMIT!r}. The reproduction would run against "
+            "different artifacts."
+        )
+    checks.append(
+        {
+            "name": "wang_source_commit",
+            "status": STATUS_PASS if commit_ok else STATUS_FAIL,
+            "expected": PINNED_WANG_SOURCE_COMMIT,
+            "observed": observed_commit,
+            "message": commit_message,
+        }
+    )
+
+    # None means the tokenizer limit could not be read, which is as
+    # disqualifying as a known mismatch: equivalence is unproven either way.
+    truncation_ok = nli.get("truncation_matches_wang") is True
+    checks.append(
+        {
+            "name": "truncation_equivalence",
+            "status": STATUS_PASS if truncation_ok else STATUS_FAIL,
+            "expected": nli.get("nli_max_length_configured"),
+            "observed": nli.get("tokenizer_model_max_length"),
+            "message": nli.get("truncation_note")
+            or (
+                "Truncation equivalence to Wang's truncation=True is unproven. "
+                "Investigate the mismatch; do not change src/utils.py to silence "
+                "this check."
+            ),
+        }
+    )
+
+    statuses = {check["name"]: check["status"] for check in checks}
+    overall = worst_status(statuses.values())
+    return {
+        "official_model": statuses["official_model"],
+        "wang_source_commit": statuses["wang_source_commit"],
+        "truncation_equivalence": statuses["truncation_equivalence"],
+        "overall": overall,
+        "checks": checks,
+        "failures": [c["name"] for c in checks if c["status"] != STATUS_PASS],
+        "failure_messages": [
+            c["message"] for c in checks if c["status"] != STATUS_PASS
+        ],
+    }
+
+
+def format_preconditions(preconditions):
+    """Render the protocol preconditions as a fixed-width block."""
+    lines = ["-" * 100, "PROTOCOL PRECONDITIONS", "-" * 100]
+    for check in preconditions["checks"]:
+        lines.append(f"  {check['name']:<26}{check['status']}")
+        if check["status"] != STATUS_PASS:
+            lines.append(f"      expected: {check['expected']!r}")
+            lines.append(f"      observed: {check['observed']!r}")
+            lines.append(f"      {check['message']}")
+    lines.append(f"  {'overall':<26}{preconditions['overall']}")
+    if preconditions["overall"] != STATUS_PASS:
+        lines.append(
+            "  This run cannot be a formal Gate 1 result. Fix the protocol "
+            "mismatch at its source."
+        )
+    lines.append("-" * 100)
+    return "\n".join(lines)
 
 
 def worst_status(statuses):
@@ -224,8 +361,14 @@ def evaluate_configuration(config_name, reproduced, published=None, tolerances=N
     }
 
 
-def evaluate_gate(reproduced_by_configuration, published=None, tolerances=None):
-    """Evaluate every configuration and return the overall gate report."""
+def evaluate_gate(reproduced_by_configuration, preconditions, published=None, tolerances=None):
+    """Evaluate every configuration and return the overall gate report.
+
+    ``preconditions`` is required. A run whose protocol preconditions do not all
+    pass is not a formal Gate 1 run, and its overall verdict is forced to FAIL
+    however well the metrics agree: agreement on the wrong model, the wrong
+    source data, or under a different truncation regime is not reproduction.
+    """
     published = PUBLISHED_TABLE1 if published is None else published
     tolerances = TOLERANCES if tolerances is None else tolerances
 
@@ -253,7 +396,14 @@ def evaluate_gate(reproduced_by_configuration, published=None, tolerances=None):
 
     overall = worst_status([result["verdict"] for result in configurations.values()])
 
+    formal = preconditions["overall"] == STATUS_PASS
+    if not formal:
+        overall = STATUS_FAIL
+        failed.append("protocol_preconditions")
+
     return {
+        "protocol_preconditions": preconditions,
+        "formal_gate1_run": formal,
         "table1_evidence_num_definition": TABLE1_EVIDENCE_NUM_DEFINITION,
         "table1_evidence_num_source": TABLE1_EVIDENCE_NUM_SOURCE,
         "tolerances": tolerances,
@@ -277,6 +427,8 @@ def format_report(gate_report):
     lines.append("WANG ET AL. BASELINE REPRODUCTION GATE")
     lines.append("=" * 100)
     lines.append(f"Table 1 evidence-count definition: {gate_report['table1_evidence_num_definition']}")
+    lines.append("")
+    lines.append(format_preconditions(gate_report["protocol_preconditions"]))
     lines.append("")
 
     for config_name, result in gate_report["configurations"].items():
@@ -312,6 +464,11 @@ def format_report(gate_report):
         lines.append("")
 
     lines.append("-" * 100)
+    if not gate_report["formal_gate1_run"]:
+        lines.append(
+            "NOT A FORMAL GATE 1 RUN: protocol preconditions failed "
+            f"({', '.join(gate_report['protocol_preconditions']['failures'])})."
+        )
     lines.append(f"OVERALL VERDICT: {gate_report['overall_verdict']}")
     lines.append(gate_report["verdict_interpretation"])
     if gate_report["failed_metrics"]:
