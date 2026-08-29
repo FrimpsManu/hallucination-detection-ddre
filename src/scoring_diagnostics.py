@@ -26,12 +26,27 @@ result cannot be re-interpreted after the fact:
     one-decimal values disagree, but no discretized bucket disagrees. Nothing
     downstream of the discretizer can see the difference *on this sample*.
 ``MATERIAL``
-    Any token-id mismatch, any bucket disagreement, or any raw delta beyond
-    :data:`MATERIAL_MAX_ABS_DELTA`. The arms are not interchangeable.
+    Any token-id mismatch, any decision-level bucket disagreement, or any raw
+    delta beyond :data:`MATERIAL_MAX_ABS_DELTA`. The arms are not
+    interchangeable.
 
 Bucket disagreement is the sharpest of these, because the BSE update consumes
-only the bucket. A score difference that never crosses a bucket edge cannot
+only a bucket. A score difference that never crosses a bucket edge cannot
 change a posterior, a stopping decision, or an evidence count.
+
+Which bucket, though, is the whole point. BSE consumes exactly two:
+
+* the NBC bucket of each evidence pair, which builds the histograms
+  (released ``NBC_feature.py:34``); and
+* the bucket of a document's **maximum** span score (released
+  ``main.py:237-250``) -- the runtime loop scores every span, keeps the largest
+  entailment score, and discretizes only that.
+
+Individual span buckets are *not* consumed. A non-maximal span can cross a
+bucket edge and leave the document score, the posterior, the stopping decision,
+and the evidence count all untouched. Span-bucket disagreement is reported as a
+diagnostic statistic but never decides materiality; only NBC buckets and
+document-max buckets do.
 """
 
 import hashlib
@@ -306,11 +321,25 @@ def _first_divergence(left, right):
 # Verdict
 # --------------------------------------------------------------------------
 
-def classify_comparison(token_agreement, deltas, one_decimal, buckets):
+def classify_comparison(token_agreement, deltas, one_decimal, decision_buckets):
     """Apply the predeclared materiality bands to one arm-vs-arm comparison.
 
-    ``buckets`` is an iterable of bucket-disagreement blocks (NBC and document
-    discretizers are both consulted, since the released code uses two).
+    ``decision_buckets`` must contain only the bucket-disagreement blocks that
+    a BSE decision actually consumes:
+
+    * the NBC bucket of each evidence pair (released ``NBC_feature.py:34``),
+      which builds the histograms; and
+    * the bucket of each document's *maximum* span score
+      (released ``main.py:237-250``).
+
+    Individual span buckets are deliberately excluded. Wang's runtime loop
+    scores every span of a document, keeps the maximum entailment score, and
+    discretizes only that maximum before the Bayesian update. A non-maximal
+    span can therefore cross a bucket edge with no effect whatsoever on the
+    document score, the posterior, the stopping decision, or the evidence
+    count. Counting span buckets here would report a difference the baseline
+    cannot see. Span-bucket disagreement remains a useful diagnostic statistic
+    and is reported, but it never decides materiality.
     """
     reasons = []
     status = STATUS_EQUIVALENT
@@ -321,9 +350,12 @@ def classify_comparison(token_agreement, deltas, one_decimal, buckets):
         )
         status = STATUS_MATERIAL
 
-    bucket_total = sum(block["count"] for block in buckets)
+    bucket_total = sum(block["count"] for block in decision_buckets)
     if bucket_total > 0:
-        reasons.append(f"{bucket_total} discretized bucket disagreement(s)")
+        reasons.append(
+            f"{bucket_total} decision-level bucket disagreement(s) "
+            "(NBC pairs and/or document-max scores)"
+        )
         status = STATUS_MATERIAL
 
     max_absolute = deltas.get("max_absolute")
@@ -413,6 +445,174 @@ def overall_verdict(a1_vs_a3, a3_vs_a2, a1_vs_a2):
         "a1_vs_a3": a1_vs_a3["classification"]["status"],
         "a3_vs_a2": a3_vs_a2["classification"]["status"],
         "a1_vs_a2": a1_vs_a2["classification"]["status"],
+    }
+
+
+# --------------------------------------------------------------------------
+# Cost accounting
+# --------------------------------------------------------------------------
+
+def forward_call_accounting(n_pairs, production_batch_size):
+    """Separate pair evaluations from actual model forward calls.
+
+    Every arm evaluates all ``n_pairs`` pairs, so the three arms perform
+    ``3 * n_pairs`` pair evaluations. They do not perform ``3 * n_pairs``
+    forward passes: A1 and A3 run at batch size 1, but A2 batches, so it issues
+    only ``ceil(n_pairs / B)`` calls. Conflating the two overstates the cost of
+    the diagnostic by roughly a third.
+    """
+    batch = max(1, int(production_batch_size))
+    a1 = int(n_pairs)
+    a3 = int(n_pairs)
+    a2 = -(-int(n_pairs) // batch) if n_pairs else 0
+    return {
+        "pairs": int(n_pairs),
+        "production_batch_size": batch,
+        "pair_evaluations": 3 * int(n_pairs),
+        "forward_calls": {"A1": a1, "A3": a3, "A2": a2, "total": a1 + a3 + a2},
+    }
+
+
+# --------------------------------------------------------------------------
+# Arm comparison
+# --------------------------------------------------------------------------
+
+def slice_scores(scores, indices):
+    return [scores[i] for i in indices]
+
+
+def _document_address(document):
+    return {
+        "passage_index": document["passage_index"],
+        "sentence_index": document["sentence_index"],
+        "subclaim_index": document["subclaim_index"],
+        "document_index": document["document_index"],
+    }
+
+
+def _attach_addresses(block, addresses):
+    """Rewrite a disagreement block's examples to name the document."""
+    for example in block.get("examples", []):
+        index = example.get("index")
+        if index is not None and 0 <= index < len(addresses):
+            example.update(addresses[index])
+    return block
+
+
+def compare_arms(name, left, right, units, document_units):
+    """Full elementwise comparison of two arms over the shared pair list.
+
+    Materiality is decided by the buckets BSE consumes -- NBC pairs and each
+    document's maximum span score -- never by individual span buckets. See
+    :func:`classify_comparison`.
+    """
+    left_scores = left["scores"]
+    right_scores = right["scores"]
+
+    tokens = token_id_agreement(left["token_ids"], right["token_ids"])
+    deltas = delta_stats(left_scores, right_scores)
+    one_decimal = one_decimal_disagreements(left_scores, right_scores)
+
+    nbc_indices = [unit["pair_index"] for unit in units]
+    nbc_left = slice_scores(left_scores, nbc_indices)
+    nbc_right = slice_scores(right_scores, nbc_indices)
+    nbc_buckets = bucket_disagreements(nbc_left, nbc_right, nbc_bucket)
+
+    span_indices = [i for document in document_units for i in document["pair_indices"]]
+    span_left = slice_scores(left_scores, span_indices)
+    span_right = slice_scores(right_scores, span_indices)
+    span_buckets = bucket_disagreements(span_left, span_right, document_bucket)
+
+    # Document level: the maximum over spans is what Wang's loop discretizes.
+    addresses = []
+    left_maxima = []
+    right_maxima = []
+    argmax_rows = []
+    for document in document_units:
+        indices = document["pair_indices"]
+        if not indices:
+            continue
+        left_spans = slice_scores(left_scores, indices)
+        right_spans = slice_scores(right_scores, indices)
+        left_max = max(left_spans)
+        right_max = max(right_spans)
+        addresses.append(_document_address(document))
+        left_maxima.append(left_max)
+        right_maxima.append(right_max)
+        left_argmax = left_spans.index(left_max)
+        right_argmax = right_spans.index(right_max)
+        if left_argmax != right_argmax:
+            argmax_rows.append(
+                dict(
+                    _document_address(document),
+                    span_count=document["span_count"],
+                    left_argmax_span=left_argmax,
+                    right_argmax_span=right_argmax,
+                    left_max=left_max,
+                    right_max=right_max,
+                )
+            )
+
+    document_max_buckets = _attach_addresses(
+        bucket_disagreements(left_maxima, right_maxima, document_bucket), addresses
+    )
+    document_max_one_decimal = _attach_addresses(
+        one_decimal_disagreements(left_maxima, right_maxima), addresses
+    )
+
+    classification = classify_comparison(
+        tokens, deltas, one_decimal, [nbc_buckets, document_max_buckets]
+    )
+
+    return {
+        "comparison": name,
+        "token_ids": tokens,
+        "score_deltas_all_pairs": deltas,
+        "one_decimal_disagreements": one_decimal,
+        "nbc": {
+            "pairs": len(nbc_indices),
+            "deltas": delta_stats(nbc_left, nbc_right),
+            "bucket_disagreements": nbc_buckets,
+            "decision_level": True,
+        },
+        "spans": {
+            "pairs": len(span_indices),
+            "deltas": delta_stats(span_left, span_right),
+            "bucket_disagreements": span_buckets,
+            "decision_level": False,
+            "note": (
+                "Diagnostic only. BSE discretizes the maximum span score of a "
+                "document, not each span, so a non-maximal span crossing a "
+                "bucket edge changes nothing downstream. Materiality is decided "
+                "by documents.max_score_bucket_disagreements instead."
+            ),
+        },
+        "documents": {
+            "documents": len(left_maxima),
+            "deltas": delta_stats(left_maxima, right_maxima),
+            "max_score_one_decimal_disagreements": document_max_one_decimal,
+            "max_score_bucket_disagreements": document_max_buckets,
+            "decision_level": True,
+            "argmax_span_disagreements": {
+                "count": len(argmax_rows),
+                "rate": (len(argmax_rows) / len(left_maxima)) if left_maxima else 0.0,
+                "examples": argmax_rows[:10],
+                "note": (
+                    "A moved argmax is only observable downstream if it also "
+                    "changes the maximum score itself."
+                ),
+            },
+        },
+        "classification": classification,
+    }
+
+
+def arm_histograms(scores, units):
+    positive = [scores[u["pair_index"]] for u in units if u["polarity"] == "positive"]
+    negative = [scores[u["pair_index"]] for u in units if u["polarity"] == "negative"]
+    return {
+        "positive": laplace_histogram(positive),
+        "negative": laplace_histogram(negative),
     }
 
 

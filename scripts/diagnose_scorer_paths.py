@@ -45,18 +45,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.scoring_diagnostics import (  # noqa: E402
-    bucket_disagreements,
-    classify_comparison,
+    arm_histograms,
+    compare_arms,
     content_digest,
-    delta_stats,
-    document_bucket,
-    laplace_histogram,
-    nbc_bucket,
-    one_decimal_disagreements,
+    forward_call_accounting,
     overall_verdict,
-    round_one_decimal,
     sample_documents,
-    token_id_agreement,
     token_type_id_assessment,
 )
 
@@ -210,6 +204,9 @@ def run_repository_arm(tokenizer, model, model_name, pairs, batch_size, cache_di
         "scores": scores,
         "token_ids": token_ids,
         "elapsed_seconds": elapsed,
+        # One tokenizer call per batch, so this is the observed number of model
+        # forward calls -- reported alongside the estimate rather than assumed.
+        "forward_calls": len(recorder.calls),
         "entailment_index": scorer.entailment_index,
         "tokenizer_keys": sorted(emitted_keys),
         "token_type_ids_emitted": token_type_emitted,
@@ -249,6 +246,7 @@ def run_wang_arm(tokenizer, model, pairs, device):
         "rounded_scores": rounded,
         "token_ids": token_ids,
         "elapsed_seconds": elapsed,
+        "forward_calls": len(pairs),
         "batch_size": 1,
     }
 
@@ -348,109 +346,6 @@ def build_sample(data_root, n_documents, seed):
     return sample, pairs, units, document_units
 
 
-# --------------------------------------------------------------------------
-# Comparison
-# --------------------------------------------------------------------------
-
-def slice_scores(scores, indices):
-    return [scores[i] for i in indices]
-
-
-def compare_arms(name, left, right, units, document_units):
-    """Full elementwise comparison of two arms over the shared pair list."""
-    left_scores = left["scores"]
-    right_scores = right["scores"]
-
-    tokens = token_id_agreement(left["token_ids"], right["token_ids"])
-    deltas = delta_stats(left_scores, right_scores)
-    one_decimal = one_decimal_disagreements(left_scores, right_scores)
-
-    nbc_indices = [unit["pair_index"] for unit in units]
-    nbc_left = slice_scores(left_scores, nbc_indices)
-    nbc_right = slice_scores(right_scores, nbc_indices)
-    nbc_buckets = bucket_disagreements(nbc_left, nbc_right, nbc_bucket)
-
-    span_indices = [i for document in document_units for i in document["pair_indices"]]
-    span_left = slice_scores(left_scores, span_indices)
-    span_right = slice_scores(right_scores, span_indices)
-
-    document_rows = []
-    max_score_disagreements = 0
-    bucket_disagreement_count = 0
-    argmax_disagreements = 0
-    for document in document_units:
-        indices = document["pair_indices"]
-        if not indices:
-            continue
-        left_spans = slice_scores(left_scores, indices)
-        right_spans = slice_scores(right_scores, indices)
-        left_max = max(left_spans)
-        right_max = max(right_spans)
-        left_argmax = left_spans.index(left_max)
-        right_argmax = right_spans.index(right_max)
-        rounded_differs = round_one_decimal(left_max) != round_one_decimal(right_max)
-        bucket_differs = document_bucket(left_max) != document_bucket(right_max)
-        argmax_differs = left_argmax != right_argmax
-        max_score_disagreements += int(rounded_differs)
-        bucket_disagreement_count += int(bucket_differs)
-        argmax_disagreements += int(argmax_differs)
-        if rounded_differs or bucket_differs or argmax_differs:
-            document_rows.append(
-                {
-                    "passage_index": document["passage_index"],
-                    "sentence_index": document["sentence_index"],
-                    "subclaim_index": document["subclaim_index"],
-                    "document_index": document["document_index"],
-                    "span_count": document["span_count"],
-                    "left_max": left_max,
-                    "right_max": right_max,
-                    "left_bucket": document_bucket(left_max),
-                    "right_bucket": document_bucket(right_max),
-                    "left_argmax_span": left_argmax,
-                    "right_argmax_span": right_argmax,
-                }
-            )
-
-    span_buckets = bucket_disagreements(span_left, span_right, document_bucket)
-
-    classification = classify_comparison(
-        tokens, deltas, one_decimal, [nbc_buckets, span_buckets]
-    )
-
-    return {
-        "comparison": name,
-        "token_ids": tokens,
-        "score_deltas_all_pairs": deltas,
-        "one_decimal_disagreements": one_decimal,
-        "nbc": {
-            "pairs": len(nbc_indices),
-            "deltas": delta_stats(nbc_left, nbc_right),
-            "bucket_disagreements": nbc_buckets,
-        },
-        "spans": {
-            "pairs": len(span_indices),
-            "deltas": delta_stats(span_left, span_right),
-            "bucket_disagreements": span_buckets,
-        },
-        "documents": {
-            "documents": len(document_units),
-            "max_score_one_decimal_disagreements": max_score_disagreements,
-            "max_score_bucket_disagreements": bucket_disagreement_count,
-            "argmax_span_disagreements": argmax_disagreements,
-            "examples": document_rows[:10],
-        },
-        "classification": classification,
-    }
-
-
-def arm_histograms(scores, units):
-    positive = [scores[u["pair_index"]] for u in units if u["polarity"] == "positive"]
-    negative = [scores[u["pair_index"]] for u in units if u["polarity"] == "negative"]
-    return {
-        "positive": laplace_histogram(positive),
-        "negative": laplace_histogram(negative),
-    }
-
 
 # --------------------------------------------------------------------------
 
@@ -490,21 +385,32 @@ def print_comparison(block):
         f"  one-decimal disagreements:   {block['one_decimal_disagreements']['count']}"
         f" / {block['score_deltas_all_pairs']['count']}"
     )
-    print(f"  NBC bucket disagreements:    {block['nbc']['bucket_disagreements']['count']}")
-    print(f"  span bucket disagreements:   {block['spans']['bucket_disagreements']['count']}")
     documents = block["documents"]
+    print()
+    print("  decision-level (what a BSE update actually consumes):")
     print(
-        f"  document max-score disagreements (one-decimal): "
-        f"{documents['max_score_one_decimal_disagreements']}/{documents['documents']}"
+        f"    NBC bucket disagreements:            "
+        f"{block['nbc']['bucket_disagreements']['count']}/{block['nbc']['pairs']}"
     )
     print(
-        f"  document bucket disagreements:                  "
-        f"{documents['max_score_bucket_disagreements']}/{documents['documents']}"
+        f"    document-MAX bucket disagreements:   "
+        f"{documents['max_score_bucket_disagreements']['count']}/{documents['documents']}"
+    )
+    print("  diagnostic only (not decision-level):")
+    print(
+        f"    span bucket disagreements:           "
+        f"{block['spans']['bucket_disagreements']['count']}/{block['spans']['pairs']}"
+        "   <- a non-maximal span can cross a bucket with no downstream effect"
     )
     print(
-        f"  argmax span disagreements:                      "
-        f"{documents['argmax_span_disagreements']}/{documents['documents']}"
+        f"    document-MAX one-decimal changes:    "
+        f"{documents['max_score_one_decimal_disagreements']['count']}/{documents['documents']}"
     )
+    print(
+        f"    argmax span disagreements:           "
+        f"{documents['argmax_span_disagreements']['count']}/{documents['documents']}"
+    )
+    print()
     for reason in block["classification"]["reasons"]:
         print(f"  - {reason}")
 
@@ -523,16 +429,27 @@ def main():
     sample, pairs, units, document_units = build_sample(
         args.data_root, args.n_documents, args.seed
     )
-    with sample_path.open("w", encoding="utf-8") as handle:
-        json.dump(sample, handle, indent=2)
     print(f"  NBC pairs:            {sample['nbc']['total_pairs']}")
     print(
         f"  documents sampled:    {sample['documents']['selected']} of "
         f"{sample['documents']['total_available']} (seed {args.seed})"
     )
     print(f"  document spans:       {sample['documents']['total_spans']}")
-    print(f"  total scored pairs:   {sample['total_scored_pairs']} per arm")
-    print(f"  forward passes:       ~{3 * sample['total_scored_pairs']} across three arms")
+    accounting = forward_call_accounting(sample["total_scored_pairs"], args.batch_size)
+    sample["cost_accounting"] = accounting
+    with sample_path.open("w", encoding="utf-8") as handle:
+        json.dump(sample, handle, indent=2)
+    calls = accounting["forward_calls"]
+    print(f"  scored pairs per arm: {accounting['pairs']}")
+    print(
+        f"  pair evaluations:     {accounting['pair_evaluations']} "
+        f"(= 3 x {accounting['pairs']}, every arm scores every pair)"
+    )
+    print(
+        f"  model forward calls:  ~{calls['total']}  "
+        f"(A1 {calls['A1']} + A3 {calls['A3']} at batch 1, "
+        f"A2 {calls['A2']} at batch {accounting['production_batch_size']})"
+    )
     print(f"  sample written to     {sample_path}")
 
     if args.dry_run:
@@ -611,7 +528,21 @@ def main():
         ),
         "sample_path": str(sample_path),
         "sample_summary": {
-            key: sample[key] for key in ("seed", "nbc", "documents", "corpus", "total_scored_pairs")
+            key: sample[key]
+            for key in ("seed", "nbc", "documents", "corpus", "total_scored_pairs")
+        },
+        "cost_accounting": {
+            "estimated": accounting,
+            "observed_forward_calls": {
+                "A1": a1["forward_calls"],
+                "A3": a3["forward_calls"],
+                "A2": a2["forward_calls"],
+                "total": a1["forward_calls"] + a3["forward_calls"] + a2["forward_calls"],
+            },
+            "note": (
+                "Pair evaluations are 3 x pairs because every arm scores every "
+                "pair. Forward calls are fewer, because A2 batches."
+            ),
         },
         "environment": environment,
         "arms": {
@@ -620,12 +551,14 @@ def main():
                 "batch_size": 1,
                 "caching": "not applicable",
                 "elapsed_seconds": a1["elapsed_seconds"],
+                "forward_calls": a1["forward_calls"],
             },
             "A2": {
                 "description": "EntailmentScorer at production batch size",
                 "batch_size": a2["batch_size"],
                 "caching": "use_cache=False, write_cache=False, temporary database",
                 "elapsed_seconds": a2["elapsed_seconds"],
+                "forward_calls": a2["forward_calls"],
                 "entailment_index": a2["entailment_index"],
                 "tokenizer_keys": a2["tokenizer_keys"],
                 "token_type_ids_emitted": a2["token_type_ids_emitted"],
@@ -636,6 +569,7 @@ def main():
                 "batch_size": a3["batch_size"],
                 "caching": "use_cache=False, write_cache=False, temporary database",
                 "elapsed_seconds": a3["elapsed_seconds"],
+                "forward_calls": a3["forward_calls"],
                 "entailment_index": a3["entailment_index"],
                 "tokenizer_keys": a3["tokenizer_keys"],
             },
@@ -674,6 +608,22 @@ def main():
     print(f"  unique values observed: {token_type['unique_token_type_ids']}")
     print(f"  can differ from Wang:   {token_type['can_differ_from_wang']}")
     print(f"  {token_type['note']}")
+
+    observed = result["cost_accounting"]["observed_forward_calls"]
+    print()
+    print("-" * 100)
+    print("COST ACCOUNTING")
+    print("-" * 100)
+    print(
+        f"  pair evaluations:     {accounting['pair_evaluations']} "
+        f"(= 3 x {accounting['pairs']})"
+    )
+    print(
+        f"  model forward calls:  {observed['total']} observed "
+        f"(A1 {observed['A1']}, A3 {observed['A3']}, A2 {observed['A2']} at batch "
+        f"{accounting['production_batch_size']}); estimated "
+        f"{accounting['forward_calls']['total']}"
+    )
 
     print()
     print("=" * 100)
