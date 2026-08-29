@@ -297,6 +297,111 @@ By default, a successful full run automatically commits and pushes **only these 
 python main.py --no-push-results
 ```
 
+## Gate 1 scoring-path diagnostics
+
+Gate 1 has been run and FAILED against the predeclared tolerances. These two
+scripts diagnose *why*. They are instruments: they measure and report, and they
+change nothing. No baseline behaviour, tolerance, published reference value,
+split, or cost parameter is touched by either of them, and nothing in the normal
+experiment pipeline imports them.
+
+They also never open `results/wang_nli_cache.sqlite`. Both repository scoring
+arms run with `use_cache=False, write_cache=False` against a scratch database in
+a temporary directory that is deleted on exit, because a cached score would
+measure the cache instead of the model. All output goes to `results/diagnostics/`.
+
+### Step 0: what the formal run already recorded
+
+```bash
+python scripts/diagnose_gate1_provenance.py
+```
+
+Reads `results/wang_reproduction.json` and reports the environment, checkpoint,
+and NBC-histogram facts it contains. Costs no NLI compute.
+
+Five fields the diagnosis needs are not in the formal provenance block -- the
+`tokenizers` version, the model's parameter dtype, its training mode, its
+attention implementation, and the tokenizer's `is_fast` flag. Those print as
+`NOT RECORDED` rather than being guessed, and a live probe fills them in from
+the current environment. If the live environment does not match the one that
+produced the report, the script says so: the live-only column then describes
+*this* machine, not the Gate 1 run.
+
+The live probe also settles the `token_type_ids` question. Wang's released
+`utils.py:57` calls `model(inputs["input_ids"])` and never passes
+`token_type_ids`; this repository calls `model(**inputs)` and passes whatever
+the tokenizer emits. **A non-zero `type_vocab_size` alone proves nothing**, and
+neither does the mere presence of the key. Three facts are needed together --
+the emitted keys, whether `token_type_ids` appear, and their actual distinct
+values -- so all three are reported, and the assessment only concludes that the
+difference can matter when the values are non-zero *and* a token-type embedding
+exists to consume them.
+
+Useful flags: `--no-live` (report file only), `--no-load-model` (probe the
+tokenizer without downloading weights), `--hash-weights` (hash large checkpoint
+files too; small files are always hashed).
+
+### Step 1: A/B/C scorer comparison
+
+```bash
+python scripts/diagnose_scorer_paths.py
+```
+
+Answers one question: inside a single environment, with one loaded model, does
+this repository's `EntailmentScorer` make the same decisions as Wang's literal
+released scorer?
+
+| Arm | What it is |
+| --- | --- |
+| `A1` | Literal Wang path, transcribed from released `utils.py:40-68`: batch 1, `tokenizer(premise, hypothesis, truncation=True, return_tensors="pt")`, `model(inputs["input_ids"])`, `softmax(logits[0]/5)`, hardcoded entailment index 0, `round(score * 100, 1)` |
+| `A2` | This repository's `EntailmentScorer` at the production batch size of 8 |
+| `A3` | This repository's `EntailmentScorer` at batch size 1 |
+
+`A3` is what makes the result actionable. At batch size 1 padding is a no-op, so
+**A1 vs A3 isolates the scorer's argument/inference path** (the passed
+`attention_mask`/`token_type_ids` and the explicit `max_length`) while
+**A3 vs A2 isolates batching and padding numerics**. Without it, a difference
+between A1 and A2 would name two suspects at once.
+
+The sample is all 398 released NBC pairs -- they are what the histograms are
+built from, so a disagreement there propagates into every stopping decision --
+plus a fixed sample of 75 retrieved documents expanded into their text spans.
+About 600 pairs per arm, roughly 1,800 forward passes in total, against 85,194
+document spans for a full reproduction.
+
+Sampling is by SHA-256 rank over `(seed, document address)`, not by
+`random.sample`, whose selection algorithm is a CPython implementation detail
+and is not contracted to be stable across interpreter versions. The sample is
+therefore byte-identical on any platform, and it is written to
+`results/diagnostics/sample.json` so a run elsewhere can be checked against it.
+
+Every comparison reports token `input_ids` exact-match rate and the first ten
+mismatches; signed mean, absolute mean, p50/p95/p99 and max of the raw score
+delta; the count above 1e-4; one-decimal disagreements; NBC and document bucket
+disagreements; each arm's Laplace-smoothed NBC histograms; and per document, the
+max-score disagreement, the bucket disagreement, and whether the argmax span
+moved.
+
+Materiality is fixed in `src/scoring_diagnostics.py` before any measurement, so
+a result cannot be reinterpreted after the fact. A bucket disagreement is
+MATERIAL however small the underlying score change was, because the BSE update
+consumes only the bucket; conversely a raw delta that never crosses a bucket
+edge cannot change a posterior, a stopping decision, or an evidence count.
+
+The verdict follows predeclared rules:
+
+- token ids differ anywhere -> tokenizer invocation semantics come first, and no
+  score delta is interpretable until that is resolved;
+- A1 differs materially from A3 -> the scorer's argument/inference path;
+- A3 differs materially from A2 -> batching and padding numerics;
+- all three equivalent -> the scorer is exonerated, and the next investigation is
+  dependency/environment drift and checkpoint identity.
+
+`--dry-run` builds and writes the sample and reports its size without loading
+the model, so the sample can be checked before spending GPU time.
+
+**These scripts diagnose only. Nothing they find is fixed by them.**
+
 ## Persistent NLI cache
 
 NLI scoring is expensive. Deterministic claim/span entailment scores are cached locally in:
