@@ -1,0 +1,4064 @@
+{
+  "seed": 20231215,
+  "data_root": "data/wang",
+  "nbc": {
+    "positive_pairs": 199,
+    "negative_pairs": 199,
+    "total_pairs": 398
+  },
+  "documents": {
+    "requested": 75,
+    "selected": 75,
+    "total_available": 29397,
+    "total_spans": 191,
+    "retrieval_position_histogram": {
+      "0": 4,
+      "1": 8,
+      "2": 9,
+      "3": 3,
+      "4": 12,
+      "5": 8,
+      "6": 11,
+      "7": 6,
+      "8": 9,
+      "9": 5
+    }
+  },
+  "corpus": {
+    "sentences": 1908,
+    "passages": 238,
+    "subclaims": 2990
+  },
+  "total_scored_pairs": 589,
+  "nbc_units": [
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 0,
+      "pair_index": 0,
+      "digest": "8eff478158ece498"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 1,
+      "pair_index": 1,
+      "digest": "8eff478158ece498"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 2,
+      "pair_index": 2,
+      "digest": "19558c5b707740bc"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 3,
+      "pair_index": 3,
+      "digest": "277a845faae4a27c"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 4,
+      "pair_index": 4,
+      "digest": "0f0e04f2567a672e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 5,
+      "pair_index": 5,
+      "digest": "46c7948220fe38d7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 6,
+      "pair_index": 6,
+      "digest": "1b6a6bab1f9ac9c2"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 7,
+      "pair_index": 7,
+      "digest": "d4fad779cc7b30c1"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 8,
+      "pair_index": 8,
+      "digest": "ecd1085a7a722f69"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 9,
+      "pair_index": 9,
+      "digest": "350420169d83d4ad"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 10,
+      "pair_index": 10,
+      "digest": "d810693cf51d5890"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 11,
+      "pair_index": 11,
+      "digest": "9f366dfd22be7307"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 12,
+      "pair_index": 12,
+      "digest": "0ebf76be7e76f2f2"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 13,
+      "pair_index": 13,
+      "digest": "9780eccc8e78b757"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 14,
+      "pair_index": 14,
+      "digest": "7fca0bb96706d181"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 15,
+      "pair_index": 15,
+      "digest": "b0b2806b4f87aeff"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 16,
+      "pair_index": 16,
+      "digest": "f01df09121356b43"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 17,
+      "pair_index": 17,
+      "digest": "3c35841c768b49f8"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 18,
+      "pair_index": 18,
+      "digest": "6306c8e032118d4e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 19,
+      "pair_index": 19,
+      "digest": "bc43045b731db14c"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 20,
+      "pair_index": 20,
+      "digest": "c5f67bca4cf37f8a"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 21,
+      "pair_index": 21,
+      "digest": "c1f128ed3fdd2b85"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 22,
+      "pair_index": 22,
+      "digest": "bcaee215d5f53ebf"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 23,
+      "pair_index": 23,
+      "digest": "229cccee58e97dfc"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 24,
+      "pair_index": 24,
+      "digest": "f5cb7393874508d7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 25,
+      "pair_index": 25,
+      "digest": "569a2fff63e8b96e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 26,
+      "pair_index": 26,
+      "digest": "ce9f59731a50a30c"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 27,
+      "pair_index": 27,
+      "digest": "cfa5f72a58fe63dc"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 28,
+      "pair_index": 28,
+      "digest": "9f41df72c58c8544"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 29,
+      "pair_index": 29,
+      "digest": "e4cb613c94b3d851"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 30,
+      "pair_index": 30,
+      "digest": "b83371462f117155"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 31,
+      "pair_index": 31,
+      "digest": "2f1a19a9b15774ce"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 32,
+      "pair_index": 32,
+      "digest": "9c30a9ee6781fc31"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 33,
+      "pair_index": 33,
+      "digest": "6b557effdfe32e1a"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 34,
+      "pair_index": 34,
+      "digest": "ebdd16a988eca4dd"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 35,
+      "pair_index": 35,
+      "digest": "ca8491239b4321b8"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 36,
+      "pair_index": 36,
+      "digest": "721a8133b025ea22"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 37,
+      "pair_index": 37,
+      "digest": "8d5ea86dacffab57"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 38,
+      "pair_index": 38,
+      "digest": "290d0670185bf08d"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 39,
+      "pair_index": 39,
+      "digest": "3312098b73884086"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 40,
+      "pair_index": 40,
+      "digest": "251c48f026f2302c"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 41,
+      "pair_index": 41,
+      "digest": "b2fbbabbe8f0b4da"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 42,
+      "pair_index": 42,
+      "digest": "4280f5a00ad97994"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 43,
+      "pair_index": 43,
+      "digest": "177d2f943affc41d"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 44,
+      "pair_index": 44,
+      "digest": "086d4876d2e50b18"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 45,
+      "pair_index": 45,
+      "digest": "e8068a289867380d"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 46,
+      "pair_index": 46,
+      "digest": "c73920b633fd6367"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 47,
+      "pair_index": 47,
+      "digest": "6e6116e086ab658a"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 48,
+      "pair_index": 48,
+      "digest": "4517dc93d632e5a0"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 49,
+      "pair_index": 49,
+      "digest": "ff7f08dc3b2a3ddd"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 50,
+      "pair_index": 50,
+      "digest": "1873b3afca2164d1"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 51,
+      "pair_index": 51,
+      "digest": "39eac180c4faaf07"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 52,
+      "pair_index": 52,
+      "digest": "d4b14faf56655d65"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 53,
+      "pair_index": 53,
+      "digest": "7e666574456d9eac"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 54,
+      "pair_index": 54,
+      "digest": "7c183f953f191937"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 55,
+      "pair_index": 55,
+      "digest": "20d2e3b11196ca71"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 56,
+      "pair_index": 56,
+      "digest": "7f7e8f63aad7d87c"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 57,
+      "pair_index": 57,
+      "digest": "7a9bca11550e3baa"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 58,
+      "pair_index": 58,
+      "digest": "12983d38a2b633a9"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 59,
+      "pair_index": 59,
+      "digest": "c662d215b63db408"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 60,
+      "pair_index": 60,
+      "digest": "9f96261aa2a986c3"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 61,
+      "pair_index": 61,
+      "digest": "386f127c8f2d00d1"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 62,
+      "pair_index": 62,
+      "digest": "96f11cdd851ae721"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 63,
+      "pair_index": 63,
+      "digest": "d2655fc8939a6076"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 64,
+      "pair_index": 64,
+      "digest": "4034f3ca93233b7f"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 65,
+      "pair_index": 65,
+      "digest": "e926708af5f2e418"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 66,
+      "pair_index": 66,
+      "digest": "d3994b2897fabc10"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 67,
+      "pair_index": 67,
+      "digest": "9017d546ddfe7599"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 68,
+      "pair_index": 68,
+      "digest": "2527ae9edb51afff"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 69,
+      "pair_index": 69,
+      "digest": "6a9f98955c015be3"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 70,
+      "pair_index": 70,
+      "digest": "a5cced7f6b63e715"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 71,
+      "pair_index": 71,
+      "digest": "8699f5b22649f37f"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 72,
+      "pair_index": 72,
+      "digest": "0f9b6924f140fccb"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 73,
+      "pair_index": 73,
+      "digest": "01fe2e41efb4be4e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 74,
+      "pair_index": 74,
+      "digest": "d0252e21c91804d2"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 75,
+      "pair_index": 75,
+      "digest": "9e6b42142e009436"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 76,
+      "pair_index": 76,
+      "digest": "0d237e5951dd4511"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 77,
+      "pair_index": 77,
+      "digest": "108f708e7871a96f"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 78,
+      "pair_index": 78,
+      "digest": "3070d3f934d374df"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 79,
+      "pair_index": 79,
+      "digest": "a782d76b0834db76"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 80,
+      "pair_index": 80,
+      "digest": "b5148fe3cd518c10"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 81,
+      "pair_index": 81,
+      "digest": "8a7f67783c373869"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 82,
+      "pair_index": 82,
+      "digest": "8f7ceb9833416ac8"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 83,
+      "pair_index": 83,
+      "digest": "578f7ce5169ac221"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 84,
+      "pair_index": 84,
+      "digest": "578f7ce5169ac221"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 85,
+      "pair_index": 85,
+      "digest": "b373c8d803fb57b7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 86,
+      "pair_index": 86,
+      "digest": "c9ab69a54257d17b"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 87,
+      "pair_index": 87,
+      "digest": "c76fe77b8fdedeaf"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 88,
+      "pair_index": 88,
+      "digest": "2bd2dafd11f173b3"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 89,
+      "pair_index": 89,
+      "digest": "3c92e57ade7ae800"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 90,
+      "pair_index": 90,
+      "digest": "73b9f813f1337330"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 91,
+      "pair_index": 91,
+      "digest": "68b884d61b8937e7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 92,
+      "pair_index": 92,
+      "digest": "d440201f2723f244"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 93,
+      "pair_index": 93,
+      "digest": "2e7ea09e48bf27a7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 94,
+      "pair_index": 94,
+      "digest": "fc727fcf56fb962b"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 95,
+      "pair_index": 95,
+      "digest": "e195523ad6cc9eba"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 96,
+      "pair_index": 96,
+      "digest": "3f2225a6f69c0a64"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 97,
+      "pair_index": 97,
+      "digest": "3026ff942ea01ea2"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 98,
+      "pair_index": 98,
+      "digest": "06e5fa97460c363c"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 99,
+      "pair_index": 99,
+      "digest": "d83d9c52c27d8a61"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 100,
+      "pair_index": 100,
+      "digest": "f29f1aceb19f42b8"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 101,
+      "pair_index": 101,
+      "digest": "a84e6a2648837031"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 102,
+      "pair_index": 102,
+      "digest": "2de856f7307cd065"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 103,
+      "pair_index": 103,
+      "digest": "60dcfaf65788fe72"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 104,
+      "pair_index": 104,
+      "digest": "3e922d132ac31250"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 105,
+      "pair_index": 105,
+      "digest": "73b49c7dbb50f110"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 106,
+      "pair_index": 106,
+      "digest": "c39720ab0eaeffd7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 107,
+      "pair_index": 107,
+      "digest": "1eeaba4f3d8f2481"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 108,
+      "pair_index": 108,
+      "digest": "427344b4f123eb3a"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 109,
+      "pair_index": 109,
+      "digest": "add42d43161fab42"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 110,
+      "pair_index": 110,
+      "digest": "bbc29b7128671924"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 111,
+      "pair_index": 111,
+      "digest": "1ee1bdedb93ce45e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 112,
+      "pair_index": 112,
+      "digest": "376c8b08820054aa"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 113,
+      "pair_index": 113,
+      "digest": "e3d38bd91e699554"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 114,
+      "pair_index": 114,
+      "digest": "3550e09496fec4b0"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 115,
+      "pair_index": 115,
+      "digest": "5544bd39420d5029"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 116,
+      "pair_index": 116,
+      "digest": "5ecbec39456ae0d7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 117,
+      "pair_index": 117,
+      "digest": "cf7b6b8170d1f5e1"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 118,
+      "pair_index": 118,
+      "digest": "dfb406c550d536c9"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 119,
+      "pair_index": 119,
+      "digest": "03b92821a87f8960"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 120,
+      "pair_index": 120,
+      "digest": "a8e23aab63d8fa0d"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 121,
+      "pair_index": 121,
+      "digest": "61fde294b0bb1aa7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 122,
+      "pair_index": 122,
+      "digest": "0e81a80476711542"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 123,
+      "pair_index": 123,
+      "digest": "16ab892a5d018f2f"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 124,
+      "pair_index": 124,
+      "digest": "65ff8b3c5603e44c"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 125,
+      "pair_index": 125,
+      "digest": "8a99ccae7b90eec4"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 126,
+      "pair_index": 126,
+      "digest": "b17d27d6531c77e0"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 127,
+      "pair_index": 127,
+      "digest": "51294cc8e3299c4b"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 128,
+      "pair_index": 128,
+      "digest": "f4806c7367b146e1"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 129,
+      "pair_index": 129,
+      "digest": "67bd3af801a62f6e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 130,
+      "pair_index": 130,
+      "digest": "6187e414be84d803"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 131,
+      "pair_index": 131,
+      "digest": "f2b7ae659cbb8307"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 132,
+      "pair_index": 132,
+      "digest": "b7cbe8c78cd0c34a"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 133,
+      "pair_index": 133,
+      "digest": "f898a72e1e7560aa"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 134,
+      "pair_index": 134,
+      "digest": "ef9b8f9d6a49cd8c"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 135,
+      "pair_index": 135,
+      "digest": "28de5c0cd08de3eb"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 136,
+      "pair_index": 136,
+      "digest": "54644a6282950f18"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 137,
+      "pair_index": 137,
+      "digest": "def10716b6519681"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 138,
+      "pair_index": 138,
+      "digest": "c8c5ce58860c4ecf"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 139,
+      "pair_index": 139,
+      "digest": "ae83072a298ccc4a"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 140,
+      "pair_index": 140,
+      "digest": "3ee9e6037a422582"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 141,
+      "pair_index": 141,
+      "digest": "d434fa7a7c1f87f0"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 142,
+      "pair_index": 142,
+      "digest": "83317e0c4cf07393"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 143,
+      "pair_index": 143,
+      "digest": "4417b7ac971e5d06"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 144,
+      "pair_index": 144,
+      "digest": "dc38ce96c290745e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 145,
+      "pair_index": 145,
+      "digest": "9b86e007678e3f50"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 146,
+      "pair_index": 146,
+      "digest": "854735a274dcb3b3"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 147,
+      "pair_index": 147,
+      "digest": "ca7560173766340f"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 148,
+      "pair_index": 148,
+      "digest": "7c7f457dde854853"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 149,
+      "pair_index": 149,
+      "digest": "cefa15ff94061c71"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 150,
+      "pair_index": 150,
+      "digest": "54690d3ae3b490ad"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 151,
+      "pair_index": 151,
+      "digest": "091d11da9249e1c9"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 152,
+      "pair_index": 152,
+      "digest": "b4d9b001b3738bad"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 153,
+      "pair_index": 153,
+      "digest": "6c8178160a51ac44"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 154,
+      "pair_index": 154,
+      "digest": "a1779d778ae99712"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 155,
+      "pair_index": 155,
+      "digest": "e5a093ee297c954a"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 156,
+      "pair_index": 156,
+      "digest": "192d80ed13ac640b"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 157,
+      "pair_index": 157,
+      "digest": "1eb0739f7f13df8d"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 158,
+      "pair_index": 158,
+      "digest": "d0a3c381b1a008ab"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 159,
+      "pair_index": 159,
+      "digest": "693f5bb234a74572"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 160,
+      "pair_index": 160,
+      "digest": "c88f94e53c74f531"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 161,
+      "pair_index": 161,
+      "digest": "9865852a7b6e57e6"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 162,
+      "pair_index": 162,
+      "digest": "c8ca81ece211042d"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 163,
+      "pair_index": 163,
+      "digest": "cb0d6a9a419049e1"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 164,
+      "pair_index": 164,
+      "digest": "375e21d099533027"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 165,
+      "pair_index": 165,
+      "digest": "8345380ebbff89af"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 166,
+      "pair_index": 166,
+      "digest": "7ffbef1e3b0c4942"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 167,
+      "pair_index": 167,
+      "digest": "a0149da89ffbe427"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 168,
+      "pair_index": 168,
+      "digest": "be2efbd86a907447"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 169,
+      "pair_index": 169,
+      "digest": "2f2fbbf3c114f338"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 170,
+      "pair_index": 170,
+      "digest": "1661cd6d3fff6835"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 171,
+      "pair_index": 171,
+      "digest": "062833118c31f4b9"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 172,
+      "pair_index": 172,
+      "digest": "c0b0c686dcb8eeca"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 173,
+      "pair_index": 173,
+      "digest": "da7a81eeefbd0244"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 174,
+      "pair_index": 174,
+      "digest": "e1669cf817db13ed"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 175,
+      "pair_index": 175,
+      "digest": "132d00b4012b194d"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 176,
+      "pair_index": 176,
+      "digest": "e6316805714bec5c"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 177,
+      "pair_index": 177,
+      "digest": "1e419a503c47f707"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 178,
+      "pair_index": 178,
+      "digest": "a436de9d4f430da0"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 179,
+      "pair_index": 179,
+      "digest": "a77463ae18e661c4"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 180,
+      "pair_index": 180,
+      "digest": "d0b34fa94c7ad79d"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 181,
+      "pair_index": 181,
+      "digest": "96f010a110c027a9"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 182,
+      "pair_index": 182,
+      "digest": "6514b594d6747d22"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 183,
+      "pair_index": 183,
+      "digest": "3875e5b52d1efbff"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 184,
+      "pair_index": 184,
+      "digest": "69bae58895a66c61"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 185,
+      "pair_index": 185,
+      "digest": "b5a62943b4ac4e51"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 186,
+      "pair_index": 186,
+      "digest": "fd3a9b60d57d3d4a"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 187,
+      "pair_index": 187,
+      "digest": "56a887c192015e01"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 188,
+      "pair_index": 188,
+      "digest": "8f0a52d531cb79f3"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 189,
+      "pair_index": 189,
+      "digest": "f5fe41a0f536cc26"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 190,
+      "pair_index": 190,
+      "digest": "da742b9e75d5c3e3"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 191,
+      "pair_index": 191,
+      "digest": "1b6d1c20575ff56a"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 192,
+      "pair_index": 192,
+      "digest": "18afd9f25ca0f571"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 193,
+      "pair_index": 193,
+      "digest": "5d21b2a9b676f1a6"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 194,
+      "pair_index": 194,
+      "digest": "543242a9948c457f"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 195,
+      "pair_index": 195,
+      "digest": "fd21f52592713998"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 196,
+      "pair_index": 196,
+      "digest": "de460d7183a35fc6"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 197,
+      "pair_index": 197,
+      "digest": "86160fad18c94232"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "positive",
+      "index": 198,
+      "pair_index": 198,
+      "digest": "66e87d0c5edcd8b6"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 0,
+      "pair_index": 199,
+      "digest": "fa9ef5064286807a"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 1,
+      "pair_index": 200,
+      "digest": "40181a6340d8cb33"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 2,
+      "pair_index": 201,
+      "digest": "edd57622219cec88"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 3,
+      "pair_index": 202,
+      "digest": "8081703f901cec60"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 4,
+      "pair_index": 203,
+      "digest": "532c8e7c4352f100"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 5,
+      "pair_index": 204,
+      "digest": "1987f13e6c66ffc9"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 6,
+      "pair_index": 205,
+      "digest": "25797a7fceba558f"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 7,
+      "pair_index": 206,
+      "digest": "77c01fbcbe55a73a"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 8,
+      "pair_index": 207,
+      "digest": "1ce9df957600db2f"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 9,
+      "pair_index": 208,
+      "digest": "a66a8d67cfe7fe12"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 10,
+      "pair_index": 209,
+      "digest": "82b90427aacde615"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 11,
+      "pair_index": 210,
+      "digest": "987f4f07f6ea29a3"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 12,
+      "pair_index": 211,
+      "digest": "d50dd8ad2a6df230"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 13,
+      "pair_index": 212,
+      "digest": "e45869995905462f"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 14,
+      "pair_index": 213,
+      "digest": "2d53398c0063514c"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 15,
+      "pair_index": 214,
+      "digest": "323c4154e7b215a6"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 16,
+      "pair_index": 215,
+      "digest": "a24a420b421caef0"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 17,
+      "pair_index": 216,
+      "digest": "428edca6aea6c8c7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 18,
+      "pair_index": 217,
+      "digest": "69ea2f7d12544480"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 19,
+      "pair_index": 218,
+      "digest": "606309ddeea5abaf"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 20,
+      "pair_index": 219,
+      "digest": "ad896b3b14c6b6e6"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 21,
+      "pair_index": 220,
+      "digest": "364cd1e2072d15d0"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 22,
+      "pair_index": 221,
+      "digest": "4ddeb6483094cf4d"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 23,
+      "pair_index": 222,
+      "digest": "fe7e716e8c708794"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 24,
+      "pair_index": 223,
+      "digest": "94a41bcf61dd2a04"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 25,
+      "pair_index": 224,
+      "digest": "556685cf9d174e32"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 26,
+      "pair_index": 225,
+      "digest": "34c51d3d93b1d8bc"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 27,
+      "pair_index": 226,
+      "digest": "dff075f94238b8a2"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 28,
+      "pair_index": 227,
+      "digest": "2870432126b978ae"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 29,
+      "pair_index": 228,
+      "digest": "c7e2aa880420234c"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 30,
+      "pair_index": 229,
+      "digest": "c3b83137bca2def6"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 31,
+      "pair_index": 230,
+      "digest": "5e73a327f3b08949"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 32,
+      "pair_index": 231,
+      "digest": "a27af26e2d551489"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 33,
+      "pair_index": 232,
+      "digest": "37558807c55f4d46"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 34,
+      "pair_index": 233,
+      "digest": "c11b326e6abc7c8e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 35,
+      "pair_index": 234,
+      "digest": "9427a1e784b09a57"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 36,
+      "pair_index": 235,
+      "digest": "772568c8f23374c7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 37,
+      "pair_index": 236,
+      "digest": "72948bcc9656f09a"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 38,
+      "pair_index": 237,
+      "digest": "64d09477306c032f"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 39,
+      "pair_index": 238,
+      "digest": "907cfcd6587a009a"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 40,
+      "pair_index": 239,
+      "digest": "814c3d84fb2e6cf6"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 41,
+      "pair_index": 240,
+      "digest": "f4e8bb5325798ce5"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 42,
+      "pair_index": 241,
+      "digest": "b100aca6e89d0f6f"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 43,
+      "pair_index": 242,
+      "digest": "5968d93065ce1c79"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 44,
+      "pair_index": 243,
+      "digest": "48fc8e2ab778ab03"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 45,
+      "pair_index": 244,
+      "digest": "90d113de5c670aa7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 46,
+      "pair_index": 245,
+      "digest": "67b6994cf607ef1e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 47,
+      "pair_index": 246,
+      "digest": "45eef728f7819826"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 48,
+      "pair_index": 247,
+      "digest": "4c749650220bc851"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 49,
+      "pair_index": 248,
+      "digest": "8b6d34a90cab3a32"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 50,
+      "pair_index": 249,
+      "digest": "616f79d07980210a"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 51,
+      "pair_index": 250,
+      "digest": "7e3a85ac6222d2b7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 52,
+      "pair_index": 251,
+      "digest": "a72335404ad7281b"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 53,
+      "pair_index": 252,
+      "digest": "c2b1e9fb5f04ec7f"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 54,
+      "pair_index": 253,
+      "digest": "435fb033eed05d99"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 55,
+      "pair_index": 254,
+      "digest": "df4423c612c38617"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 56,
+      "pair_index": 255,
+      "digest": "21ab57206ad70448"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 57,
+      "pair_index": 256,
+      "digest": "54a3008a89259c1e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 58,
+      "pair_index": 257,
+      "digest": "54b4508db27bc0e5"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 59,
+      "pair_index": 258,
+      "digest": "0fa42dff7caece66"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 60,
+      "pair_index": 259,
+      "digest": "0f4499a014d0a587"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 61,
+      "pair_index": 260,
+      "digest": "f2d5ac2d2eb44f53"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 62,
+      "pair_index": 261,
+      "digest": "4e710cc55d68909e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 63,
+      "pair_index": 262,
+      "digest": "3fe7ad2466dda6c1"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 64,
+      "pair_index": 263,
+      "digest": "137a3dc2d057b92d"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 65,
+      "pair_index": 264,
+      "digest": "518186228ae5416e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 66,
+      "pair_index": 265,
+      "digest": "47165be5fa1fd0b5"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 67,
+      "pair_index": 266,
+      "digest": "29f9d39053f4d2e7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 68,
+      "pair_index": 267,
+      "digest": "0e34b9b5322f8890"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 69,
+      "pair_index": 268,
+      "digest": "f3a05a24ef5ea916"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 70,
+      "pair_index": 269,
+      "digest": "6bac0fa7d30a6843"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 71,
+      "pair_index": 270,
+      "digest": "544fbef6a8358fa0"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 72,
+      "pair_index": 271,
+      "digest": "4e8dde9492acfee3"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 73,
+      "pair_index": 272,
+      "digest": "0e3b4d36408652f8"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 74,
+      "pair_index": 273,
+      "digest": "a18a6c993bd3d563"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 75,
+      "pair_index": 274,
+      "digest": "6121f4c4e4949efe"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 76,
+      "pair_index": 275,
+      "digest": "bb2dbbd065b12424"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 77,
+      "pair_index": 276,
+      "digest": "3db9c73689f6b275"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 78,
+      "pair_index": 277,
+      "digest": "64208e7a3a993327"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 79,
+      "pair_index": 278,
+      "digest": "25523d1d00d392b7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 80,
+      "pair_index": 279,
+      "digest": "1829511fdf5e6b17"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 81,
+      "pair_index": 280,
+      "digest": "e069b1a57682675e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 82,
+      "pair_index": 281,
+      "digest": "bc2e2518cd4bf047"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 83,
+      "pair_index": 282,
+      "digest": "19a5b38fd647892a"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 84,
+      "pair_index": 283,
+      "digest": "6ce18f74a6582fad"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 85,
+      "pair_index": 284,
+      "digest": "e9bdddae37a61850"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 86,
+      "pair_index": 285,
+      "digest": "3748122f00b9faaa"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 87,
+      "pair_index": 286,
+      "digest": "9f3c1125b18c3c01"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 88,
+      "pair_index": 287,
+      "digest": "f30319b1f0072210"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 89,
+      "pair_index": 288,
+      "digest": "3e841da85b764ee2"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 90,
+      "pair_index": 289,
+      "digest": "fecadabc4bc3934c"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 91,
+      "pair_index": 290,
+      "digest": "5c913a2516bd73ab"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 92,
+      "pair_index": 291,
+      "digest": "b5d0c04f1742e028"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 93,
+      "pair_index": 292,
+      "digest": "f07962b43c60b998"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 94,
+      "pair_index": 293,
+      "digest": "e59cce685bdcfb03"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 95,
+      "pair_index": 294,
+      "digest": "00ff64e770b82ba3"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 96,
+      "pair_index": 295,
+      "digest": "db95bb7b79da65b1"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 97,
+      "pair_index": 296,
+      "digest": "b0d7d5da7b25d825"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 98,
+      "pair_index": 297,
+      "digest": "0efbf148ddc21c8e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 99,
+      "pair_index": 298,
+      "digest": "bfac60923f798044"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 100,
+      "pair_index": 299,
+      "digest": "bf70aee79749f823"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 101,
+      "pair_index": 300,
+      "digest": "3f01eb4128de2cb3"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 102,
+      "pair_index": 301,
+      "digest": "0de9438652feb9c3"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 103,
+      "pair_index": 302,
+      "digest": "1b94b95a28f95ba7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 104,
+      "pair_index": 303,
+      "digest": "10c66b16deb0a98f"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 105,
+      "pair_index": 304,
+      "digest": "6fed9e4259c467ff"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 106,
+      "pair_index": 305,
+      "digest": "18fcb339bad12c60"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 107,
+      "pair_index": 306,
+      "digest": "a8174837cdef1b2d"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 108,
+      "pair_index": 307,
+      "digest": "95b00260eaa7692e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 109,
+      "pair_index": 308,
+      "digest": "d71a53da6ca96eaf"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 110,
+      "pair_index": 309,
+      "digest": "288a0d20e4d5331b"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 111,
+      "pair_index": 310,
+      "digest": "04679e1ef3111c45"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 112,
+      "pair_index": 311,
+      "digest": "3e0f54c156042611"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 113,
+      "pair_index": 312,
+      "digest": "69d09abdac1289d7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 114,
+      "pair_index": 313,
+      "digest": "d055192c9dd9f849"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 115,
+      "pair_index": 314,
+      "digest": "27958a07488f6fe1"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 116,
+      "pair_index": 315,
+      "digest": "84fe9e8bb5710753"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 117,
+      "pair_index": 316,
+      "digest": "012c9a654427bdb2"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 118,
+      "pair_index": 317,
+      "digest": "2c7e04bb6010c06b"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 119,
+      "pair_index": 318,
+      "digest": "0009af5de4206743"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 120,
+      "pair_index": 319,
+      "digest": "b1547eb1c9ec5d05"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 121,
+      "pair_index": 320,
+      "digest": "d66ee47518c42d69"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 122,
+      "pair_index": 321,
+      "digest": "f564b66a341447ac"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 123,
+      "pair_index": 322,
+      "digest": "49bd3a8a25c3c528"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 124,
+      "pair_index": 323,
+      "digest": "e71b2c6c5ae51549"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 125,
+      "pair_index": 324,
+      "digest": "3e071cdfbe198aba"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 126,
+      "pair_index": 325,
+      "digest": "409b3e5f8bfb776e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 127,
+      "pair_index": 326,
+      "digest": "8931f44cd822cd00"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 128,
+      "pair_index": 327,
+      "digest": "9041ca57788981f6"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 129,
+      "pair_index": 328,
+      "digest": "0d5d5f4bace7bcbf"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 130,
+      "pair_index": 329,
+      "digest": "32c51e5dd59fbf0e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 131,
+      "pair_index": 330,
+      "digest": "0de80b9767fe871d"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 132,
+      "pair_index": 331,
+      "digest": "9ddd1d2a18014ddb"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 133,
+      "pair_index": 332,
+      "digest": "cd709b0fd7f50112"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 134,
+      "pair_index": 333,
+      "digest": "4991d72f4a96183b"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 135,
+      "pair_index": 334,
+      "digest": "7ac928e053b7d16e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 136,
+      "pair_index": 335,
+      "digest": "a10131278093adf2"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 137,
+      "pair_index": 336,
+      "digest": "f10a6b5c051bf250"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 138,
+      "pair_index": 337,
+      "digest": "3c587c22a02ca19f"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 139,
+      "pair_index": 338,
+      "digest": "c81fb88b0d9a4ec7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 140,
+      "pair_index": 339,
+      "digest": "e555aaee9a8e9eb7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 141,
+      "pair_index": 340,
+      "digest": "513e2c5c9dca5fb7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 142,
+      "pair_index": 341,
+      "digest": "67e75b8f36b4e234"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 143,
+      "pair_index": 342,
+      "digest": "d079b35286f5d386"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 144,
+      "pair_index": 343,
+      "digest": "bb37d88352bf9699"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 145,
+      "pair_index": 344,
+      "digest": "f105a4608f7cc3ed"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 146,
+      "pair_index": 345,
+      "digest": "0c33969e50dc70fe"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 147,
+      "pair_index": 346,
+      "digest": "0ef5ff55e9731e55"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 148,
+      "pair_index": 347,
+      "digest": "e1ee8aae11ce9bb4"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 149,
+      "pair_index": 348,
+      "digest": "382739be12726cc0"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 150,
+      "pair_index": 349,
+      "digest": "55d1616624bdae50"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 151,
+      "pair_index": 350,
+      "digest": "dff05067b4429ac7"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 152,
+      "pair_index": 351,
+      "digest": "69c8354eb41fc7b8"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 153,
+      "pair_index": 352,
+      "digest": "f4c9ad81a9557e8d"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 154,
+      "pair_index": 353,
+      "digest": "35256fe2fec6c176"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 155,
+      "pair_index": 354,
+      "digest": "b293f3f163b2f012"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 156,
+      "pair_index": 355,
+      "digest": "31b6792938ae5dc5"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 157,
+      "pair_index": 356,
+      "digest": "1b8237df101e2e7c"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 158,
+      "pair_index": 357,
+      "digest": "458195e5e27424f6"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 159,
+      "pair_index": 358,
+      "digest": "8ce10475301a67d4"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 160,
+      "pair_index": 359,
+      "digest": "ea2d179fe4ced90e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 161,
+      "pair_index": 360,
+      "digest": "dfc20e4ea81f17ee"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 162,
+      "pair_index": 361,
+      "digest": "e4148a288891d8e9"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 163,
+      "pair_index": 362,
+      "digest": "8bffab32752c4407"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 164,
+      "pair_index": 363,
+      "digest": "0f1975be4708de73"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 165,
+      "pair_index": 364,
+      "digest": "76a213276a028636"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 166,
+      "pair_index": 365,
+      "digest": "f1e29f460e1aa30d"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 167,
+      "pair_index": 366,
+      "digest": "cefd38056a9589a0"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 168,
+      "pair_index": 367,
+      "digest": "1ce5208aed6a7cb8"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 169,
+      "pair_index": 368,
+      "digest": "07839719a12e703e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 170,
+      "pair_index": 369,
+      "digest": "df0a56f515975966"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 171,
+      "pair_index": 370,
+      "digest": "abad5e8760e42147"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 172,
+      "pair_index": 371,
+      "digest": "f21c3acdb86f8175"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 173,
+      "pair_index": 372,
+      "digest": "244236cc22a46133"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 174,
+      "pair_index": 373,
+      "digest": "1af942b0a62df3ed"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 175,
+      "pair_index": 374,
+      "digest": "6cd9e906ed961b66"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 176,
+      "pair_index": 375,
+      "digest": "23b7940eb3e06bb0"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 177,
+      "pair_index": 376,
+      "digest": "0fa0318235a23056"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 178,
+      "pair_index": 377,
+      "digest": "0fc382828594cfce"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 179,
+      "pair_index": 378,
+      "digest": "de69859f72a49767"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 180,
+      "pair_index": 379,
+      "digest": "0967b64b148a5a1b"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 181,
+      "pair_index": 380,
+      "digest": "35a3f600482b0c60"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 182,
+      "pair_index": 381,
+      "digest": "2a5bbaf60d308e27"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 183,
+      "pair_index": 382,
+      "digest": "968a399f4331eae5"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 184,
+      "pair_index": 383,
+      "digest": "3db778c4ee45efd5"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 185,
+      "pair_index": 384,
+      "digest": "674392382748dfd9"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 186,
+      "pair_index": 385,
+      "digest": "9f2282e020fa5c19"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 187,
+      "pair_index": 386,
+      "digest": "69f30c8a40cb64a3"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 188,
+      "pair_index": 387,
+      "digest": "80fb171e35ae289e"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 189,
+      "pair_index": 388,
+      "digest": "4ad3ba679113dc83"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 190,
+      "pair_index": 389,
+      "digest": "46f54e9a897fa7b6"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 191,
+      "pair_index": 390,
+      "digest": "248c27d757b39211"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 192,
+      "pair_index": 391,
+      "digest": "f69ff2de19a80bbc"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 193,
+      "pair_index": 392,
+      "digest": "9a3626c8606dfc11"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 194,
+      "pair_index": 393,
+      "digest": "8ac7e97f5d7bff71"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 195,
+      "pair_index": 394,
+      "digest": "c02cf14ff2733fbf"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 196,
+      "pair_index": 395,
+      "digest": "1376f9cf036dbf57"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 197,
+      "pair_index": 396,
+      "digest": "6f706a81b4b49616"
+    },
+    {
+      "kind": "nbc",
+      "polarity": "negative",
+      "index": 198,
+      "pair_index": 397,
+      "digest": "7cfb00ede36b37b5"
+    }
+  ],
+  "document_units": [
+    {
+      "kind": "document",
+      "passage_index": 2,
+      "sentence_index": 7,
+      "subclaim_index": 0,
+      "document_index": 8,
+      "url": "https://www.arkansasonline.com/news/2021/oct/01/mlbs-200-inning-club-becomes-quite-exclusive/",
+      "subclaim_digest": "47eb595f9bcfd63a",
+      "page_content_digest": "e4c801ef0f4fc9ab",
+      "page_content_words": 753,
+      "span_count": 3,
+      "pair_indices": [
+        398,
+        399,
+        400
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 4,
+      "sentence_index": 0,
+      "subclaim_index": 1,
+      "document_index": 2,
+      "url": "https://peoplepill.com/people/tim-finchem/",
+      "subclaim_digest": "23037657e38d926a",
+      "page_content_digest": "d544ef4dc6ae362b",
+      "page_content_words": 325,
+      "span_count": 1,
+      "pair_indices": [
+        401
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 4,
+      "sentence_index": 1,
+      "subclaim_index": 0,
+      "document_index": 9,
+      "url": "https://latestinbollywood.com/holly-finchem-wiki-tim-finchem-wife/",
+      "subclaim_digest": "8cabc4c9e323b3e3",
+      "page_content_digest": "8ad93d7093dfd2a9",
+      "page_content_words": 513,
+      "span_count": 2,
+      "pair_indices": [
+        402,
+        403
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 4,
+      "sentence_index": 10,
+      "subclaim_index": 0,
+      "document_index": 2,
+      "url": "https://www.globalgolfpost.com/featured/tim-finchem-entering-the-world-golf-hall-of-fame/",
+      "subclaim_digest": "d26cb6efa84ebfdd",
+      "page_content_digest": "a03fda7f6264aee0",
+      "page_content_words": 179,
+      "span_count": 1,
+      "pair_indices": [
+        404
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 13,
+      "sentence_index": 1,
+      "subclaim_index": 0,
+      "document_index": 2,
+      "url": "https://pantheon.world/profile/person/Noel_Hogan/",
+      "subclaim_digest": "70559abd9fd3a48f",
+      "page_content_digest": "596de057022963f6",
+      "page_content_words": 100,
+      "span_count": 1,
+      "pair_indices": [
+        405
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 19,
+      "sentence_index": 5,
+      "subclaim_index": 1,
+      "document_index": 8,
+      "url": "http://www.noplacelikelongisland.com/podcast/2016/6/23/legendary-drummer-rod-morgenstein-on-winger-the-jelly-jam-northport-and-more",
+      "subclaim_digest": "2fd5e52b465b84f5",
+      "page_content_digest": "594d41409526c037",
+      "page_content_words": 737,
+      "span_count": 3,
+      "pair_indices": [
+        406,
+        407,
+        408
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 21,
+      "sentence_index": 4,
+      "subclaim_index": 0,
+      "document_index": 9,
+      "url": "http://hist.fullerton.edu/faculty_staff/profiles/Robert%20McLain.aspx",
+      "subclaim_digest": "02d192f0fd23b924",
+      "page_content_digest": "0f056a6df73b1ffd",
+      "page_content_words": 179,
+      "span_count": 1,
+      "pair_indices": [
+        409
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 21,
+      "sentence_index": 9,
+      "subclaim_index": 1,
+      "document_index": 1,
+      "url": "https://www.britannica.com/topic/Radio-Act-United-States-1927",
+      "subclaim_digest": "a9a65ddf53bb0e8c",
+      "page_content_digest": "2872968f23eb3cda",
+      "page_content_words": 168,
+      "span_count": 1,
+      "pair_indices": [
+        410
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 22,
+      "sentence_index": 3,
+      "subclaim_index": 0,
+      "document_index": 9,
+      "url": "https://planetradio.co.uk/hits-radio/station/on-air/international-womens-day-2/",
+      "subclaim_digest": "d4b8f2d036bff04d",
+      "page_content_digest": "ecd35d2d4fc95be6",
+      "page_content_words": 1023,
+      "span_count": 4,
+      "pair_indices": [
+        411,
+        412,
+        413,
+        414
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 23,
+      "sentence_index": 3,
+      "subclaim_index": 0,
+      "document_index": 7,
+      "url": "https://all-the-drummers.com/torry-castellano-donnas-drummer.html",
+      "subclaim_digest": "73af30be2805e154",
+      "page_content_digest": "bca5baa092394fb1",
+      "page_content_words": 17,
+      "span_count": 1,
+      "pair_indices": [
+        415
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 23,
+      "sentence_index": 5,
+      "subclaim_index": 1,
+      "document_index": 5,
+      "url": "https://celebs.filmifeed.com/wiki/torry-castellano/",
+      "subclaim_digest": "2a0b446887939a5c",
+      "page_content_digest": "ecf7dd16eb012422",
+      "page_content_words": 385,
+      "span_count": 1,
+      "pair_indices": [
+        416
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 28,
+      "sentence_index": 8,
+      "subclaim_index": 0,
+      "document_index": 6,
+      "url": "https://www.gazettelive.co.uk/news/teesside-news/locked-up-names-faces-20-19166226",
+      "subclaim_digest": "66828e7822e23ef5",
+      "page_content_digest": "deadec60e218fa57",
+      "page_content_words": 2943,
+      "span_count": 10,
+      "pair_indices": [
+        417,
+        418,
+        419,
+        420,
+        421,
+        422,
+        423,
+        424,
+        425,
+        426
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 28,
+      "sentence_index": 10,
+      "subclaim_index": 1,
+      "document_index": 6,
+      "url": "https://inews.co.uk/culture/music/eurovision-2022-finalists-list-which-countries-song-contest-final-songs-running-order-1628228",
+      "subclaim_digest": "901eb075cd439dcd",
+      "page_content_digest": "49a7c9d3840e1939",
+      "page_content_words": 553,
+      "span_count": 2,
+      "pair_indices": [
+        427,
+        428
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 29,
+      "sentence_index": 1,
+      "subclaim_index": 0,
+      "document_index": 6,
+      "url": "https://www.michigandaily.com/uncategorized/michigan-quarterback-threet-will-transfer/",
+      "subclaim_digest": "e929fba10cab8818",
+      "page_content_digest": "b5c8e01349a76a6a",
+      "page_content_words": 643,
+      "span_count": 2,
+      "pair_indices": [
+        429,
+        430
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 33,
+      "sentence_index": 2,
+      "subclaim_index": 0,
+      "document_index": 4,
+      "url": "https://www.wordhippo.com/what-is/the-meaning-of/latin-word-cf40fb201ca517ad70462eec62ea30d34c1fc67c.html",
+      "subclaim_digest": "d2319e174900b860",
+      "page_content_digest": "19825dbd118d1fb1",
+      "page_content_words": 609,
+      "span_count": 2,
+      "pair_indices": [
+        431,
+        432
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 34,
+      "sentence_index": 5,
+      "subclaim_index": 0,
+      "document_index": 6,
+      "url": "https://cn.linguee.com/%E8%8B%B1%E8%AF%AD-%E4%B8%AD%E6%96%87/%E7%BF%BB%E8%AD%AF/internal+strife.html",
+      "subclaim_digest": "c4ec2e92ef860a18",
+      "page_content_digest": "f5bf9fba5af396d6",
+      "page_content_words": 1465,
+      "span_count": 5,
+      "pair_indices": [
+        433,
+        434,
+        435,
+        436,
+        437
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 35,
+      "sentence_index": 5,
+      "subclaim_index": 1,
+      "document_index": 0,
+      "url": "https://www.dailypress.com/news/dp-xpm-19960513-1996-05-13-9605130049-story.html",
+      "subclaim_digest": "6c2a0fdbbdbea605",
+      "page_content_digest": "15d34e5fa96d3d1a",
+      "page_content_words": 2304,
+      "span_count": 8,
+      "pair_indices": [
+        438,
+        439,
+        440,
+        441,
+        442,
+        443,
+        444,
+        445
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 36,
+      "sentence_index": 9,
+      "subclaim_index": 0,
+      "document_index": 4,
+      "url": "https://www.en.cas.uni-muenchen.de/about_us/index.html",
+      "subclaim_digest": "0f02271a821eb114",
+      "page_content_digest": "1cbff988f94a821f",
+      "page_content_words": 185,
+      "span_count": 1,
+      "pair_indices": [
+        446
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 37,
+      "sentence_index": 7,
+      "subclaim_index": 0,
+      "document_index": 7,
+      "url": "http://classic-tv.com/shows/green-acres",
+      "subclaim_digest": "a2f4f9bdcfccd45e",
+      "page_content_digest": "5c885223e0e62564",
+      "page_content_words": 690,
+      "span_count": 2,
+      "pair_indices": [
+        447,
+        448
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 38,
+      "sentence_index": 5,
+      "subclaim_index": 0,
+      "document_index": 0,
+      "url": "https://www.bellanaija.com/2018/05/seyi-shay-electric-package-ep/",
+      "subclaim_digest": "6e10882e8876c991",
+      "page_content_digest": "07e9a68a978ced93",
+      "page_content_words": 122,
+      "span_count": 1,
+      "pair_indices": [
+        449
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 42,
+      "sentence_index": 6,
+      "subclaim_index": 0,
+      "document_index": 2,
+      "url": "https://www.verywellmind.com/color-psychology-2795824",
+      "subclaim_digest": "fa4798256b304ac6",
+      "page_content_digest": "41f40604ab4da5dd",
+      "page_content_words": 2412,
+      "span_count": 8,
+      "pair_indices": [
+        450,
+        451,
+        452,
+        453,
+        454,
+        455,
+        456,
+        457
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 44,
+      "sentence_index": 6,
+      "subclaim_index": 0,
+      "document_index": 5,
+      "url": "https://peoplepill.com/people/mackenzie-caquatto/",
+      "subclaim_digest": "686d5da890bcdc79",
+      "page_content_digest": "8f424e1e7b96c8fd",
+      "page_content_words": 1266,
+      "span_count": 4,
+      "pair_indices": [
+        458,
+        459,
+        460,
+        461
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 47,
+      "sentence_index": 1,
+      "subclaim_index": 4,
+      "document_index": 3,
+      "url": "https://www.jewishvirtuallibrary.org/irena-sendler",
+      "subclaim_digest": "8c67679de57057fd",
+      "page_content_digest": "a9307aad33dc7c98",
+      "page_content_words": 1165,
+      "span_count": 4,
+      "pair_indices": [
+        462,
+        463,
+        464,
+        465
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 50,
+      "sentence_index": 0,
+      "subclaim_index": 2,
+      "document_index": 4,
+      "url": "https://footballqueensland.com.au/2019/05/28/emily-gielniks-journey-from-queensland-to-her-first-world-cup/",
+      "subclaim_digest": "6aabbeb67ce6768e",
+      "page_content_digest": "8f8d77cf53104d23",
+      "page_content_words": 828,
+      "span_count": 3,
+      "pair_indices": [
+        466,
+        467,
+        468
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 50,
+      "sentence_index": 3,
+      "subclaim_index": 0,
+      "document_index": 5,
+      "url": "https://wiki2.org/en/Emily_Gielnik",
+      "subclaim_digest": "8d3a83ddf9c0a63d",
+      "page_content_digest": "16e825d2c42db946",
+      "page_content_words": 722,
+      "span_count": 3,
+      "pair_indices": [
+        469,
+        470,
+        471
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 50,
+      "sentence_index": 4,
+      "subclaim_index": 0,
+      "document_index": 8,
+      "url": "https://www.matildas.com.au/news/22-emily-gielnik-i-wasnt-going-stop-until-i-got-there",
+      "subclaim_digest": "f02ad10654d9bfd9",
+      "page_content_digest": "2abf1a2a02842d4f",
+      "page_content_words": 434,
+      "span_count": 2,
+      "pair_indices": [
+        472,
+        473
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 54,
+      "sentence_index": 1,
+      "subclaim_index": 1,
+      "document_index": 7,
+      "url": "https://www.goodreads.com/author/list/118099.Jearl_Walker",
+      "subclaim_digest": "b410cee12536018f",
+      "page_content_digest": "2ec06470e5a3422c",
+      "page_content_words": 139,
+      "span_count": 1,
+      "pair_indices": [
+        474
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 55,
+      "sentence_index": 0,
+      "subclaim_index": 0,
+      "document_index": 1,
+      "url": "https://www.racctrusted.com/c/steve-ridzik/biography/",
+      "subclaim_digest": "e610305106efad16",
+      "page_content_digest": "ec8718789d6e3f66",
+      "page_content_words": 252,
+      "span_count": 1,
+      "pair_indices": [
+        475
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 61,
+      "sentence_index": 0,
+      "subclaim_index": 4,
+      "document_index": 4,
+      "url": "https://www.futhead.com/22/players/18302/kevin-gameiro/",
+      "subclaim_digest": "9583f9ebd9447eee",
+      "page_content_digest": "86a565af85b496cf",
+      "page_content_words": 30,
+      "span_count": 1,
+      "pair_indices": [
+        476
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 63,
+      "sentence_index": 1,
+      "subclaim_index": 1,
+      "document_index": 6,
+      "url": "https://www.ulaval.ca/en/about-us/awards-and-distinctions/doctorats-honoris-causa/lucien-bouchard",
+      "subclaim_digest": "3946c5aed57caa59",
+      "page_content_digest": "de29deacb22c00bc",
+      "page_content_words": 283,
+      "span_count": 1,
+      "pair_indices": [
+        477
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 63,
+      "sentence_index": 6,
+      "subclaim_index": 0,
+      "document_index": 3,
+      "url": "https://www.lipad.ca/members/record/68071fca-03f2-4f7c-b33c-2ed63bb08327/3/",
+      "subclaim_digest": "9d377180b6b9016c",
+      "page_content_digest": "559d1807fd418742",
+      "page_content_words": 1642,
+      "span_count": 6,
+      "pair_indices": [
+        478,
+        479,
+        480,
+        481,
+        482,
+        483
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 76,
+      "sentence_index": 5,
+      "subclaim_index": 0,
+      "document_index": 6,
+      "url": "https://conservativehome.blogs.com/resources/2010/06/introducing-paul-goodman.html",
+      "subclaim_digest": "9ed3317a2409c446",
+      "page_content_digest": "00e97779abf61afd",
+      "page_content_words": 414,
+      "span_count": 2,
+      "pair_indices": [
+        484,
+        485
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 85,
+      "sentence_index": 8,
+      "subclaim_index": 1,
+      "document_index": 4,
+      "url": "https://www.findagrave.com/memorial/194606001/alfred-fischer",
+      "subclaim_digest": "d1952ff5027c1445",
+      "page_content_digest": "ae4668deed95e9af",
+      "page_content_words": 194,
+      "span_count": 1,
+      "pair_indices": [
+        486
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 86,
+      "sentence_index": 4,
+      "subclaim_index": 0,
+      "document_index": 1,
+      "url": "https://olemisssports.com/sports/mens-basketball/roster/coaches/kermit-davis/334",
+      "subclaim_digest": "190ab3da8337d4d8",
+      "page_content_digest": "9b1c36b595a41d98",
+      "page_content_words": 2281,
+      "span_count": 8,
+      "pair_indices": [
+        487,
+        488,
+        489,
+        490,
+        491,
+        492,
+        493,
+        494
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 87,
+      "sentence_index": 0,
+      "subclaim_index": 3,
+      "document_index": 6,
+      "url": "https://www.cbc.ca/news/politics/daniel-m%C3%A9nard-ex-canadian-general-jailed-in-afghanistan-to-be-released-1.2516788",
+      "subclaim_digest": "0c91f2e54381a812",
+      "page_content_digest": "2a05e93aa339ec10",
+      "page_content_words": 962,
+      "span_count": 3,
+      "pair_indices": [
+        495,
+        496,
+        497
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 91,
+      "sentence_index": 5,
+      "subclaim_index": 0,
+      "document_index": 6,
+      "url": "https://www.liquisearch.com/kia_joorabchian",
+      "subclaim_digest": "a2fe13b520b51e2c",
+      "page_content_digest": "788ba4b7c40d1a18",
+      "page_content_words": 196,
+      "span_count": 1,
+      "pair_indices": [
+        498
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 106,
+      "sentence_index": 2,
+      "subclaim_index": 0,
+      "document_index": 1,
+      "url": "https://www.boston.com/sports/boston-celtics/2022/07/01/things-to-know-about-the-new-celtics-guard-malcolm-brogdon/",
+      "subclaim_digest": "bfc69a2c1bd09b71",
+      "page_content_digest": "2dcb2b3f6826aa97",
+      "page_content_words": 666,
+      "span_count": 2,
+      "pair_indices": [
+        499,
+        500
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 106,
+      "sentence_index": 2,
+      "subclaim_index": 0,
+      "document_index": 7,
+      "url": "https://fansided.com/2016/12/16/malcolm-brogdon-milwaukee-bucks-nba-rookie/",
+      "subclaim_digest": "bfc69a2c1bd09b71",
+      "page_content_digest": "86a401bf5ab06839",
+      "page_content_words": 1040,
+      "span_count": 4,
+      "pair_indices": [
+        501,
+        502,
+        503,
+        504
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 111,
+      "sentence_index": 5,
+      "subclaim_index": 0,
+      "document_index": 6,
+      "url": "https://fortune.com/education/articles/these-nyu-stern-mba-grads-make-more-than-225k-after-graduation/",
+      "subclaim_digest": "f4b8f67f0d035f5f",
+      "page_content_digest": "6830dfcf27a7cf64",
+      "page_content_words": 630,
+      "span_count": 2,
+      "pair_indices": [
+        505,
+        506
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 118,
+      "sentence_index": 0,
+      "subclaim_index": 1,
+      "document_index": 8,
+      "url": "https://wiki2.org/en/Don_R._Swanson",
+      "subclaim_digest": "fa3846fb1de611b4",
+      "page_content_digest": "58125e94bb74d78c",
+      "page_content_words": 901,
+      "span_count": 3,
+      "pair_indices": [
+        507,
+        508,
+        509
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 118,
+      "sentence_index": 7,
+      "subclaim_index": 0,
+      "document_index": 4,
+      "url": "https://dl.acm.org/profile/81100070976/publications",
+      "subclaim_digest": "6e6e37e65a677773",
+      "page_content_digest": "6a52ae14e09e8608",
+      "page_content_words": 1444,
+      "span_count": 5,
+      "pair_indices": [
+        510,
+        511,
+        512,
+        513,
+        514
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 120,
+      "sentence_index": 3,
+      "subclaim_index": 0,
+      "document_index": 4,
+      "url": "https://www.liquisearch.com/adiele_afigbo",
+      "subclaim_digest": "7328599b77b3b7f7",
+      "page_content_digest": "58eaa92d5e2ada51",
+      "page_content_words": 205,
+      "span_count": 1,
+      "pair_indices": [
+        515
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 120,
+      "sentence_index": 6,
+      "subclaim_index": 2,
+      "document_index": 5,
+      "url": "https://www.liquisearch.com/adiele_afigbo/early_life_and_education",
+      "subclaim_digest": "89c2b8346a9e3e4f",
+      "page_content_digest": "c4693f33de8c24f5",
+      "page_content_words": 173,
+      "span_count": 1,
+      "pair_indices": [
+        516
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 123,
+      "sentence_index": 9,
+      "subclaim_index": 0,
+      "document_index": 8,
+      "url": "https://ledgernote.com/columns/careers-marketing/session-musician/",
+      "subclaim_digest": "e6e2f2243d664616",
+      "page_content_digest": "acdf8eb74fb182bb",
+      "page_content_words": 1487,
+      "span_count": 5,
+      "pair_indices": [
+        517,
+        518,
+        519,
+        520,
+        521
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 127,
+      "sentence_index": 6,
+      "subclaim_index": 1,
+      "document_index": 2,
+      "url": "https://music.mxdwn.com/2022/11/30/reviews/album-review-dragonette-twennies/",
+      "subclaim_digest": "2aeb4caddbfed7d8",
+      "page_content_digest": "2a292dfa0a5055cd",
+      "page_content_words": 316,
+      "span_count": 1,
+      "pair_indices": [
+        522
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 128,
+      "sentence_index": 6,
+      "subclaim_index": 0,
+      "document_index": 9,
+      "url": "https://leapwiseadvisory.com/about/our-people/tom-gash/",
+      "subclaim_digest": "9bc277c1c2f6bb26",
+      "page_content_digest": "c72c4c6e68684259",
+      "page_content_words": 289,
+      "span_count": 1,
+      "pair_indices": [
+        523
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 133,
+      "sentence_index": 0,
+      "subclaim_index": 1,
+      "document_index": 8,
+      "url": "https://takemeback.to/28-October-1957",
+      "subclaim_digest": "20deae282bef25be",
+      "page_content_digest": "65be00c42ffdbcb2",
+      "page_content_words": 75,
+      "span_count": 1,
+      "pair_indices": [
+        524
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 143,
+      "sentence_index": 3,
+      "subclaim_index": 1,
+      "document_index": 3,
+      "url": "https://en-academic.com/dic.nsf/enwiki/251803",
+      "subclaim_digest": "903cc4609fa0a49f",
+      "page_content_digest": "032a90b0bb3f7c76",
+      "page_content_words": 319,
+      "span_count": 1,
+      "pair_indices": [
+        525
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 147,
+      "sentence_index": 0,
+      "subclaim_index": 0,
+      "document_index": 4,
+      "url": "https://www.idolbirthdays.net/lucy-akhurst",
+      "subclaim_digest": "205d957af2803d9c",
+      "page_content_digest": "57d7dab88df86d16",
+      "page_content_words": 273,
+      "span_count": 1,
+      "pair_indices": [
+        526
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 150,
+      "sentence_index": 0,
+      "subclaim_index": 0,
+      "document_index": 1,
+      "url": "https://biog.com/biography/joe-walsh",
+      "subclaim_digest": "c0a3f04e2c7d7ee7",
+      "page_content_digest": "6ba43bf4b38cb5d8",
+      "page_content_words": 441,
+      "span_count": 2,
+      "pair_indices": [
+        527,
+        528
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 151,
+      "sentence_index": 3,
+      "subclaim_index": 1,
+      "document_index": 5,
+      "url": "https://www.sueyounghistories.com/2009-11-12-josiah-mason-1795-1881/",
+      "subclaim_digest": "e426e58ae8661a67",
+      "page_content_digest": "fbf4bcbd80de5636",
+      "page_content_words": 974,
+      "span_count": 3,
+      "pair_indices": [
+        529,
+        530,
+        531
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 152,
+      "sentence_index": 5,
+      "subclaim_index": 0,
+      "document_index": 4,
+      "url": "https://wiki.alquds.edu/?query=Balbir_Singh_Kullar",
+      "subclaim_digest": "09161384494e39bf",
+      "page_content_digest": "6bf73bdfebcda521",
+      "page_content_words": 263,
+      "span_count": 1,
+      "pair_indices": [
+        532
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 153,
+      "sentence_index": 2,
+      "subclaim_index": 0,
+      "document_index": 5,
+      "url": "https://peoplepill.com/people/george-bovell/",
+      "subclaim_digest": "b7470b1be05b5ccb",
+      "page_content_digest": "bee79ee217409d5a",
+      "page_content_words": 842,
+      "span_count": 3,
+      "pair_indices": [
+        533,
+        534,
+        535
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 158,
+      "sentence_index": 1,
+      "subclaim_index": 0,
+      "document_index": 6,
+      "url": "https://blackdoctor.org/carole-ann-marie-gist-first-black-miss-america-turns-50/",
+      "subclaim_digest": "1b62331ed1271bdf",
+      "page_content_digest": "3c874b55f8a865df",
+      "page_content_words": 269,
+      "span_count": 1,
+      "pair_indices": [
+        536
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 160,
+      "sentence_index": 4,
+      "subclaim_index": 0,
+      "document_index": 6,
+      "url": "https://wiki2.org/en/United_States_men%27s_national_lacrosse_team",
+      "subclaim_digest": "f7493e45b9488945",
+      "page_content_digest": "398b89ae60ad11d6",
+      "page_content_words": 1100,
+      "span_count": 4,
+      "pair_indices": [
+        537,
+        538,
+        539,
+        540
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 162,
+      "sentence_index": 1,
+      "subclaim_index": 1,
+      "document_index": 1,
+      "url": "https://www.espn.com/college-football/story/_/id/33186734/georgia-bulldogs-hire-assistant-bryan-mcclendon-away-miami-hurricanes",
+      "subclaim_digest": "3547cac00083b7a2",
+      "page_content_digest": "65abaa670a157c44",
+      "page_content_words": 252,
+      "span_count": 1,
+      "pair_indices": [
+        541
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 164,
+      "sentence_index": 2,
+      "subclaim_index": 0,
+      "document_index": 4,
+      "url": "https://books.google.com/books/about/Teatro_1901_1904.html?id=c14KAQAAMAAJ",
+      "subclaim_digest": "9a9aee1998d87c36",
+      "page_content_digest": "05ef6fb78f3f34ad",
+      "page_content_words": 28,
+      "span_count": 1,
+      "pair_indices": [
+        542
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 166,
+      "sentence_index": 1,
+      "subclaim_index": 0,
+      "document_index": 8,
+      "url": "https://www.sun-sentinel.com/1998/08/28/frankie-lymon-one-teen-idol-three-wives/",
+      "subclaim_digest": "af82826754f46a8d",
+      "page_content_digest": "a2bc153a2e757816",
+      "page_content_words": 433,
+      "span_count": 2,
+      "pair_indices": [
+        543,
+        544
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 169,
+      "sentence_index": 6,
+      "subclaim_index": 1,
+      "document_index": 2,
+      "url": "https://www.nytimes.com/1982/03/07/obituaries/ayn-rand-fountainhead-author-dies-234329.html",
+      "subclaim_digest": "27c7341cc29c542c",
+      "page_content_digest": "d591fe8294f6fafe",
+      "page_content_words": 207,
+      "span_count": 1,
+      "pair_indices": [
+        545
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 186,
+      "sentence_index": 0,
+      "subclaim_index": 0,
+      "document_index": 4,
+      "url": "https://www.ancientfaces.com/person/brian-t-hughes-birth-1957-death-2004/76439990",
+      "subclaim_digest": "2f377285711aadac",
+      "page_content_digest": "0a8df630553845fe",
+      "page_content_words": 312,
+      "span_count": 1,
+      "pair_indices": [
+        546
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 187,
+      "sentence_index": 4,
+      "subclaim_index": 0,
+      "document_index": 4,
+      "url": "https://www.mlive.com/highschoolsports/2020/02/greatest-slam-dunkers-of-all-time-from-the-metro-detroit-area.html",
+      "subclaim_digest": "e4f17fa534455be8",
+      "page_content_digest": "cd880d7a7cb9aeb1",
+      "page_content_words": 1159,
+      "span_count": 4,
+      "pair_indices": [
+        547,
+        548,
+        549,
+        550
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 188,
+      "sentence_index": 9,
+      "subclaim_index": 0,
+      "document_index": 1,
+      "url": "https://www.encyclopedia-titanica.org/charles-melville-hays-1.html",
+      "subclaim_digest": "7d32d718613316a4",
+      "page_content_digest": "d7ef74f38433a3bb",
+      "page_content_words": 654,
+      "span_count": 2,
+      "pair_indices": [
+        551,
+        552
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 191,
+      "sentence_index": 6,
+      "subclaim_index": 0,
+      "document_index": 2,
+      "url": "https://www.looper.com/843829/the-ending-of-the-fault-in-our-stars-explained/",
+      "subclaim_digest": "7b96acfbe3a111ac",
+      "page_content_digest": "5b1e3399aa530d7e",
+      "page_content_words": 282,
+      "span_count": 1,
+      "pair_indices": [
+        553
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 200,
+      "sentence_index": 5,
+      "subclaim_index": 1,
+      "document_index": 2,
+      "url": "https://www.sportskeeda.com/player/laurent-koscielny",
+      "subclaim_digest": "19ed1622df8b92ef",
+      "page_content_digest": "3f923e3c8fa8dfcb",
+      "page_content_words": 515,
+      "span_count": 2,
+      "pair_indices": [
+        554,
+        555
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 204,
+      "sentence_index": 5,
+      "subclaim_index": 1,
+      "document_index": 0,
+      "url": "http://subsites.chinadaily.com.cn/npc/2021-12/09/c_688379.htm",
+      "subclaim_digest": "89be288eb7d9bdb5",
+      "page_content_digest": "ff6f3b404e469285",
+      "page_content_words": 5073,
+      "span_count": 13,
+      "pair_indices": [
+        556,
+        557,
+        558,
+        559,
+        560,
+        561,
+        562,
+        563,
+        564,
+        565,
+        566,
+        567,
+        568
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 205,
+      "sentence_index": 6,
+      "subclaim_index": 0,
+      "document_index": 7,
+      "url": "https://www.livius.org/articles/person/clitus-the-black/",
+      "subclaim_digest": "60fec9c3621735a4",
+      "page_content_digest": "767ea2ec54417d7c",
+      "page_content_words": 642,
+      "span_count": 2,
+      "pair_indices": [
+        569,
+        570
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 212,
+      "sentence_index": 6,
+      "subclaim_index": 1,
+      "document_index": 0,
+      "url": "https://www.metmuseum.org/art/collection/search/337130",
+      "subclaim_digest": "ebc47903286c5d74",
+      "page_content_digest": "0468ac1498388e15",
+      "page_content_words": 69,
+      "span_count": 1,
+      "pair_indices": [
+        571
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 214,
+      "sentence_index": 0,
+      "subclaim_index": 0,
+      "document_index": 5,
+      "url": "https://commons.wikimedia.org/wiki/Arthur_Tedder,_1st_Baron_Tedder",
+      "subclaim_digest": "cf5d4345c3e5a8ad",
+      "page_content_digest": "4b4526124240bc7d",
+      "page_content_words": 68,
+      "span_count": 1,
+      "pair_indices": [
+        572
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 216,
+      "sentence_index": 1,
+      "subclaim_index": 0,
+      "document_index": 7,
+      "url": "https://simple.wikipedia.org/wiki/Willie_Naulls",
+      "subclaim_digest": "41f7b52b3b129694",
+      "page_content_digest": "c1833dbdbf0ab042",
+      "page_content_words": 83,
+      "span_count": 1,
+      "pair_indices": [
+        573
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 222,
+      "sentence_index": 0,
+      "subclaim_index": 0,
+      "document_index": 5,
+      "url": "https://www.tvguide.com/celebrities/millicent-shelton/credits/3030583558/",
+      "subclaim_digest": "dcbb0f69963d197a",
+      "page_content_digest": "56d9deedaed34f9d",
+      "page_content_words": 37,
+      "span_count": 1,
+      "pair_indices": [
+        574
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 222,
+      "sentence_index": 8,
+      "subclaim_index": 2,
+      "document_index": 1,
+      "url": "https://www.awardsdaily.com/2022/09/12/end-of-the-road-director-millicent-shelton-on-working-with-queen-latifah-and-the-importance-of-inclusion-in-storytelling/",
+      "subclaim_digest": "080a25f4d12b7057",
+      "page_content_digest": "bb6430bdd9c77cd5",
+      "page_content_words": 1732,
+      "span_count": 6,
+      "pair_indices": [
+        575,
+        576,
+        577,
+        578,
+        579,
+        580
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 225,
+      "sentence_index": 1,
+      "subclaim_index": 0,
+      "document_index": 8,
+      "url": "https://www.travelawaits.com/2471665/how-to-see-tokyo-baseball/",
+      "subclaim_digest": "426b02079339c5ca",
+      "page_content_digest": "d9b8461b4ca9b626",
+      "page_content_words": 1392,
+      "span_count": 5,
+      "pair_indices": [
+        581,
+        582,
+        583,
+        584,
+        585
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 232,
+      "sentence_index": 4,
+      "subclaim_index": 1,
+      "document_index": 8,
+      "url": "https://cod.ckcufm.com/programs/391/18626.html",
+      "subclaim_digest": "6938b273e8aea1df",
+      "page_content_digest": "a22aa1dc8e146a24",
+      "page_content_words": 228,
+      "span_count": 1,
+      "pair_indices": [
+        586
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 234,
+      "sentence_index": 1,
+      "subclaim_index": 1,
+      "document_index": 2,
+      "url": "https://www.itdp.in/who-we-are/",
+      "subclaim_digest": "be22af695e42cb86",
+      "page_content_digest": "4cf99688205674a5",
+      "page_content_words": 128,
+      "span_count": 1,
+      "pair_indices": [
+        587
+      ]
+    },
+    {
+      "kind": "document",
+      "passage_index": 235,
+      "sentence_index": 0,
+      "subclaim_index": 2,
+      "document_index": 9,
+      "url": "https://www.liquisearch.com/billy_burke_golfer",
+      "subclaim_digest": "c3040df55ee5fb90",
+      "page_content_digest": "dd67f927d9d73ffc",
+      "page_content_words": 182,
+      "span_count": 1,
+      "pair_indices": [
+        588
+      ]
+    }
+  ]
+}
