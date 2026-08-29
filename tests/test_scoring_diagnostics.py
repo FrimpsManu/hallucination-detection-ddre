@@ -25,11 +25,14 @@ from src.scoring_diagnostics import (
     STATUS_EQUIVALENT,
     STATUS_MATERIAL,
     STATUS_MINOR,
+    arm_histograms,
     bucket_disagreements,
+    compare_arms,
     classify_comparison,
     content_digest,
     delta_stats,
     document_address_key,
+    forward_call_accounting,
     document_bucket,
     enumerate_documents,
     laplace_histogram,
@@ -378,6 +381,232 @@ class TestTokenTypeIdAssessment(unittest.TestCase):
         result = token_type_id_assessment(None, True, [0, 1])
         self.assertIsNone(result["type_vocab_size"])
         self.assertTrue(result["can_differ_from_wang"])
+
+
+# --------------------------------------------------------------------------
+# Decision-level materiality.
+#
+# Wang's runtime loop (released main.py:237-250) scores every span of a
+# document, keeps the MAXIMUM entailment score, and discretizes only that
+# maximum before the Bayesian update. An individual span is never discretized
+# into the update. These tests pin that distinction, because getting it wrong
+# in either direction produces a wrong verdict: counting span buckets would
+# report differences the baseline cannot see, and not counting document-max
+# buckets would miss the ones it can.
+# --------------------------------------------------------------------------
+
+# Two scores 2e-4 apart that straddle a one-decimal rounding boundary, which in
+# turn straddles a document-bucket edge: round(10.0499, 1) == 10.0 -> bucket 0,
+# round(10.0501, 1) == 10.1 -> bucket 1. The raw delta stays far below both
+# materiality bounds, so any MATERIAL verdict below comes from the bucket alone.
+BUCKET_EDGE_LOW = 10.0499
+BUCKET_EDGE_HIGH = 10.0501
+
+
+def make_arm(scores, n_tokens=5):
+    """An arm-shaped dict with identical tokenization across arms."""
+    return {
+        "scores": list(scores),
+        "token_ids": [list(range(n_tokens)) for _ in scores],
+    }
+
+
+def two_span_fixture(left_spans, right_spans):
+    """One NBC pair plus one two-span document, scored identically elsewhere.
+
+    Layout of the flat pair list: index 0 is a positive NBC pair, index 1 a
+    negative one, indices 2 and 3 are the document's two spans.
+    """
+    units = [
+        {"kind": "nbc", "polarity": "positive", "index": 0, "pair_index": 0},
+        {"kind": "nbc", "polarity": "negative", "index": 0, "pair_index": 1},
+    ]
+    document_units = [
+        {
+            "kind": "document",
+            "passage_index": 4,
+            "sentence_index": 2,
+            "subclaim_index": 1,
+            "document_index": 3,
+            "span_count": 2,
+            "pair_indices": [2, 3],
+        }
+    ]
+    left = make_arm([50.0, 50.0] + list(left_spans))
+    right = make_arm([50.0, 50.0] + list(right_spans))
+    return left, right, units, document_units
+
+
+class TestDecisionLevelMateriality(unittest.TestCase):
+    def test_case_a_non_max_span_crossing_a_bucket_is_not_material(self):
+        # The document maximum is 55.0 in both arms and sits at span 0. Span 1
+        # crosses a bucket edge, but BSE never sees span 1's bucket.
+        left, right, units, documents = two_span_fixture(
+            [55.0, BUCKET_EDGE_LOW], [55.0, BUCKET_EDGE_HIGH]
+        )
+        block = compare_arms("case A", left, right, units, documents)
+
+        self.assertEqual(block["spans"]["bucket_disagreements"]["count"], 1)
+        self.assertEqual(
+            block["documents"]["max_score_bucket_disagreements"]["count"], 0
+        )
+        self.assertEqual(block["nbc"]["bucket_disagreements"]["count"], 0)
+        self.assertNotEqual(block["classification"]["status"], STATUS_MATERIAL)
+        for reason in block["classification"]["reasons"]:
+            self.assertNotIn("bucket disagreement", reason)
+
+    def test_case_b_document_max_crossing_a_bucket_is_material(self):
+        # The maximum itself moves across the bucket edge, so the posterior
+        # update differs and the arms are not interchangeable.
+        left, right, units, documents = two_span_fixture(
+            [BUCKET_EDGE_LOW, 5.0], [BUCKET_EDGE_HIGH, 5.0]
+        )
+        block = compare_arms("case B", left, right, units, documents)
+
+        self.assertEqual(
+            block["documents"]["max_score_bucket_disagreements"]["count"], 1
+        )
+        self.assertEqual(block["classification"]["status"], STATUS_MATERIAL)
+        self.assertTrue(
+            any("bucket disagreement" in r for r in block["classification"]["reasons"])
+        )
+
+    def test_case_a_and_case_b_differ_only_in_which_span_moved(self):
+        # Same two scores, same delta, same span-bucket disagreement count.
+        # The only difference is whether the moving span is the maximum.
+        case_a = compare_arms(
+            "a", *two_span_fixture([55.0, BUCKET_EDGE_LOW], [55.0, BUCKET_EDGE_HIGH])
+        )
+        case_b = compare_arms(
+            "b", *two_span_fixture([BUCKET_EDGE_LOW, 5.0], [BUCKET_EDGE_HIGH, 5.0])
+        )
+        self.assertEqual(
+            case_a["spans"]["bucket_disagreements"]["count"],
+            case_b["spans"]["bucket_disagreements"]["count"],
+        )
+        self.assertEqual(
+            case_a["score_deltas_all_pairs"]["max_absolute"],
+            case_b["score_deltas_all_pairs"]["max_absolute"],
+        )
+        self.assertNotEqual(
+            case_a["classification"]["status"], case_b["classification"]["status"]
+        )
+
+    def test_nbc_bucket_disagreement_is_still_material(self):
+        units = [
+            {"kind": "nbc", "polarity": "positive", "index": 0, "pair_index": 0},
+            {"kind": "nbc", "polarity": "negative", "index": 0, "pair_index": 1},
+        ]
+        left = make_arm([9.9499, 50.0])
+        right = make_arm([9.9501, 50.0])
+        block = compare_arms("nbc", left, right, units, [])
+        self.assertEqual(block["nbc"]["bucket_disagreements"]["count"], 1)
+        self.assertEqual(block["classification"]["status"], STATUS_MATERIAL)
+
+    def test_identical_arms_are_equivalent(self):
+        left, right, units, documents = two_span_fixture([55.0, 10.0], [55.0, 10.0])
+        block = compare_arms("identical", left, right, units, documents)
+        self.assertEqual(block["classification"]["status"], STATUS_EQUIVALENT)
+        self.assertEqual(block["token_ids"]["mismatch_count"], 0)
+
+    def test_span_block_is_labelled_as_diagnostic_only(self):
+        left, right, units, documents = two_span_fixture([55.0, 10.0], [55.0, 10.0])
+        block = compare_arms("labels", left, right, units, documents)
+        self.assertFalse(block["spans"]["decision_level"])
+        self.assertTrue(block["nbc"]["decision_level"])
+        self.assertTrue(block["documents"]["decision_level"])
+
+    def test_argmax_move_without_a_max_change_is_not_material(self):
+        # The two spans tie in the left arm (argmax falls on span 0) and the
+        # right arm nudges span 0 down by 1e-5, moving the argmax to span 1.
+        # The maximum score itself is unchanged, so nothing downstream moves.
+        left, right, units, documents = two_span_fixture([55.0, 55.0], [54.99999, 55.0])
+        block = compare_arms("argmax", left, right, units, documents)
+        self.assertEqual(block["documents"]["argmax_span_disagreements"]["count"], 1)
+        self.assertEqual(
+            block["documents"]["max_score_bucket_disagreements"]["count"], 0
+        )
+        self.assertNotEqual(block["classification"]["status"], STATUS_MATERIAL)
+
+    def test_document_examples_name_the_document(self):
+        left, right, units, documents = two_span_fixture(
+            [BUCKET_EDGE_LOW, 5.0], [BUCKET_EDGE_HIGH, 5.0]
+        )
+        block = compare_arms("addresses", left, right, units, documents)
+        example = block["documents"]["max_score_bucket_disagreements"]["examples"][0]
+        self.assertEqual(example["passage_index"], 4)
+        self.assertEqual(example["sentence_index"], 2)
+        self.assertEqual(example["subclaim_index"], 1)
+        self.assertEqual(example["document_index"], 3)
+
+    def test_documents_without_spans_are_skipped_not_counted(self):
+        units = [{"kind": "nbc", "polarity": "positive", "index": 0, "pair_index": 0}]
+        empty = [
+            {
+                "kind": "document",
+                "passage_index": 0,
+                "sentence_index": 0,
+                "subclaim_index": 0,
+                "document_index": 0,
+                "span_count": 0,
+                "pair_indices": [],
+            }
+        ]
+        block = compare_arms("empty", make_arm([1.0]), make_arm([1.0]), units, empty)
+        self.assertEqual(block["documents"]["documents"], 0)
+        self.assertEqual(block["classification"]["status"], STATUS_EQUIVALENT)
+
+
+class TestArmHistograms(unittest.TestCase):
+    def test_histograms_split_by_polarity(self):
+        units = [
+            {"polarity": "positive", "pair_index": 0},
+            {"polarity": "positive", "pair_index": 1},
+            {"polarity": "negative", "pair_index": 2},
+        ]
+        histograms = arm_histograms([5.0, 5.0, 95.0], units)
+        self.assertEqual(histograms["positive"][0], 3)
+        self.assertEqual(histograms["negative"][9], 2)
+
+
+class TestForwardCallAccounting(unittest.TestCase):
+    """Pair evaluations and model forward calls are not the same number."""
+
+    def test_pair_evaluations_count_every_arm(self):
+        accounting = forward_call_accounting(589, 8)
+        self.assertEqual(accounting["pair_evaluations"], 3 * 589)
+
+    def test_batched_arm_issues_fewer_calls(self):
+        calls = forward_call_accounting(589, 8)["forward_calls"]
+        self.assertEqual(calls["A1"], 589)
+        self.assertEqual(calls["A3"], 589)
+        self.assertEqual(calls["A2"], 74)  # ceil(589 / 8)
+        self.assertEqual(calls["total"], 1252)
+
+    def test_forward_calls_are_fewer_than_pair_evaluations(self):
+        accounting = forward_call_accounting(589, 8)
+        self.assertLess(
+            accounting["forward_calls"]["total"], accounting["pair_evaluations"]
+        )
+
+    def test_batch_size_one_makes_the_two_counts_agree(self):
+        accounting = forward_call_accounting(100, 1)
+        self.assertEqual(
+            accounting["forward_calls"]["total"], accounting["pair_evaluations"]
+        )
+
+    def test_partial_final_batch_is_rounded_up(self):
+        self.assertEqual(forward_call_accounting(9, 8)["forward_calls"]["A2"], 2)
+        self.assertEqual(forward_call_accounting(8, 8)["forward_calls"]["A2"], 1)
+
+    def test_zero_pairs_issues_no_calls(self):
+        accounting = forward_call_accounting(0, 8)
+        self.assertEqual(accounting["forward_calls"]["total"], 0)
+        self.assertEqual(accounting["pair_evaluations"], 0)
+
+    def test_invalid_batch_size_is_clamped_not_divided_by_zero(self):
+        self.assertEqual(forward_call_accounting(10, 0)["forward_calls"]["A2"], 10)
+
 
 
 if __name__ == "__main__":

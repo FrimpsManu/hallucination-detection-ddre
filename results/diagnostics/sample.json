@@ -4060,5 +4060,16 @@
         588
       ]
     }
-  ]
+  ],
+  "cost_accounting": {
+    "pairs": 589,
+    "production_batch_size": 8,
+    "pair_evaluations": 1767,
+    "forward_calls": {
+      "A1": 589,
+      "A3": 589,
+      "A2": 74,
+      "total": 1252
+    }
+  }
 }

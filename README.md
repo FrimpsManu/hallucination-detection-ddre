@@ -365,9 +365,16 @@ between A1 and A2 would name two suspects at once.
 
 The sample is all 398 released NBC pairs -- they are what the histograms are
 built from, so a disagreement there propagates into every stopping decision --
-plus a fixed sample of 75 retrieved documents expanded into their text spans.
-About 600 pairs per arm, roughly 1,800 forward passes in total, against 85,194
-document spans for a full reproduction.
+plus a fixed sample of 75 retrieved documents expanded into their text spans:
+589 pairs per arm.
+
+Two costs are reported separately, because they are not the same number. Every
+arm scores every pair, so the run performs `3 x 589 = 1,767` **pair
+evaluations**. It does not perform 1,767 **model forward calls**: A1 and A3 run
+at batch size 1, but A2 batches, so for a batch size of `B` the total is
+`589 + 589 + ceil(589 / B)`, which is **about 1,252 forward calls** at `B = 8`.
+A full reproduction scores 85,194 document spans. The script reports the
+estimate before the run and the observed call counts after it.
 
 Sampling is by SHA-256 rank over `(seed, document address)`, not by
 `random.sample`, whose selection algorithm is a CPython implementation detail
@@ -384,9 +391,26 @@ moved.
 
 Materiality is fixed in `src/scoring_diagnostics.py` before any measurement, so
 a result cannot be reinterpreted after the fact. A bucket disagreement is
-MATERIAL however small the underlying score change was, because the BSE update
-consumes only the bucket; conversely a raw delta that never crosses a bucket
-edge cannot change a posterior, a stopping decision, or an evidence count.
+MATERIAL however small the underlying score change was, because a BSE update
+consumes only a bucket; conversely a raw delta that never crosses a bucket edge
+cannot change a posterior, a stopping decision, or an evidence count.
+
+**Which bucket is the whole point.** BSE consumes exactly two:
+
+- the NBC bucket of each evidence pair, which builds the histograms
+  (released `NBC_feature.py:34`); and
+- the bucket of a document's **maximum** span score (released
+  `main.py:237-250`) -- the runtime loop scores every span, keeps the largest
+  entailment score, and discretizes only that maximum before the Bayesian
+  update.
+
+Individual span buckets are **not** consumed and do not decide materiality. A
+non-maximal span can cross a bucket edge and leave the document score, the
+posterior, the stopping decision, and the evidence count all untouched.
+Span-bucket disagreement is still reported, clearly labelled as a diagnostic
+statistic; the verdict is driven by NBC buckets and document-max buckets only.
+The same applies to a moved argmax span, which is observable downstream only if
+it also changes the maximum score itself.
 
 The verdict follows predeclared rules:
 
@@ -399,6 +423,39 @@ The verdict follows predeclared rules:
 
 `--dry-run` builds and writes the sample and reports its size without loading
 the model, so the sample can be checked before spending GPU time.
+
+### Running the formal follow-up on Colab
+
+The completed Gate 1 artifacts live on Google Drive. Neither script hardcodes a
+Drive path -- both take the location as an argument -- but writing their output
+back to Drive is what makes the results survive a Colab disconnect.
+
+Mount Drive, then run Step 0 against the completed report:
+
+```bash
+python scripts/diagnose_gate1_provenance.py \
+  --report /content/drive/MyDrive/ddre-gate1/wang_reproduction.json \
+  --output /content/drive/MyDrive/ddre-gate1/diagnostics/step0_provenance.json
+```
+
+and Step 1 with its output directory on Drive:
+
+```bash
+python scripts/diagnose_scorer_paths.py \
+  --output-dir /content/drive/MyDrive/ddre-gate1/diagnostics
+```
+
+Step 1 writes both `sample.json` and `step1_scorer_ab.json` into that directory.
+Run it from a checkout whose `--data-root` points at the prepared Wang data;
+pass `--data-root` explicitly if that is also on Drive.
+
+The formal cache at `/content/drive/MyDrive/ddre-gate1/wang_nli_cache.sqlite` is
+**never opened or modified** by either script, wherever the output goes. There
+is no flag that would make them read it: both repository arms are hardcoded to
+`use_cache=False, write_cache=False`, and their scratch database is created in a
+local `TemporaryDirectory` that is deleted on exit. Reading that cache would
+measure the cache instead of the model, and writing to it would contaminate the
+formal Gate 1 artifact.
 
 **These scripts diagnose only. Nothing they find is fixed by them.**
 
