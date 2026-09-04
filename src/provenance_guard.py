@@ -18,6 +18,32 @@ Unverifiable is treated as failed. A reference that does not record a field
 cannot establish that the field matches, and silently accepting the current
 value is exactly the failure mode the guard exists to prevent.
 
+The reference is a **bundle of two artifacts**, because no single artifact
+records everything the guard needs:
+
+* the formal v2 batch-1 Gate report is authoritative for the corrected score
+  version, the Wang source commit, batch size, model name, the truncation
+  precondition, and the runtime/library fields it actually records;
+* a checkpoint-provenance artifact (the Step 2 scoring-path diagnostic)
+  supplements the fields the Gate report does not record at all: the resolved
+  Hugging Face revision, the model/tokenizer commit hashes, the model dtype,
+  the GPU identity, and the ``tokenizers``/``sentencepiece`` versions.
+
+The formal report wins wherever it records a field. Where both record a field
+they must agree, and a disagreement aborts the run — two artifacts describing
+different environments cannot be spliced into one reference. The one exception
+is ``score_version``: the Step 2 diagnostic predates the PR #4 scorer
+correction, so a divergence there is structural rather than a sign of two
+different machines. It does not gate, but it is recorded, and it is one of the
+reasons exact checkpoint identity with the v2 cache cannot be established.
+
+That limitation is stated rather than papered over. The formal v2 Gate report
+does not record a resolved revision, so **no artifact establishes which Hub
+revision produced the v2 cache rows.** The guard pins the revision the
+supplement records and verifies the loaded checkpoint against it, which makes
+this run internally consistent and reproducible; it does not prove the v2 cache
+was produced at that revision, and the report says so.
+
 Standard library only, so the whole guard is testable without torch or a model.
 """
 
@@ -143,10 +169,12 @@ def extract_reference(payload):
             "device.gpu_name",
             "environment.device.gpu_name",
         ),
-        "libraries": _first(
-            payload, "libraries", "environment.libraries", "provenance.libraries"
-        )
-        or {},
+        "libraries": dict(
+            _first(
+                payload, "libraries", "environment.libraries", "provenance.libraries"
+            )
+            or {}
+        ),
     }
     # The Step 2 summary flattens library versions; fall back to those.
     for name in SCORE_AFFECTING_LIBRARIES + ADVISORY_LIBRARIES:
@@ -155,6 +183,186 @@ def extract_reference(payload):
             if flat is not None:
                 reference["libraries"][name] = flat
     return reference
+
+
+# --------------------------------------------------------------------------
+# Reference bundle: the formal v2 Gate report plus a checkpoint supplement.
+# --------------------------------------------------------------------------
+
+FORMAL_SOURCE = "formal_v2_gate_report"
+CHECKPOINT_SOURCE = "checkpoint_provenance"
+
+# Fields the formal v2 batch-1 Gate report records and is authoritative for.
+FORMAL_AUTHORITATIVE_FIELDS = (
+    "model_name",
+    "score_version",
+    "wang_source_commit",
+    "batch_size",
+    "device",
+    "tokenizer_model_max_length",
+)
+
+# Fields the formal Gate report does not record at all. The checkpoint
+# provenance artifact supplements exactly these.
+CHECKPOINT_SUPPLEMENTED_FIELDS = (
+    "resolved_revision",
+    "model_config_commit_hash",
+    "tokenizer_commit_hash",
+    "model_dtype",
+    "gpu_name",
+)
+
+BUNDLE_FIELDS = FORMAL_AUTHORITATIVE_FIELDS + CHECKPOINT_SUPPLEMENTED_FIELDS
+
+# A cross-artifact disagreement here is structural rather than evidence of two
+# different environments: the checkpoint provenance artifact was produced by an
+# earlier diagnostic that predates the PR #4 scorer correction, so it records
+# the pre-correction score version by construction. It is recorded, and it
+# counts against exact checkpoint identity, but it does not gate.
+NON_GATING_CROSS_ARTIFACT_FIELDS = ("score_version",)
+
+AGREE_BOTH = "both_agree"
+AGREE_CONFLICT = "conflict"
+AGREE_FORMAL_ONLY = "formal_only"
+AGREE_CHECKPOINT_ONLY = "checkpoint_only"
+AGREE_UNRECORDED = "unrecorded"
+
+
+def _merge_field(field, formal_value, checkpoint_value):
+    """Resolve one field across the two artifacts, recording where it came from.
+
+    The formal report wins wherever it records the field. The checkpoint
+    artifact supplements only what the formal report left out. Where both
+    record it they must agree.
+    """
+    entry = {
+        "field": field,
+        "formal": formal_value,
+        "checkpoint": checkpoint_value,
+        "gating": False,
+    }
+    if formal_value is not None and checkpoint_value is not None:
+        agree = str(formal_value) == str(checkpoint_value)
+        entry["agreement"] = AGREE_BOTH if agree else AGREE_CONFLICT
+        entry["source"] = FORMAL_SOURCE
+        entry["value"] = formal_value
+        entry["gating"] = (
+            not agree and field not in NON_GATING_CROSS_ARTIFACT_FIELDS
+        )
+    elif formal_value is not None:
+        entry["agreement"] = AGREE_FORMAL_ONLY
+        entry["source"] = FORMAL_SOURCE
+        entry["value"] = formal_value
+    elif checkpoint_value is not None:
+        entry["agreement"] = AGREE_CHECKPOINT_ONLY
+        entry["source"] = CHECKPOINT_SOURCE
+        entry["value"] = checkpoint_value
+    else:
+        entry["agreement"] = AGREE_UNRECORDED
+        entry["source"] = None
+        entry["value"] = None
+    return entry
+
+
+def merge_reference(
+    formal, checkpoint=None, *, formal_path=None, checkpoint_path=None
+):
+    """Combine the authoritative formal reference with a checkpoint supplement.
+
+    ``formal`` and ``checkpoint`` are ``extract_reference`` outputs. Returns a
+    bundle carrying the merged reference, the per-field provenance of every
+    guarded value, the gating conflicts, the recorded non-gating divergences,
+    and the limitations that follow from what the artifacts do not establish.
+    """
+    checkpoint = checkpoint or {}
+    entries = [
+        _merge_field(field, formal.get(field), checkpoint.get(field))
+        for field in BUNDLE_FIELDS
+    ]
+
+    formal_libraries = formal.get("libraries") or {}
+    checkpoint_libraries = checkpoint.get("libraries") or {}
+    libraries = {}
+    for name in SCORE_AFFECTING_LIBRARIES + ADVISORY_LIBRARIES:
+        entry = _merge_field(
+            f"library:{name}", formal_libraries.get(name), checkpoint_libraries.get(name)
+        )
+        # An advisory library cannot change a forward pass, so a cross-artifact
+        # difference in one is not evidence that the artifacts describe
+        # different environments.
+        if name in ADVISORY_LIBRARIES:
+            entry["gating"] = False
+        entries.append(entry)
+        if entry["value"] is not None:
+            libraries[name] = entry["value"]
+
+    reference = {entry["field"]: entry["value"] for entry in entries
+                 if not entry["field"].startswith("library:")}
+    reference["libraries"] = libraries
+
+    conflicts = [e for e in entries if e["agreement"] == AGREE_CONFLICT and e["gating"]]
+    divergences = [
+        e for e in entries if e["agreement"] == AGREE_CONFLICT and not e["gating"]
+    ]
+    by_field = {entry["field"]: entry for entry in entries}
+
+    revision_entry = by_field["resolved_revision"]
+    identity_established = revision_entry["source"] == FORMAL_SOURCE
+
+    limitations = []
+    if revision_entry["agreement"] == AGREE_UNRECORDED:
+        limitations.append(
+            "Neither artifact records a resolved Hugging Face checkpoint "
+            "revision, so the checkpoint cannot be pinned. The static "
+            "resolved_revision_present check gates on this."
+        )
+    elif not identity_established:
+        limitations.append(
+            "The formal v2 Gate report does not record a resolved Hugging Face "
+            f"revision. The pinned revision {revision_entry['value']!r} comes "
+            f"from the checkpoint provenance artifact ({checkpoint_path}), a "
+            "separate diagnostic run. NO ARTIFACT ESTABLISHES that the v2 cache "
+            "rows were produced at that revision; exact checkpoint identity with "
+            "the formal v2 run cannot be established retrospectively. Pinning it "
+            "makes this completion internally consistent and reproducible, which "
+            "is strictly better than resolving against moving Hugging Face main, "
+            "but it is not proof of identity."
+        )
+    for entry in divergences:
+        limitations.append(
+            f"{entry['field']} differs between the artifacts "
+            f"(formal={entry['formal']!r}, checkpoint={entry['checkpoint']!r}). "
+            "The checkpoint provenance artifact predates the PR #4 scorer "
+            "correction, so it describes a run under a different scoring "
+            "convention. The formal value is used; the divergence is further "
+            "reason the supplement cannot establish v2 checkpoint identity."
+        )
+    for entry in entries:
+        if (
+            entry["field"] in FORMAL_AUTHORITATIVE_FIELDS
+            and entry["agreement"] == AGREE_CHECKPOINT_ONLY
+        ):
+            limitations.append(
+                f"{entry['field']} was not recorded by the formal v2 Gate report "
+                "and was supplied by the checkpoint provenance artifact."
+            )
+
+    return {
+        "formal_path": formal_path,
+        "checkpoint_path": checkpoint_path,
+        "reference": reference,
+        "field_sources": entries,
+        "conflicts": conflicts,
+        "recorded_divergences": divergences,
+        "limitations": limitations,
+        "checkpoint_identity_established": identity_established,
+        "policy": (
+            "The formal v2 Gate report is authoritative wherever it records a "
+            "field. The checkpoint provenance artifact supplements only fields "
+            "the Gate report does not record. A field recorded by both must "
+            "agree; a gating disagreement aborts the run."
+        ),
+    }
 
 
 def _check(name, expected, observed, ok, message):
@@ -194,6 +402,65 @@ def _match(name, expected, observed, what, *, advisory=False):
     if advisory and not verified:
         detail += " Reported only; this check does not gate the run."
     return _check(name, expected, observed, verified or advisory, detail)
+
+
+def check_reference_bundle(bundle):
+    """Gating checks over the two-artifact reference bundle.
+
+    One check per field both artifacts record, so every cross-artifact
+    comparison is visible in the report rather than only the failures, plus a
+    summary check that fails if any gating conflict exists.
+    """
+    checks = []
+    for entry in bundle["field_sources"]:
+        if entry["agreement"] not in (AGREE_BOTH, AGREE_CONFLICT):
+            continue
+        agree = entry["agreement"] == AGREE_BOTH
+        if agree:
+            message = (
+                f"{entry['field']} is recorded identically by the formal v2 Gate "
+                "report and the checkpoint provenance artifact."
+            )
+        elif entry["gating"]:
+            message = (
+                f"{entry['field']} disagrees between the two reference artifacts. "
+                "They describe different environments and cannot be spliced into "
+                "one reference."
+            )
+        else:
+            message = (
+                f"{entry['field']} disagrees between the two reference artifacts. "
+                "Recorded and reported; the formal value is authoritative and "
+                "this difference does not gate. See the bundle limitations."
+            )
+        checks.append(
+            _check(
+                f"bundle_agreement_{entry['field'].replace(':', '_')}",
+                entry["formal"],
+                entry["checkpoint"],
+                agree or not entry["gating"],
+                message,
+            )
+        )
+
+    conflicts = [entry["field"] for entry in bundle["conflicts"]]
+    checks.append(
+        _check(
+            "reference_bundle_consistent",
+            [],
+            conflicts,
+            not conflicts,
+            "The formal and checkpoint provenance artifacts agree on every field "
+            "they both record."
+            if not conflicts
+            else (
+                "The formal and checkpoint provenance artifacts disagree on "
+                f"{', '.join(conflicts)}. Refusing to merge two artifacts that "
+                "describe different environments."
+            ),
+        )
+    )
+    return checks
 
 
 def check_static_preconditions(
@@ -278,6 +545,30 @@ def check_static_preconditions(
             score_version,
             "SCORE_VERSION recorded in the reference provenance",
         ),
+        # STATIC, and deliberately so: this must abort before from_pretrained.
+        # Without a recorded revision the only thing left to load is moving
+        # Hugging Face main, which is exactly the uncontrolled variable the
+        # guard exists to eliminate. There is no fallback.
+        _check(
+            "resolved_revision_present",
+            "a resolved Hugging Face revision",
+            reference.get("resolved_revision"),
+            bool(reference.get("resolved_revision")) or allow_local_checkpoint,
+            "A resolved checkpoint revision is recorded, so the model and "
+            "tokenizer can be pinned to it."
+            if reference.get("resolved_revision")
+            else (
+                "No resolved checkpoint revision is recorded by either "
+                "reference artifact. Loading would fall back to moving Hugging "
+                "Face main, which cannot be shown to match the cached scores. "
+                "Aborting before from_pretrained."
+                + (
+                    " Reported only; --unsafe-allow-local-checkpoint is set."
+                    if allow_local_checkpoint
+                    else ""
+                )
+            ),
+        ),
     ]
     return checks
 
@@ -343,6 +634,18 @@ def check_runtime_preconditions(reference, observed, *, allow_local_checkpoint=F
                 "Tokenizer limit differs from the configured max_length. Spans "
                 "would be truncated differently from the cached scores."
             ),
+        )
+    )
+
+    # The Gate report is authoritative for the truncation precondition, so the
+    # live tokenizer limit is checked against the recorded one as well as
+    # against the configured max_length.
+    checks.append(
+        _match(
+            "reference_tokenizer_model_max_length",
+            reference.get("tokenizer_model_max_length"),
+            tokenizer_limit,
+            "Tokenizer model_max_length recorded in the reference provenance",
         )
     )
 
@@ -455,17 +758,41 @@ def guard_report(checks, *, reference_path=None):
 
 def format_guard(report):
     lines = ["-" * 100, "PRE-WRITE PROVENANCE GUARD", "-" * 100]
+    width = max([32] + [len(check["name"]) + 2 for check in report["checks"]])
     for check in report["checks"]:
-        lines.append(f"  {check['name']:<32}{check['status']}")
+        lines.append(f"  {check['name']:<{width}}{check['status']}")
         if check["status"] != STATUS_PASS:
             lines.append(f"      expected: {check['expected']!r}")
             lines.append(f"      observed: {check['observed']!r}")
             lines.append(f"      {check['message']}")
-    lines.append(f"  {'overall':<32}{'PASS' if report['passed'] else 'FAIL'}")
+    lines.append(f"  {'overall':<{width}}{'PASS' if report['passed'] else 'FAIL'}")
     if not report["passed"]:
         lines.append(
             "  ABORTING: zero inference performed, zero cache rows written, "
             "derived cache not created."
         )
+    lines.append("-" * 100)
+    return "\n".join(lines)
+
+
+def format_bundle(bundle):
+    """Human-readable account of where every guarded value came from."""
+    lines = ["-" * 100, "REFERENCE PROVENANCE BUNDLE", "-" * 100]
+    lines.append(f"  formal (authoritative): {bundle['formal_path']}")
+    lines.append(f"  checkpoint (supplement): {bundle['checkpoint_path']}")
+    lines.append("")
+    lines.append(f"  {'field':<34}{'source':<24}{'agreement'}")
+    for entry in bundle["field_sources"]:
+        source = entry["source"] or "-"
+        lines.append(f"  {entry['field']:<34}{source:<24}{entry['agreement']}")
+    lines.append("")
+    lines.append(
+        f"  exact v2 checkpoint identity established: "
+        f"{bundle['checkpoint_identity_established']}"
+    )
+    if bundle["limitations"]:
+        lines.append("  LIMITATIONS:")
+        for limitation in bundle["limitations"]:
+            lines.append(f"    - {limitation}")
     lines.append("-" * 100)
     return "\n".join(lines)

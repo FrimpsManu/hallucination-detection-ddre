@@ -27,13 +27,32 @@ source SHA-256 is recorded before the copy and recomputed afterwards to prove
 the original is byte-identical. The sensitivity rerun uses the derived cache.
 
 Before the derived cache is opened for writes and before any inference, a
-provenance guard compares this environment against the previously recorded
-formal provenance: model name, resolved checkpoint revision, SCORE_VERSION,
-Wang source commit, batch size, truncation equivalence, dtype, device and the
-score-affecting library versions. The model and tokenizer are loaded with
-``revision=`` pinned to the recorded revision rather than moving Hugging Face
-main. On any mismatch the run aborts having performed zero inference and written
-zero cache rows. Unverifiable is treated as failed.
+provenance guard compares this environment against previously recorded formal
+provenance: model name, resolved checkpoint revision, SCORE_VERSION, Wang source
+commit, batch size, truncation equivalence, dtype, device and the
+score-affecting library versions. On any mismatch the run aborts having
+performed zero inference and written zero cache rows. Unverifiable is treated as
+failed.
+
+The reference is a bundle of two artifacts, because no single one records
+everything. ``--formal-provenance`` is the final formal v2 batch-1 Gate report
+and is authoritative wherever it records a field. ``--checkpoint-provenance``
+supplements only the fields it does not record at all -- the resolved Hugging
+Face revision, the model/tokenizer commit hashes, the dtype, the GPU identity,
+and the tokenizers/sentencepiece versions. Fields recorded by both must agree.
+
+The presence of a resolved revision is a STATIC check: without one the run
+aborts before ``from_pretrained`` rather than falling back to moving Hugging
+Face main. Both the model and the tokenizer are then pinned to it.
+
+The formal v2 Gate report does not itself record a revision, so pinning makes
+this completion internally consistent and reproducible but does NOT prove the v2
+cache rows were produced at that revision. The run reports that limitation
+explicitly rather than claiming an identity no artifact establishes.
+
+Immediately after the copy and before the scorer is constructed, the derived
+cache is required to be a byte-faithful copy of the source. A copy that does not
+match the source in digest and row count is never extended.
 
 The work has to be interleaved rather than precomputed: retrieval is adaptive,
 so which document comes next depends on the scores of the documents already
@@ -75,11 +94,14 @@ from src.cache_completion import (  # noqa: E402
 )
 from src.provenance_guard import (  # noqa: E402
     OFFICIAL_NLI_MODEL,
+    check_reference_bundle,
     check_runtime_preconditions,
     check_static_preconditions,
     extract_reference,
+    format_bundle,
     format_guard,
     guard_report,
+    merge_reference,
 )
 from src.cached_document_scores import (  # noqa: E402
     CachedDocumentScorer,
@@ -122,14 +144,26 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--reference-provenance",
+        "--formal-provenance",
         required=True,
         metavar="PATH",
         help=(
-            "Recorded provenance from the formal batch-1 run (the Gate 1 "
-            "reproduction report, the Step 2 scoring-path report, or a previous "
-            "completion report). The guard compares this environment against it "
-            "and pins from_pretrained(revision=...) to the revision it records."
+            "The final formal v2 batch-1 Gate report. AUTHORITATIVE wherever it "
+            "records a field: corrected score version, Wang source commit, batch "
+            "size, model name, truncation precondition, and the runtime/library "
+            "fields it actually records."
+        ),
+    )
+    parser.add_argument(
+        "--checkpoint-provenance",
+        default=None,
+        metavar="PATH",
+        help=(
+            "A checkpoint-provenance artifact (the Step 2 scoring-path "
+            "diagnostic). SUPPLEMENTS only the fields the formal Gate report "
+            "does not record: resolved Hugging Face revision, model/tokenizer "
+            "commit hashes, model dtype, GPU identity, tokenizers and "
+            "sentencepiece versions. Fields recorded by both must agree."
         ),
     )
     parser.add_argument(
@@ -280,13 +314,15 @@ def main():
     print(f"  batch size:              {WANG_BATCH_SIZE} (released Wang semantics)")
     print(f"  source cache (immutable): {source_cache}")
     print(f"  derived cache (written):  {derived_cache}")
-    print(f"  reference provenance:     {args.reference_provenance}")
+    print(f"  formal provenance:        {args.formal_provenance}")
+    print(f"  checkpoint provenance:    {args.checkpoint_provenance}")
     print(f"  placements: {', '.join(placement_label(*p) for p in placements)}")
     print("  cached spans are reused; only genuinely missing spans are evaluated")
     if args.unsafe_allow_in_place:
         print("  *** --unsafe-allow-in-place: the SOURCE cache may be modified ***")
     if args.unsafe_allow_local_checkpoint:
-        print("  *** --unsafe-allow-unpinned-revision: revision checks are advisory ***")
+        print("  *** --unsafe-allow-local-checkpoint: checkpoint-identity "
+              "checks are advisory ***")
 
     if not source_cache.exists():
         print(f"\nERROR: source cache not found at {source_cache}")
@@ -300,7 +336,17 @@ def main():
     # ---------------------------------------------------------------- guard
     # Everything below runs BEFORE the derived cache is created and BEFORE any
     # inference. An abort here leaves zero rows written and no derived cache.
-    reference = extract_reference(load_reference(args.reference_provenance))
+    bundle = merge_reference(
+        extract_reference(load_reference(args.formal_provenance)),
+        extract_reference(load_reference(args.checkpoint_provenance))
+        if args.checkpoint_provenance
+        else None,
+        formal_path=args.formal_provenance,
+        checkpoint_path=args.checkpoint_provenance,
+    )
+    reference = bundle["reference"]
+    print()
+    print(format_bundle(bundle))
 
     from src.utils import SCORE_VERSION, split_text
     from src.wang_data import load_sentence_records
@@ -312,16 +358,22 @@ def main():
         wang_source_commit=wang_source_commit(args.data_root),
         model_name=args.model_name,
         allow_local_checkpoint=args.unsafe_allow_local_checkpoint,
-    )
-    static = guard_report(static_checks, reference_path=args.reference_provenance)
+    ) + check_reference_bundle(bundle)
+    static = guard_report(static_checks, reference_path=args.formal_provenance)
     if not static["passed"]:
         print()
         print(format_guard(static))
-        _write_aborted(output_path, args, placements, static, stage="static")
+        _write_aborted(output_path, args, placements, static, stage="static",
+                       bundle=bundle)
         return 1
 
+    # Guaranteed non-None by the resolved_revision_present static check above,
+    # except under the local-checkpoint debug override where there is no Hub
+    # revision to pin. There is no fallback to moving Hugging Face main.
     revision = reference.get("resolved_revision")
     print(f"\n  pinning checkpoint revision: {revision!r}")
+    if revision is None:
+        print("  (unpinned: --unsafe-allow-local-checkpoint, debug only)")
 
     import torch  # noqa: F401  (imported for the device probe below)
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -348,13 +400,14 @@ def main():
         allow_local_checkpoint=args.unsafe_allow_local_checkpoint,
     )
     guard = guard_report(
-        static_checks + runtime_checks, reference_path=args.reference_provenance
+        static_checks + runtime_checks, reference_path=args.formal_provenance
     )
+    guard["reference_bundle"] = bundle
     print()
     print(format_guard(guard))
     if not guard["passed"]:
         _write_aborted(output_path, args, placements, guard, stage="runtime",
-                       environment=observed)
+                       environment=observed, bundle=bundle)
         return 1
 
     # ------------------------------------------------------- derived cache
@@ -375,16 +428,29 @@ def main():
     print(f"  source rows:          {identity['source_rows']}")
     if identity["copied"]:
         print(f"  derived cache created: {identity['destination_cache']}")
-        print(f"  copy faithful:         {identity['copy_faithful']}")
+    print(f"  copy faithful:         {identity.get('copy_faithful')}")
     if identity.get("warning"):
         print(f"  *** {identity['warning']} ***")
+
+    # HARD PRE-INFERENCE GATE. A derived cache whose digest or row count does
+    # not match the source immediately after copying is already wrong before a
+    # single row is added, and extending it would build correct new scores on a
+    # corrupt base. Refuse before the scorer exists, so zero inference runs and
+    # zero rows are written.
+    if identity.get("copy_faithful") is not True:
+        print()
+        print("ABORTED: the derived cache is not a faithful copy of the source.")
+        print(f"  {identity.get('copy_faithful_note')}")
+        print("  Zero inference performed. Zero cache rows written.")
+        _write_copy_abort(output_path, args, placements, identity, guard, bundle)
+        return 1
 
     records = load_sentence_records(args.data_root, strict=True)
     print(f"  sentences: {len(records)}")
 
     scorer = build_counting_scorer(
         tokenizer, model, args.model_name, str(derived_cache),
-        batch_size=WANG_BATCH_SIZE,
+        batch_size=WANG_BATCH_SIZE, cache_identity=identity,
     )
     rows_before = scorer.cache_size()
     print(f"  derived cache rows before: {rows_before}")
@@ -435,6 +501,11 @@ def main():
     report["environment"] = observed
     report["score_version"] = SCORE_VERSION
     report["pinned_revision"] = revision
+    report["reference_bundle"] = bundle
+    report["checkpoint_identity_established"] = bundle[
+        "checkpoint_identity_established"
+    ]
+    report["provenance_limitations"] = bundle["limitations"]
     report["dataset"] = {
         "sentences": len(records),
         "subclaims": sum(len(r.subclaims) for r in records),
@@ -468,6 +539,19 @@ def main():
           f"{identity['destination_sha256_after_completion']}")
     print(f"  destination rows after completion:   {rows_after}")
     print(f"  source unchanged:  {source_check['unchanged']}")
+    print(f"  copy faithful:     {identity.get('copy_faithful')}")
+
+    if bundle["limitations"]:
+        print()
+        print("-" * 100)
+        print("PROVENANCE LIMITATIONS")
+        print("-" * 100)
+        print(
+            "  exact v2 checkpoint identity established: "
+            f"{bundle['checkpoint_identity_established']}"
+        )
+        for limitation in bundle["limitations"]:
+            print(f"  - {limitation}")
 
     print()
     print("-" * 100)
@@ -487,7 +571,8 @@ def main():
     return 0 if report["run_sound"] else 1
 
 
-def _write_aborted(output_path, args, placements, guard, stage, environment=None):
+def _write_aborted(output_path, args, placements, guard, stage, environment=None,
+                   bundle=None):
     """Record an aborted run: zero inference, zero rows, no derived cache."""
     report = {
         "analysis": "nbc-cache-completion",
@@ -495,12 +580,14 @@ def _write_aborted(output_path, args, placements, guard, stage, environment=None
         "abort_stage": stage,
         "abort_reason": "provenance guard failed",
         "provenance_guard": guard,
+        "reference_bundle": bundle,
         "placements_requested": [list(p) for p in placements],
         "source_cache": args.source_cache,
         "destination_cache": args.output_cache,
         "derived_cache_created": False,
         "new_nli_evaluations_performed": 0,
         "cache_rows_added": 0,
+        "run_sound": False,
         "environment": environment,
         "scope_note": (
             "Aborted before any inference and before the derived cache was "
@@ -516,6 +603,36 @@ def _write_aborted(output_path, args, placements, guard, stage, environment=None
         print(f"  - {message}")
     print("  Zero inference performed. Zero cache rows written. "
           "No derived cache created.")
+    print(f"\nWritten to {output_path}")
+    print("=" * 100)
+
+
+def _write_copy_abort(output_path, args, placements, identity, guard, bundle):
+    """Record an abort on an unfaithful copy: zero inference, zero rows."""
+    report = {
+        "analysis": "nbc-cache-completion",
+        "aborted": True,
+        "abort_stage": "derived-cache-copy",
+        "abort_reason": "derived cache is not a faithful copy of the source",
+        "provenance_guard": guard,
+        "reference_bundle": bundle,
+        "cache_identity": identity,
+        "derived_cache_copy_faithful": False,
+        "placements_requested": [list(p) for p in placements],
+        "source_cache": args.source_cache,
+        "destination_cache": args.output_cache,
+        "new_nli_evaluations_performed": 0,
+        "cache_rows_added": 0,
+        "run_sound": False,
+        "scope_note": (
+            "Aborted after copying and before the scorer was constructed. The "
+            "derived cache did not match the source in digest and row count, so "
+            "it was not extended. Zero inference was performed, zero cache rows "
+            "were written, and the source cache was not touched."
+        ),
+    }
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, default=str)
     print(f"\nWritten to {output_path}")
     print("=" * 100)
 
