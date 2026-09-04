@@ -408,6 +408,264 @@ script changes no baseline behaviour, cost, threshold, metric, tolerance, or
 published reference value; it calls the existing `bse_official`,
 `evaluate_detector` and `evaluate_configuration` unmodified.
 
+### Completing the cache for incomplete placements
+
+The formal sensitivity run against the corrected v2 cache completed 97 of the
+100 CM=14/CFA=24 placements. Three could not be evaluated — `(0,4)`, `(8,4)` and
+`(9,4)` — because the recorded Gate 1 run never consumed the documents those
+histograms cause the policy to retrieve. Under the analysis's own branch logic
+that is `INCONCLUSIVE_PARTIAL_CACHE_COVERAGE`, not a negative result, so the
+missing spans have to be filled before the grid can settle the question.
+
+```bash
+python scripts/complete_nbc_cache.py \
+  --source-cache /content/drive/MyDrive/ddre-gate1/wang_nli_cache_fidelity_v2_batch1.sqlite \
+  --output-cache /content/drive/MyDrive/ddre-gate1/wang_nli_cache_fidelity_v2_batch1_nbc_complete.sqlite \
+  --formal-provenance /content/drive/MyDrive/ddre-gate1/wang_reproduction_fidelity_v2_batch1.json \
+  --checkpoint-provenance /content/drive/MyDrive/ddre-gate1/diagnostics/step2_scoring_path.json \
+  --output /content/drive/MyDrive/ddre-gate1/diagnostics/nbc_cache_completion.json
+```
+
+**The source cache is never written to.** It is an immutable completed Gate 1
+artifact: read, hashed, and copied. New scores go only into the derived cache,
+and the sensitivity rerun must use the derived file. The source SHA-256 is
+recorded before the copy and recomputed after the run to prove it is
+byte-identical; if it is not, the run reports that and exits non-zero.
+`source == destination` is refused outright.
+
+Recorded in the report: source and destination paths, source SHA-256 before,
+destination SHA-256 after completion, and both row counts.
+
+The copy is then verified and **gated on**. `prepare_derived_cache` reports
+`copy_faithful`: whether the derived file matches the source in both digest and
+row count immediately after copying, before anything is written. The check lives
+in `build_counting_scorer`, which is the only place a scorer capable of a
+forward pass or a cache write comes into existence — so an unfaithful copy is
+never extended, and "zero inference, zero rows" is structural rather than a
+promise. `run_sound` is false without it.
+
+#### The reference bundle
+
+No single recorded artifact carries everything the guard needs, so the reference
+is a bundle of two, passed explicitly:
+
+| flag | role |
+| --- | --- |
+| `--formal-provenance` | the final formal v2 batch-1 Gate report — **authoritative** wherever it records a field |
+| `--checkpoint-provenance` | a checkpoint-provenance artifact (the Step 2 scoring-path diagnostic) — **supplements only** what the Gate report does not record |
+
+The Gate report is authoritative for the corrected score version, the Wang
+source commit, batch size, model name, the truncation precondition, and the
+runtime/library fields it actually records. It does not record a resolved
+Hugging Face revision, the model/tokenizer commit hashes, the model dtype, the
+GPU identity, or the `tokenizers`/`sentencepiece` versions; the supplement
+provides exactly those.
+
+A field recorded by **both** must agree, and a disagreement aborts the run: two
+artifacts describing different environments cannot be spliced into one
+reference. The single exception is `score_version` — the Step 2 diagnostic
+predates the PR #4 scorer correction, so a divergence there is structural rather
+than evidence of two machines. It does not gate; it is recorded, and it counts
+against checkpoint identity below. The report records **which artifact supplied
+every guarded field**.
+
+##### The limitation, stated
+
+The formal v2 Gate report does not record a resolved revision. So the revision
+pinned here comes from a separate diagnostic run, and **no artifact establishes
+that the v2 cache rows were produced at that revision.** Exact checkpoint
+identity with the formal v2 run cannot be established retrospectively.
+
+Pinning is still strictly better than resolving against moving Hugging Face
+main: it makes this completion internally consistent and reproducible. It is not
+proof of identity, and the run reports `checkpoint_identity_established: false`
+with the reasons rather than implying otherwise.
+
+#### The 398-pair score-compatibility probe
+
+`checkpoint_identity_established: false` would be enough to stop here, since the
+next unchanged sensitivity run could otherwise publish
+`MISSING_EXAMPLES_CANNOT_EXPLAIN_THE_GAP` on top of a cache whose provenance was
+never closed. What cannot be repaired historically can still be **bounded
+empirically**, so before the derived cache is created the tool rescores a fixed
+sentinel set and requires it to reproduce what the cache already holds.
+
+The sentinels are all 398 released NBC pairs — 199 factual and 199 nonfactual.
+They were fixed long before this analysis, they already sit on the formal v2
+scoring path, and they are the pairs the histograms are built from, so they are
+not chosen to make the probe pass. (Two are exact duplicates of two others, so
+they collapse to 396 distinct keys; comparison is per pair, not per key.)
+
+For each pair the probe builds the exact production v2 cache key, reads the
+stored raw score from the **source cache opened read-only**, recomputes the pair
+with the already provenance-gated revision-pinned model at batch size 1 with
+**both the cache read and the cache write disabled**, and compares.
+
+**Equality is exact float equality.** The provenance guard has already required
+the same pinned model, dtype, device, library versions, batch size and v2
+extraction path, so a difference of any size is a real difference. One-decimal
+and NBC-bucket agreement are computed and reported as **diagnostics only** and
+never substitute — two scores can share a bucket and still be different numbers,
+which is exactly the failure the v1/v2 scaling bug produced.
+
+Reported: total pairs, cached rows found, exact raw matches, raw mismatches,
+maximum absolute raw delta, one-decimal matches, NBC bucket matches, and the
+first few mismatches with their stored and fresh values.
+
+The probe performs 398 forward passes — that is the cost of the evidence — and
+**zero cache writes**: the recompute runs against a scratch database that is
+deleted afterwards, and its row count is measured and recorded.
+
+The source digest is taken **twice**: once before anything happens, and again
+only after all 398 forward passes have run and the scratch scorer is closed. A
+digest read before the work would merely restate the file's starting state; the
+post-probe one is what the verdict uses, and both appear in the report as
+`source_sha256_before_probe` and `source_sha256_after_probe`. If the source
+changes at any point during the probe — even with all 398 scores matching
+exactly — compatibility is not established.
+
+Every integrity measurement is **fail-closed, and absence is failure**: no
+source-integrity check means compatibility is not established, and an unmeasured
+scratch row count (`None`) never counts as zero writes. The same rule applies to
+`run_sound`, which cannot be true without an actual source-integrity check that
+passed.
+
+If any sentinel is missing, any score differs, or the source changed, the run
+aborts **before** `prepare_derived_cache`, so no derived cache exists, no
+completion inference runs, and no row is written.
+
+The two flags stay separate and are never merged:
+
+```
+checkpoint_identity_established:  false
+score_compatibility_established:  true
+```
+
+> The exact historical Hugging Face revision cannot be established
+> retrospectively, but the pinned scorer reproduced all 398 fixed v2 sentinel
+> scores exactly.
+
+Matching scores do **not** turn the first flag true.
+
+#### Pre-write provenance guard
+
+Scores added to an existing cache are only sound if produced under the same
+semantics as the scores already in it — a cache mixing two checkpoints is worse
+than an incomplete one, because the incompleteness is visible and the mixture is
+not. `from_pretrained(model_name)` resolves against Hugging Face main, which
+moves, so the tool compares this environment against the recorded reference
+bundle and loads the model *and* tokenizer with `revision=` pinned.
+
+The **presence** of a resolved revision is a static check. Without one the run
+aborts before `from_pretrained` — there is no fallback to Hugging Face main.
+
+Verified before the derived cache is opened for writes and before any completion
+inference (the compatibility probe below is the only inference that runs before
+that point, and it writes nothing):
+
+| | |
+| --- | --- |
+| exact official model name | `SCORE_VERSION` = `…-hostscale-v2` |
+| Wang source commit = `3e8fc4d…` | batch size = 1 |
+| truncation equivalence | resolved checkpoint revision |
+| model/tokenizer commit hashes | model dtype, device, GPU |
+| `torch` / `transformers` / `tokenizers` versions | model in eval mode |
+| cross-artifact agreement of the bundle | tokenizer limit vs the recorded one |
+
+**Unverifiable is treated as failed.** A reference that does not record a field
+cannot establish that the field matches, and silently accepting the current
+value is the exact failure mode the guard exists to prevent. On any mismatch the
+run aborts having performed **zero inference**, written **zero cache rows**, and
+created **no derived cache**.
+
+`numpy`/`scipy`/`sklearn`/`sentencepiece` versions are reported but do not gate:
+they cannot change an NLI forward pass. The GPU check applies only when a GPU
+was used — `cpu` vs `cuda` is already gated by the device check.
+
+#### Binding compatibility to the copied artifact
+
+The probe certifies one file, identified by the digest it read after its last
+forward pass. `prepare_derived_cache` re-hashes the source when it copies. If
+the formal cache changed in the gap between those two reads, the derived cache
+would be a faithful copy of a **different** artifact than the compatibility
+verdict describes.
+
+So immediately after the copy — and before `build_counting_scorer`, before any
+completion inference, before any new row — the two digests must be equal:
+
+```
+398-pair numerical compatibility
+      -> established on source digest A
+      -> derived cache copied from source digest A
+```
+
+The result is reported as `compatibility_source_bound`, with both digests, and
+`run_sound` requires it. The check lives in `build_counting_scorer` alongside
+the copy-faithful gate, so an unbound run cannot construct the one object
+capable of scoring or writing.
+
+**Policy on an invalidated derived cache:** it is **removed**. It carries the
+`..._nbc_complete.sqlite` name a later sensitivity rerun is told to use, and a
+file that looks like the completed artifact but was copied from an uncertified
+or corrupt source is exactly what gets picked up by mistake. Nothing is lost —
+it holds no new scores, only a copy of rows the source still has. A cache
+written in place (`--unsafe-allow-in-place`) is never removed: the destination
+is the source, and the source is never destroyed. The removal is recorded in the
+report as `derived_cache_discarded`.
+
+#### Formal run order
+
+1. load and merge the formal/checkpoint provenance bundle
+2. static provenance checks — abort here is **before any download**
+3. load model and tokenizer pinned to the recorded revision
+4. runtime provenance checks
+5. 398-pair score-compatibility probe against the source cache, read-only,
+   with the source digest re-taken after the last forward pass
+6. abort if compatibility fails — nothing has been created yet
+7. `prepare_derived_cache`
+8. require `copy_faithful`, then require `compatibility_source_bound`
+9. targeted completion for `(0,4)`, `(8,4)`, `(9,4)`
+10. read-only completeness verification
+11. report
+
+`run_sound` is the conjunction of every one of those gates having actually
+passed: provenance guard passed, `score_compatibility_established`,
+`compatibility_source_bound`, `copy_faithful`, source cache unchanged,
+accounting consistent, and all requested placements complete. Each clause is fail-closed — a run that cannot
+show it passed a gate has not passed it, so an absent probe, an absent guard, an
+absent cache identity or an absent source-integrity check all disqualify.
+
+Two loudly-named debug overrides exist and are **never used by the formal
+command**: `--unsafe-allow-in-place` permits `source == destination`, and
+`--unsafe-allow-local-checkpoint` downgrades the checkpoint-identity checks for
+exercising the tool against a local checkpoint. Neither relaxes score version,
+batch size, Wang commit, truncation, dtype, device or library versions.
+
+This replays `bse_official` for exactly those three placements under
+**CM=14/CFA=24 only**, using the ordinary production `EntailmentScorer` at
+**batch size 1** against the existing v2 cache with the ordinary read-through /
+write-through mechanism. A span already cached is reused; only a genuinely
+missing span is evaluated and written back.
+
+The work is interleaved rather than precomputed because retrieval is adaptive:
+which document comes next depends on the scores of the documents already
+consumed, so the required spans cannot be enumerated in advance. CM=28/CFA=96 is
+deliberately not evaluated — it retrieves different documents from the same
+placement, and scoring for it would compute spans this step was not asked for.
+
+It reports the number of previously missing span scores, the number of new NLI
+evaluations performed, cache rows before and after, and whether each placement
+now completes — the last verified by replaying it through the same **read-only**
+scorer the sensitivity analysis uses, so a pass is evidence rather than a claim.
+Cache growth and evaluation count are cross-checked against each other; a
+mismatch means a write did not land, and the run says so instead of reporting
+success.
+
+The tool is **cache completion only**. It computes no metric, reaches no
+verdict, and reinterprets nothing. Rerun `scripts/diagnose_nbc_sensitivity.py`
+unchanged against the **derived** cache. Running the completion tool twice is a
+no-op: the second pass evaluates zero spans.
+
 ## Gate 1 scoring-path diagnostics
 
 Gate 1 has been run and FAILED against the predeclared tolerances. These two
