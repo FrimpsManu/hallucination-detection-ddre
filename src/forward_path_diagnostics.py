@@ -80,9 +80,13 @@ UNDETERMINED = "UNDETERMINED"
 # Guard reasons that force the overall verdict to withhold causal attribution.
 GUARD_NONDETERMINISTIC = "nondeterministic_device"
 GUARD_REFERENCE_NOT_REPRODUCED = "reference_not_reproduced"
+GUARD_BRIDGE_NOT_EVALUATED = "bridge_not_evaluated"
+GUARD_TOKEN_TYPE_EFFECT = "token_type_ids_not_inert"
 
 HEADLINE_UNDETERMINED_NONDETERMINISTIC = "UNDETERMINED_NONDETERMINISTIC"
 HEADLINE_UNDETERMINED_REFERENCE = "UNDETERMINED_REFERENCE_NOT_REPRODUCED"
+HEADLINE_UNDETERMINED_BRIDGE = "UNDETERMINED_BRIDGE_NOT_EVALUATED"
+HEADLINE_UNDETERMINED_TOKEN_TYPE = "UNDETERMINED_TOKEN_TYPE_EFFECT"
 
 
 # --------------------------------------------------------------------------
@@ -142,7 +146,7 @@ ARM_SPECS = (
     },
     {
         "name": "C4",
-        "label": "confirmation only: + token_type_ids",
+        "label": "repository-side bridge: + token_type_ids",
         "attention_mask": True,
         "token_type_ids": True,
         "inference_mode": True,
@@ -150,12 +154,16 @@ ARM_SPECS = (
             "with torch.inference_mode(): model(input_ids, "
             "attention_mask=attention_mask, token_type_ids=token_type_ids)"
         ),
-        "role": "confirmation",
+        "role": "bridge",
         "isolates": "token_type_ids",
         "note": (
-            "CONFIRMATION ONLY. type_vocab_size is 0, so no token-type embedding "
-            "is instantiated and this argument is expected to be inert. C4 exists "
-            "to demonstrate that, not to test a live hypothesis."
+            "The repository-side bridge: the only arm carrying attention_mask, "
+            "inference_mode and token_type_ids together, so the only one that "
+            "reconstructs Step 1 A3. type_vocab_size is 0 and therefore PREDICTS "
+            "this argument is inert, but a prediction is not a measurement: C3 "
+            "vs C4 measures it, and that check is a REQUIRED link in the causal "
+            "chain rather than a confirmation. C3 is never accepted as a "
+            "substitute for C4."
         ),
     },
 )
@@ -563,36 +571,46 @@ def score_matches_reference(raw, expected, bound=NEGLIGIBLE_MAX_ABS_DELTA):
 
 
 def bridge_arm_name(available_arms):
-    """The arm that most closely reconstructs the Step 1 repository scorer.
+    """The arm that reconstructs the Step 1 repository scorer: C4, or nothing.
 
     C4 carries attention_mask, inference_mode and token_type_ids together, so it
-    is the closest available reconstruction of A3. When C4 was not run, C3
-    stands in: at ``type_vocab_size`` 0 the two are expected to be identical,
-    and the C3-vs-C4 check is what tests that expectation.
+    is the only arm that reconstructs A3. C3 is deliberately NOT accepted as a
+    stand-in. If C3 could substitute, a run where C3 lands on A1 and C4 lands on
+    A3 would be scored as a success for attention_mask and inference_mode, when
+    in fact the only argument that moved the result was token_type_ids.
     """
-    if "C4" in available_arms:
-        return "C4"
-    if "C3" in available_arms:
-        return "C3"
-    return None
+    return "C4" if "C4" in available_arms else None
 
 
 def assess_reference_reproduction(probe, control_block, matrix=None, c3_vs_c4=None):
-    """Evaluate the full causal chain against the recorded Step 1 divergence.
+    """Evaluate the formal causal chain against the recorded Step 1 divergence.
 
-    A causal claim needs the whole chain, not one coincidence:
+    Four links are required, and all four must pass before the C0/C1/C2/C3
+    factorial may be promoted as an explanation of the A1 -> A3 divergence:
 
     1. C0 reproduces Step 1 A1 -- raw within bound, rounded value, and bucket;
     2. C0R is bit-identical to C0, so the device is deterministic;
-    3. some isolated factor moves the probe pair off the A1 bucket;
-    4. the bridge arm reproduces Step 1 A3 -- raw within bound, rounded, bucket;
-    5. C3 and C4 agree, confirming token_type_ids are inert at
-       ``type_vocab_size`` 0.
+    3. C4 reproduces Step 1 A3 -- raw within bound, rounded value, and bucket;
+    4. C3 and C4 are bit-identical.
 
-    Links 1, 2 and 4 are required. Link 3 is informational. Link 5 is a
-    confirmation whose failure surfaces as a warning rather than blocking the
-    reproduction claim, since C3 != C4 would be a separate finding about
-    token_type_ids rather than a fault in the A1 -> A3 reconstruction.
+    C4 is therefore part of the formal chain, not a confirmation arm.
+
+    Link 4 is required, not a confirmation. ``type_vocab_size`` being 0 predicts
+    that token_type_ids are inert, but a prediction is not a measurement: an
+    empirical C3 != C4 overrides it. Consider the run where C0 ~ A1, C3 ~ A1 and
+    C4 ~ A3. Every other link passes, yet the only argument that moved the
+    result is token_type_ids, and attention_mask and inference_mode have
+    reconstructed nothing. Treating link 4 as a warning would report that run as
+    a success for the target factors, which would be wrong.
+
+    When link 4 does pass alongside link 3, C3 is bit-identical to an arm that
+    reproduces A3, so C3 reconstructs the repository-side behaviour *without*
+    token_type_ids. That is the empirical validation of inertness, and only then
+    can the factorial isolate attention_mask, inference_mode, their interaction,
+    or no effect.
+
+    A fifth link -- some isolated factor moving the probe pair off the A1 bucket
+    -- is informational and never gates.
 
     Landing in the repository bucket is explicitly NOT sufficient on its own.
     """
@@ -615,6 +633,14 @@ def assess_reference_reproduction(probe, control_block, matrix=None, c3_vs_c4=No
         else None
     )
 
+    # Informational: where C3 lands relative to A3. This is what exposes the
+    # C3 ~ A1 / C4 ~ A3 pattern that link 4 exists to catch.
+    c3_check = (
+        score_matches_reference(arms["C3"]["raw"], reference["repository"])
+        if "C3" in arms
+        else None
+    )
+
     arms_reaching_repository_bucket = sorted(
         name
         for name, row in arms.items()
@@ -623,6 +649,7 @@ def assess_reference_reproduction(probe, control_block, matrix=None, c3_vs_c4=No
 
     c0_reproduces = bool(c0_check and c0_check["reproduces"])
     bridge_reproduces = bool(bridge_check and bridge_check["reproduces"])
+    bridge_evaluated = bridge is not None and c3_vs_c4 is not None
     token_type_ids_inert = (
         None if c3_vs_c4 is None else c3_vs_c4["numerical_difference"] == NO
     )
@@ -646,6 +673,27 @@ def assess_reference_reproduction(probe, control_block, matrix=None, c3_vs_c4=No
         },
         {
             "link": 3,
+            "requirement": "C4 reproduces Step 1 A3 raw, rounded and bucket",
+            "required": True,
+            "passed": bridge_reproduces,
+            "detail": bridge_check,
+        },
+        {
+            "link": 4,
+            "requirement": (
+                "C3 and C4 are bit-identical (token_type_ids empirically inert)"
+            ),
+            "required": True,
+            "passed": token_type_ids_inert,
+            "detail": None
+            if c3_vs_c4 is None
+            else {
+                "numerical_difference": c3_vs_c4["numerical_difference"],
+                "max_absolute_delta": c3_vs_c4["deltas"]["max_absolute"],
+            },
+        },
+        {
+            "link": 5,
             "requirement": (
                 f"an isolated factor moves the probe pair off bucket {wang_bucket}"
             ),
@@ -653,28 +701,6 @@ def assess_reference_reproduction(probe, control_block, matrix=None, c3_vs_c4=No
             "passed": bool(arms_reaching_repository_bucket),
             "detail": {
                 "arms_reaching_repository_bucket": arms_reaching_repository_bucket
-            },
-        },
-        {
-            "link": 4,
-            "requirement": (
-                f"the bridge arm ({bridge or 'none available'}) reproduces Step 1 "
-                "A3 raw, rounded and bucket"
-            ),
-            "required": True,
-            "passed": bridge_reproduces,
-            "detail": bridge_check,
-        },
-        {
-            "link": 5,
-            "requirement": "C3 == C4, confirming token_type_ids are inert",
-            "required": False,
-            "passed": token_type_ids_inert,
-            "detail": None
-            if c3_vs_c4 is None
-            else {
-                "numerical_difference": c3_vs_c4["numerical_difference"],
-                "max_absolute_delta": c3_vs_c4["deltas"]["max_absolute"],
             },
         },
     ]
@@ -698,13 +724,39 @@ def assess_reference_reproduction(probe, control_block, matrix=None, c3_vs_c4=No
             "and causal attribution is withheld. Check that the same model "
             "revision, device and dependency versions are in use."
         )
+    elif not bridge_evaluated:
+        guard = GUARD_BRIDGE_NOT_EVALUATED
+        explains = UNDETERMINED
+        message = (
+            "C4 was not run, so the bridge arm could not be evaluated and C3 "
+            "cannot stand in for it. Without C4 there is no way to show that "
+            "token_type_ids are inert, and a run where C3 lands on A1 while C4 "
+            "lands on A3 would be indistinguishable from one where "
+            "attention_mask and inference_mode did the work. Causal attribution "
+            "is withheld. --skip-c4 remains useful for debugging but cannot "
+            "establish the formal causal chain."
+        )
+    elif token_type_ids_inert is not True:
+        guard = GUARD_TOKEN_TYPE_EFFECT
+        explains = UNDETERMINED
+        message = (
+            "C3 and C4 are not bit-identical, so the token_type_ids argument "
+            "empirically changed the result even though type_vocab_size is 0 and "
+            "predicts it should be inert. A measurement overrides that "
+            "prediction. attention_mask and torch.inference_mode() therefore "
+            "cannot yet be isolated as the explanation of the Step 1 A1 -> A3 "
+            "divergence, and causal attribution is withheld. Investigate the "
+            "token_type_ids path before interpreting the factorial."
+        )
     elif bridge_reproduces:
         guard = None
         explains = YES
         message = (
-            f"Reproduced. C0 matches Step 1 A1 and the bridge arm {bridge} matches "
-            "Step 1 A3 on raw score, rounded value and NBC bucket, so the "
-            "forward-path factors account for the Step 1 divergence."
+            "Reproduced. C0 matches Step 1 A1, C4 matches Step 1 A3 on raw score, "
+            "rounded value and NBC bucket, and C3 is bit-identical to C4 -- so C3 "
+            "reconstructs the repository-side behaviour without token_type_ids, "
+            "empirically confirming they are inert. The C0/C1/C2/C3 factorial may "
+            "be read as an explanation of the forward-path divergence."
         )
     else:
         guard = None
@@ -718,40 +770,51 @@ def assess_reference_reproduction(probe, control_block, matrix=None, c3_vs_c4=No
                 "evidence that the divergence was reproduced"
             )
         message = (
-            "Not reproduced. C0 matches Step 1 A1, but no arm reconstructs Step 1 "
-            f"A3 to within {NEGLIGIBLE_MAX_ABS_DELTA:.0e} on the raw score with "
-            "the recorded rounded value and bucket" + extra + ". Neither "
-            "torch.inference_mode() nor attention_mask explains the Step 1 "
-            "result; another difference remains."
+            "Not reproduced. C0 matches Step 1 A1 and token_type_ids are "
+            "confirmed inert, but C4 does not reconstruct Step 1 A3 to within "
+            f"{NEGLIGIBLE_MAX_ABS_DELTA:.0e} on the raw score with the recorded "
+            "rounded value and bucket" + extra + ". Neither torch.inference_mode() "
+            "nor attention_mask explains the Step 1 result; another difference "
+            "remains."
         )
 
     warnings = []
     if token_type_ids_inert is False:
         warnings.append(
-            "C3 and C4 differ even though type_vocab_size is 0. token_type_ids "
-            "were expected to be inert; this is a separate finding and does not "
-            "by itself invalidate the A1 -> A3 reconstruction."
+            "C3 and C4 differ even though type_vocab_size is 0. This is a "
+            "finding in its own right about the token_type_ids path, and it "
+            "blocks causal attribution for the target factors."
         )
-    if bridge == "C3":
+    if bridge is None:
         warnings.append(
-            "C4 was not run, so C3 stands in as the bridge arm. Link 5 cannot be "
-            "evaluated and token_type_ids remain unconfirmed as inert."
+            "C4 was not run. C3 is NOT accepted as a substitute bridge arm, "
+            "because that substitution is exactly what would hide a "
+            "token_type_ids-driven result."
         )
+    if c3_check is not None and bridge_check is not None:
+        if bridge_check["reproduces"] and not c3_check["reproduces"]:
+            warnings.append(
+                "C4 reconstructs Step 1 A3 but C3 does not. The difference "
+                "between them is token_type_ids alone, so the target factors "
+                "have not reconstructed A3."
+            )
 
     return {
         "explains_reference_observation": explains,
         "guard": guard,
         "causal_chain": chain,
         "bridge_arm": bridge,
+        "bridge_evaluated": bridge_evaluated,
         "c0_vs_step1_a1": c0_check,
         "bridge_vs_step1_a3": bridge_check,
+        "c3_vs_step1_a3_informational": c3_check,
         "arms_reaching_repository_bucket": arms_reaching_repository_bucket,
         "c0_reproduces_literal_wang": c0_reproduces,
         "bridge_reproduces_repository": bridge_reproduces,
         "determinism_control_passed": bool(deterministic),
         "token_type_ids_inert": token_type_ids_inert,
         "required_links_passed": all(
-            link["passed"] for link in chain if link["required"]
+            link["passed"] is True for link in chain if link["required"]
         ),
         "warnings": warnings,
         "message": message,
@@ -762,8 +825,9 @@ def build_verdict(matrix, probe, control_block, c3_vs_c4=None):
     """Assemble the interpretation, withholding attribution when guarded.
 
     The factor-isolation headline is promoted to the overall verdict only when
-    both guards pass: the device reproduced itself, and C0 reproduced the Step 1
-    literal-Wang score. Reporting a causal headline while simultaneously saying
+    every guard passes: the device reproduced itself, C0 reproduced the Step 1
+    literal-Wang score, C4 was actually run, and C3 was bit-identical to C4.
+    Reporting a causal headline while simultaneously saying
     attribution is withheld would be a contradiction, so on a guard failure the
     overall ``headline`` and ``causal_candidate`` say attribution is withheld
     and nothing else.
@@ -798,6 +862,22 @@ def build_verdict(matrix, probe, control_block, c3_vs_c4=None):
             "Causal attribution withheld: C0 did not reproduce the Step 1 "
             "literal-Wang score, so this run is not comparable to the "
             "observation it is meant to explain."
+        )
+        withheld = True
+    elif guard == GUARD_BRIDGE_NOT_EVALUATED:
+        headline = HEADLINE_UNDETERMINED_BRIDGE
+        candidate = (
+            "Causal attribution withheld: C4 was not run, so the repository-side "
+            "bridge could not be evaluated and token_type_ids could not be shown "
+            "to be inert."
+        )
+        withheld = True
+    elif guard == GUARD_TOKEN_TYPE_EFFECT:
+        headline = HEADLINE_UNDETERMINED_TOKEN_TYPE
+        candidate = (
+            "Causal attribution withheld: the supposedly inert token_type_ids "
+            "argument empirically changed the result (C3 != C4), so the target "
+            "factors cannot yet be isolated as the explanation."
         )
         withheld = True
     else:

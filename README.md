@@ -457,7 +457,7 @@ released NBC pairs:
 | `C1` | `model(input_ids)` under `inference_mode` | inference_mode |
 | `C2` | `model(input_ids, attention_mask=...)` | attention_mask |
 | `C3` | `model(input_ids, attention_mask=...)` under `inference_mode` | both |
-| `C4` | `... + token_type_ids=...` under `inference_mode` | **confirmation only** |
+| `C4` | `... + token_type_ids=...` under `inference_mode` | **repository-side bridge (required)** |
 | `C0R` | `model(input_ids)`, run last | **determinism control** |
 
 **Only the model call sits inside `torch.inference_mode()`.** That mirrors
@@ -484,20 +484,24 @@ scales in float32 before widening; that is a separate, already-catalogued
 difference of order `1e-6`, which is why the reference checks below compare
 within a bound rather than demanding bit-equality.
 
-`C4` is confirmation only: `type_vocab_size` is 0, so the argument is expected
-to be inert, and the arm exists to demonstrate that rather than to test a live
-hypothesis.
+`C4` is the **repository-side bridge**: the only arm carrying `attention_mask`,
+`inference_mode` and `token_type_ids` together, so the only one that
+reconstructs Step 1 A3. `type_vocab_size` being 0 *predicts* `token_type_ids`
+are inert, but a prediction is not a measurement — `C3` vs `C4` measures it, and
+that check is a **required link**, not a confirmation.
 
 **`C0R` is what makes any of this attributable.** It re-runs `C0` unchanged at
 the end. If `C0` and `C0R` are not bit-identical, the forward pass is
 nondeterministic on that device and every factor attribution would be unfounded.
 
-Two guards can force the verdict to withhold causal attribution outright:
+Four guards can force the verdict to withhold causal attribution outright:
 
 | Guard | Overall headline |
 | --- | --- |
 | `C0R` is not bit-identical to `C0` | `UNDETERMINED_NONDETERMINISTIC` |
 | `C0` does not reproduce Step 1 A1 | `UNDETERMINED_REFERENCE_NOT_REPRODUCED` |
+| `C4` was not run | `UNDETERMINED_BRIDGE_NOT_EVALUATED` |
+| `C3 != C4` | `UNDETERMINED_TOKEN_TYPE_EFFECT` |
 
 When either fires, the overall `headline` and `causal_candidate` say attribution
 is withheld and name no factor, and `causal_attribution_withheld` is `true`. The
@@ -515,23 +519,36 @@ here is a 0.0068 divergence.
 
 | Link | Requirement | |
 | --- | --- | --- |
-| 1 | `C0` reproduces Step 1 A1 -- raw within `1e-4`, **and** rounded value, **and** bucket | required |
+| 1 | `C0` reproduces Step 1 A1 — raw within `1e-4`, **and** rounded value, **and** bucket | required |
 | 2 | `C0R` is bit-identical to `C0` | required |
-| 3 | an isolated factor moves the probe pair off the A1 bucket | informational |
-| 4 | the bridge arm reproduces Step 1 A3 -- raw within `1e-4`, rounded, bucket | required |
-| 5 | `C3 == C4`, confirming `token_type_ids` are inert at `type_vocab_size` 0 | confirmation |
+| 3 | `C4` reproduces Step 1 A3 — raw within `1e-4`, rounded, bucket | required |
+| 4 | `C3` and `C4` are bit-identical | required |
+| 5 | an isolated factor moves the probe pair off the A1 bucket | informational |
 
-The **bridge arm** is `C4`: it carries `attention_mask`, `inference_mode` and
-`token_type_ids` together, so it is the closest available reconstruction of the
-Step 1 repository scorer. If `C4` was not run, `C3` stands in and link 5 is
-reported as unevaluated. A `C3 != C4` result surfaces as a warning rather than
-blocking the claim, since that would be a separate finding about
-`token_type_ids` rather than a fault in the A1 → A3 reconstruction.
+**Link 4 is required, not a confirmation.** Consider a run where `C0 ≈ A1`,
+`C3 ≈ A1` and `C4 ≈ A3`. Every other link passes — yet the only argument that
+moved the result is `token_type_ids`, and `attention_mask` and
+`torch.inference_mode()` have reconstructed nothing. Treating `C3 != C4` as a
+warning would report that run as a success for the target factors, which would
+be wrong. An empirical `C3 != C4` overrides the `type_vocab_size == 0`
+prediction, and the verdict becomes `UNDETERMINED_TOKEN_TYPE_EFFECT`.
 
-`explains_reference_observation: YES` requires links 1, 2 and 4. An arm merely
-landing in the repository bucket is reported under
-`arms_reaching_repository_bucket` and is never on its own treated as evidence
-that the divergence was reproduced.
+When link 4 *does* pass alongside link 3, `C3` is bit-identical to an arm that
+reproduces A3, so `C3` reconstructs the repository-side behaviour **without**
+`token_type_ids`. That is the empirical validation of inertness, and only then
+may the `C0`/`C1`/`C2`/`C3` factorial identify `attention_mask`,
+`torch.inference_mode()`, their interaction, or no effect.
+
+`C3` is **never** accepted as a substitute bridge arm — that substitution is
+exactly what would hide a `token_type_ids`-driven result. A run without `C4`
+yields `UNDETERMINED_BRIDGE_NOT_EVALUATED`; `--skip-c4` stays useful for
+debugging but cannot establish the formal causal chain.
+
+`explains_reference_observation: YES` requires links 1–4. An arm merely landing
+in the repository bucket is reported under `arms_reaching_repository_bucket` and
+is never on its own treated as evidence that the divergence was reproduced. The
+report also carries `c3_vs_step1_a3_informational`, which is what exposes the
+`C3 ≈ A1` / `C4 ≈ A3` pattern link 4 exists to catch.
 
 Four controls keep the forward call the only variable: the tokenizer and model
 are loaded once; every pair is tokenized **once** and the identical tensors are
@@ -573,7 +590,8 @@ or it would classify the very difference under investigation as noise.
 
 #### Interpretation
 
-These apply only once both guards above have passed; otherwise the verdict is
+These apply only once **all four** guards above have passed — that is, once the
+required links of the causal chain are complete. Otherwise the verdict is
 `UNDETERMINED` and none of them is promoted.
 
 | Observation | Conclusion |
