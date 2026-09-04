@@ -19,12 +19,16 @@ from src.cache_completion import (
     INCOMPLETE_PRIMARY_PLACEMENTS,
     PRIMARY_CONFIGURATION,
     WANG_BATCH_SIZE,
+    CompatibilitySourceMismatch,
     SpanCountingMixin,
     UnfaithfulDerivedCache,
     UnsafeCacheTarget,
+    assert_compatibility_source_bound,
     assert_copy_faithful,
+    bind_compatibility_to_source,
     build_counting_scorer,
     cache_row_count,
+    discard_invalid_derived_cache,
     completion_report,
     parse_placement,
     placement_label,
@@ -323,6 +327,16 @@ def append_row(path, key="extra"):
     connection.close()
 
 
+SOURCE_DIGEST_A = "a" * 64
+SOURCE_DIGEST_B = "b" * 64
+BOUND = {
+    "compatibility_source_sha256": SOURCE_DIGEST_A,
+    "copy_source_sha256": SOURCE_DIGEST_A,
+    "bound": True,
+    "message": "",
+}
+
+
 class DerivedCacheTestCase(unittest.TestCase):
     def setUp(self):
         self._tempdir = tempfile.TemporaryDirectory(prefix="derived-cache-")
@@ -427,7 +441,7 @@ class TestFaithfulCopyGate(DerivedCacheTestCase):
         with self.assertRaises(UnfaithfulDerivedCache) as caught:
             build_counting_scorer(
                 None, None, "model", str(self.destination),
-                cache_identity=self.unfaithful(),
+                cache_identity=self.unfaithful(), source_binding=BOUND,
             )
         self.assertIn("zero inference", str(caught.exception))
 
@@ -437,7 +451,8 @@ class TestFaithfulCopyGate(DerivedCacheTestCase):
         rows_after_copy = cache_row_count(self.destination)
         with self.assertRaises(UnfaithfulDerivedCache):
             build_counting_scorer(
-                None, None, "model", str(self.destination), cache_identity=identity
+                None, None, "model", str(self.destination),
+                cache_identity=identity, source_binding=BOUND,
             )
         self.assertIsNone(rows_before)
         self.assertEqual(cache_row_count(self.destination), rows_after_copy)
@@ -502,6 +517,7 @@ class TestFaithfulCopyGate(DerivedCacheTestCase):
             [placement_entry("a", 2, 50)], [verified("a")],
             cache_identity=identity, source_check=source_check,
             guard={"passed": True}, compatibility=PASSING_COMPATIBILITY,
+            source_binding=BOUND,
         )
         self.assertFalse(report["derived_cache_copy_faithful"])
         self.assertFalse(report["run_sound"])
@@ -515,6 +531,7 @@ class TestFaithfulCopyGate(DerivedCacheTestCase):
             [placement_entry("a", 2, 50)], [verified("a")],
             cache_identity=identity, source_check=None,
             guard={"passed": True}, compatibility=PASSING_COMPATIBILITY,
+            source_binding=BOUND,
         )
         self.assertFalse(report["source_cache_unchanged"])
         self.assertFalse(report["run_sound"])
@@ -615,11 +632,37 @@ class TestScriptOrdering(unittest.TestCase):
             self.line_of_call("build_counting_scorer"),
         )
 
+    def test_the_source_binding_runs_before_the_scorer_is_constructed(self):
+        self.assertLess(
+            self.line_of_call("bind_compatibility_to_source"),
+            self.line_of_call("build_counting_scorer"),
+        )
+
+    def test_the_source_binding_runs_after_the_copy(self):
+        # It compares the digest prepare_derived_cache recorded, so it cannot
+        # run before that digest exists.
+        self.assertLess(
+            self.line_of_call("prepare_derived_cache"),
+            self.line_of_call("bind_compatibility_to_source"),
+        )
+
+    def test_the_binding_abort_runs_before_the_scorer_is_constructed(self):
+        self.assertLess(
+            self.line_of_call("_write_binding_abort"),
+            self.line_of_call("build_counting_scorer"),
+        )
+
+    def test_an_invalidated_derived_cache_is_discarded_before_scoring(self):
+        self.assertLess(
+            self.line_of_call("discard_invalid_derived_cache"),
+            self.line_of_call("build_counting_scorer"),
+        )
+
     def test_the_completion_loop_runs_after_every_gate(self):
         completion = self.line_of_call("complete_placement")
         for gate in ("check_static_preconditions", "check_runtime_preconditions",
                      "_run_compatibility_probe", "prepare_derived_cache",
-                     "build_counting_scorer"):
+                     "bind_compatibility_to_source", "build_counting_scorer"):
             with self.subTest(gate=gate):
                 self.assertLess(self.line_of_call(gate), completion)
 
@@ -640,12 +683,114 @@ PASSING_COMPATIBILITY = {
     "pairs_probed": 398,
     "exact_raw_matches": 398,
     "score_compatibility_established": True,
+    "source_sha256_after_probe": SOURCE_DIGEST_A,
 }
+
+
+class TestCompatibilitySourceBinding(DerivedCacheTestCase):
+    """The copied source must be the artifact compatibility was established on.
+
+    The probe certifies one file, identified by the digest it read after its
+    last forward pass. ``prepare_derived_cache`` re-hashes the source when it
+    copies. If the formal cache changed in between, the derived cache is a
+    faithful copy of a *different* artifact than the verdict describes.
+    """
+
+    def compatibility(self, digest=SOURCE_DIGEST_A):
+        return dict(PASSING_COMPATIBILITY, source_sha256_after_probe=digest)
+
+    def identity(self, digest=SOURCE_DIGEST_A):
+        return {
+            "copied": True,
+            "destination_cache": str(self.destination),
+            "source_sha256_before": digest,
+            "copy_faithful": True,
+        }
+
+    def test_the_clean_case_binds(self):
+        binding = bind_compatibility_to_source(
+            self.compatibility(), self.identity()
+        )
+        self.assertTrue(binding["bound"])
+        self.assertEqual(binding["compatibility_source_sha256"], SOURCE_DIGEST_A)
+        self.assertEqual(binding["copy_source_sha256"], SOURCE_DIGEST_A)
+        assert_compatibility_source_bound(binding)  # does not raise
+
+    def test_a_source_replaced_between_the_probe_and_the_copy_is_not_bound(self):
+        # 1. compatibility passes on digest A
+        # 2. the source is replaced
+        # 3. prepare_derived_cache sees digest B
+        # 4. the binding fails
+        binding = bind_compatibility_to_source(
+            self.compatibility(SOURCE_DIGEST_A), self.identity(SOURCE_DIGEST_B)
+        )
+        self.assertFalse(binding["bound"])
+        self.assertEqual(binding["compatibility_source_sha256"], SOURCE_DIGEST_A)
+        self.assertEqual(binding["copy_source_sha256"], SOURCE_DIGEST_B)
+        self.assertIn("CHANGED BETWEEN THE COMPATIBILITY PROBE AND THE COPY",
+                      binding["message"])
+
+    def test_an_unbound_run_never_constructs_a_completion_scorer(self):
+        # 5. the completion scorer is never constructed, so 6. zero completion
+        # inference and 7. zero new rows follow structurally: there is nothing
+        # that could score or write.
+        binding = bind_compatibility_to_source(
+            self.compatibility(SOURCE_DIGEST_A), self.identity(SOURCE_DIGEST_B)
+        )
+        identity = prepare_derived_cache(self.source, self.destination)
+        rows_after_copy = cache_row_count(self.destination)
+        with self.assertRaises(CompatibilitySourceMismatch) as caught:
+            build_counting_scorer(
+                None, None, "model", str(self.destination),
+                cache_identity=identity, source_binding=binding,
+            )
+        self.assertIn("zero completion inference", str(caught.exception))
+        self.assertEqual(cache_row_count(self.destination), rows_after_copy)
+        self.assertEqual(cache_row_count(self.destination), 7)
+        self.assertEqual(cache_row_count(self.source), 7)
+
+    def test_a_missing_binding_is_refused(self):
+        for binding in (None, {}, {"bound": False}):
+            with self.subTest(binding=binding):
+                with self.assertRaises(CompatibilitySourceMismatch):
+                    assert_compatibility_source_bound(binding)
+
+    def test_a_digest_missing_on_either_side_is_not_bound(self):
+        for compatibility, identity in (
+            ({}, self.identity()),
+            (self.compatibility(), {"source_sha256_before": None}),
+            (None, None),
+        ):
+            with self.subTest(compatibility=compatibility):
+                binding = bind_compatibility_to_source(compatibility, identity)
+                self.assertFalse(binding["bound"])
+                self.assertIn("Unverifiable is treated as failed",
+                              binding["message"])
+
+    def test_an_invalidated_derived_cache_is_removed(self):
+        # Policy: it carries the name a sensitivity rerun is told to use, and
+        # it holds no new scores, so it is deleted rather than left on disk.
+        identity = prepare_derived_cache(self.source, self.destination)
+        discarded = discard_invalid_derived_cache(identity)
+        self.assertTrue(discarded["removed"])
+        self.assertFalse(self.destination.exists())
+        self.assertTrue(self.source.exists())
+        self.assertEqual(cache_row_count(self.source), 7)
+
+    def test_an_in_place_cache_is_never_removed(self):
+        # The destination is the source; the source is never destroyed.
+        identity = prepare_derived_cache(
+            self.source, self.source, allow_in_place=True
+        )
+        discarded = discard_invalid_derived_cache(identity)
+        self.assertFalse(discarded["removed"])
+        self.assertTrue(self.source.exists())
+        self.assertIn("never destroyed", discarded["reason"])
 
 
 class TestReportCarriesCacheIdentity(DerivedCacheTestCase):
     def build_report(self, source_unchanged=True, guard_passed=True,
-                     compatibility=PASSING_COMPATIBILITY):
+                     compatibility=PASSING_COMPATIBILITY, source_binding=BOUND):
         identity = prepare_derived_cache(
             self.source, self.destination, overwrite=True
         )
@@ -668,6 +813,7 @@ class TestReportCarriesCacheIdentity(DerivedCacheTestCase):
             source_check=source_check,
             guard={"passed": guard_passed},
             compatibility=compatibility,
+            source_binding=source_binding,
         )
 
     def test_both_cache_paths_and_hashes_are_recorded(self):
@@ -701,6 +847,26 @@ class TestReportCarriesCacheIdentity(DerivedCacheTestCase):
         report = self.build_report(compatibility=failed)
         self.assertFalse(report["score_compatibility_established"])
         self.assertFalse(report["run_sound"])
+
+    def test_run_sound_is_false_when_the_source_is_not_bound(self):
+        unbound = dict(BOUND, bound=False, copy_source_sha256=SOURCE_DIGEST_B)
+        report = self.build_report(source_binding=unbound)
+        self.assertFalse(report["compatibility_source_bound"])
+        self.assertFalse(report["run_sound"])
+        self.assertTrue(report["score_compatibility_established"])
+
+    def test_run_sound_is_false_when_no_binding_was_formed(self):
+        report = self.build_report(source_binding=None)
+        self.assertFalse(report["compatibility_source_bound"])
+        self.assertFalse(report["run_sound"])
+
+    def test_a_bound_run_reports_both_digests(self):
+        report = self.build_report()
+        self.assertTrue(report["compatibility_source_bound"])
+        binding = report["compatibility_source_binding"]
+        self.assertEqual(binding["compatibility_source_sha256"], SOURCE_DIGEST_A)
+        self.assertEqual(binding["copy_source_sha256"], SOURCE_DIGEST_A)
+        self.assertTrue(report["run_sound"])
 
     def test_run_sound_is_false_when_no_compatibility_probe_was_run(self):
         # Fail closed: an absent probe has not established anything.
