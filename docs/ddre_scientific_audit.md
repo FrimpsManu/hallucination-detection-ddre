@@ -674,15 +674,43 @@ No production file was modified by this audit.
 
 ### D-01 — RESOLVED by PR #8, *research: enforce cost-consistent DDRE stopping thresholds*
 
-Resolved by §7 **option 1**: constrain the search space to
-`lower ≤ t < upper`, where `t = C_M/(C_M + C_FA)`. Wang's cost rule is
+Resolved by §7 **option 1**: constrain the search space so that stopping is
+cost-consistent **both analytically and operationally**. Wang's cost rule is
 unchanged.
 
-The invariant is asymmetric, and deliberately so. Stopping LOW asserts the
-posterior will classify **nonfactual**, and `P == t` does classify nonfactual
-under the strict rule `(1−P)·C_M < P·C_FA`, so `lower ≤ t` admits equality.
-Stopping HIGH asserts **factual**, which `P == t` does *not* give, so
-`upper > t` is strict.
+**Analytic clause.** `lower ≤ t < upper`, where `t = C_M/(C_M + C_FA)`. The
+invariant is asymmetric, and deliberately so: stopping LOW asserts the posterior
+will classify **nonfactual**, and `P == t` does classify nonfactual under the
+strict rule `(1−P)·C_M < P·C_FA`, so `lower ≤ t` admits equality; stopping HIGH
+asserts **factual**, which `P == t` does *not* give, so `upper > t` is strict.
+
+**Operational clause.** The analytic rule reasons about real numbers, but claims
+are classified by `cost_based_prediction`, which compares two *rounded floats*.
+Those disagree at the boundary for some cost pairs, in both directions:
+
+| Cost pair | Edge | Analytically | Operationally |
+| --- | --- | --- | --- |
+| C_M=3 / C_FA=7 | `lower == t` | admissible | `cost_based_prediction(t) == 1` — a low stop there is classified **factual** |
+| C_M=2 / C_FA=7 | `upper == nextafter(t, 1)` | admissible | still `== 0` — a high stop there is classified **nonfactual** (it takes 2 ULPs above `t`) |
+
+So the boundaries are checked against the classifier itself:
+
+```
+cost_based_prediction(lower, C_M, C_FA) == 0
+cost_based_prediction(upper, C_M, C_FA) == 1
+```
+
+`cost_based_prediction` is **monotone non-decreasing in `P`** — as `P` rises
+`(1−P)·C_M` cannot increase and `P·C_FA` cannot decrease, and correctly-rounded
+arithmetic preserves that ordering — so these two boundary checks are enough:
+*every* posterior at or below `lower` classifies nonfactual and *every*
+posterior at or above `upper` classifies factual. Those are exactly the two
+claims the stopping rule makes. Monotonicity is itself pinned by test.
+
+The classifier is the source of operational truth; the cost formula is not
+restated. **Both experiment cost pairs (28/96 and 14/24) tie exactly at `t`**,
+so `lower == t` remains admissible for them and neither search space shrinks —
+verified by test.
 
 Three changes, none of which touch `cost_based_prediction`, `BSEDetector`, the
 costs, the histograms, the scorer, the uLSIF mathematics or the split:
@@ -693,13 +721,20 @@ costs, the histograms, the scorer, the uLSIF mathematics or the split:
    the threshold from here, so the arithmetic exists once. It lives in
    `ddre_core.py` rather than beside `cost_based_prediction` so that
    `src/baseline_core.py` stays byte-identical.
-2. **`DDREDetector.__init__` refuses an inconsistent configuration**, reporting
-   `lower`, `upper`, the threshold and both costs. An incoherent detector cannot
-   be built by hand, not merely avoided by the tuner. `BSEDetector` is
-   deliberately untouched — its stopping rule is derived from the costs and must
-   stay exactly as published.
-3. **`cost_consistent_thresholds` derives the tuner's grid from the configured
-   costs.** Nothing is hardcoded: at CM=28/CFA=96 the lower grid becomes
+2. **`threshold_consistency(lower, upper, c_miss, c_false_alarm)`** evaluates
+   both clauses and returns the full verdict, including which clause failed and
+   how each boundary was classified. `thresholds_are_cost_consistent` is the
+   predicate form.
+3. **`DDREDetector.__init__` refuses an inconsistent configuration**, naming the
+   failed clause, `lower`, `upper`, the threshold, both costs and both boundary
+   classifications. An incoherent detector cannot be built by hand, not merely
+   avoided by the tuner. `BSEDetector` is deliberately untouched — its stopping
+   rule is derived from the costs and must stay exactly as published.
+4. **`cost_consistent_thresholds` derives the tuner's grid from the configured
+   costs**, applying the analytic filter and the operational check to the grids
+   and then confirming each pair with the *same predicate the constructor uses*,
+   so the search-space provenance, the tuner and the constructor cannot
+   disagree. Nothing is hardcoded: at CM=28/CFA=96 the lower grid becomes
    `[0.05, 0.10, 0.15, 0.20]` (32 of 64 pairs survive), while at CM=14/CFA=24
    the threshold is 0.3684 and `0.35` survives but `0.40` does not.
 
@@ -708,20 +743,20 @@ decision threshold, the candidate and effective grids, the excluded values, the
 surviving pairs and the counts — so the restriction is auditable prospectively
 rather than inferred from a log line.
 
-**Tests.** `tests/test_cost_consistent_thresholds.py` (37 tests) covers the
+**Tests.** `tests/test_cost_consistent_thresholds.py` (53 tests) covers the
 threshold value, the strict/non-strict asymmetry in both directions, the
-constructor guard, both cost configurations, and the property that a low stop
-now always classifies nonfactual and a high stop always factual across every
-surviving pair. The D-01 tests in `tests/test_ddre_audit.py` were **updated,
+constructor guard, both cost configurations, both floating-point edge cost
+pairs, classifier monotonicity, the agreement between the reported grids and the
+admissible pairs, and the property that a low stop now always classifies
+nonfactual and a high stop always factual across every surviving pair. The D-01 tests in `tests/test_ddre_audit.py` were **updated,
 not deleted**: they still assert that `cost_based_prediction` calls 0.25–0.40
 factual, and now record that no detector can stop there. Ten mutations are
 caught, including `lower <= t` → `lower < t`, `upper > t` → `upper >= t`,
-removing either filter, hardcoding `0.225806`, using `C_FA/(C_M+C_FA)`, removing
-the constructor guard, and pointing the tuner at the unfiltered grid.
+dropping either half of the operational check, replacing the operational check
+with an analytic comparison, removing either grid filter, hardcoding
+`0.225806`, using `C_FA/(C_M+C_FA)`, having the constructor consult only the
+analytic clause, and pointing the tuner at the unfiltered grid.
 
-One thing found while testing and **not** fixed here, because it belongs to
-`cost_based_prediction`, which this PR does not touch: for some cost pairs the
-mathematical tie at `P == t` is broken by a 1-ULP rounding in `(1−t)·C_M`, so
-the classifier returns factual exactly at `t`. Both cost pairs this experiment
-uses (28/96 and 14/24) tie exactly, so `lower ≤ t` is sound for them; a test
-records the caveat for any future cost pair.
+`cost_based_prediction` itself is **not** modified. The floating-point edge it
+exhibits is handled by consulting it rather than by changing it, which is what
+makes the invariant operational as well as analytic.

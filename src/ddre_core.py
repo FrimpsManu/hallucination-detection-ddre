@@ -194,18 +194,66 @@ def cost_decision_threshold(c_miss, c_false_alarm):
     return miss / total
 
 
-def thresholds_are_cost_consistent(lower_threshold, upper_threshold, threshold):
+def threshold_consistency(lower_threshold, upper_threshold, c_miss, c_false_alarm):
     """Do the stopping thresholds agree with the cost rule they will be judged by?
 
-    Stopping LOW asserts the posterior will classify NONFACTUAL, and stopping
-    HIGH asserts it will classify FACTUAL. Wang's rule is strict — factual iff
-    ``(1-P)*C_M < P*C_FA`` — so ``P == threshold`` classifies **nonfactual**.
-    Hence ``lower <= threshold`` (equality is fine: a stop exactly at the
-    threshold still classifies nonfactual) but ``upper > threshold`` strictly
-    (a stop exactly at the threshold would classify nonfactual while claiming
-    the opposite).
+    Two clauses, and both are required.
+
+    **Analytic.** ``lower <= t < upper`` with ``t = C_M/(C_M+C_FA)``. Stopping
+    LOW asserts the posterior will classify NONFACTUAL and stopping HIGH asserts
+    FACTUAL; Wang's rule is strict, so in exact arithmetic ``P == t`` classifies
+    nonfactual and the bound is inclusive on the low side, strict on the high
+    side.
+
+    **Operational.** The analytic rule reasons about real numbers, but claims
+    are classified by ``cost_based_prediction``, which compares two rounded
+    floats. The two disagree at the boundary for some cost pairs: at
+    C_M=3/C_FA=7 a 1-ULP rounding in ``(1-t)*C_M`` makes ``P == t`` classify
+    FACTUAL, so a low stop there would assert the opposite of the verdict, and
+    at C_M=2/C_FA=7 the first float above ``t`` still classifies NONFACTUAL, so
+    a high stop there would do the same in the other direction. The boundaries
+    are therefore checked against the classifier itself::
+
+        cost_based_prediction(lower, ...) == 0
+        cost_based_prediction(upper, ...) == 1
+
+    ``cost_based_prediction`` is monotone non-decreasing in ``P`` -- as ``P``
+    rises ``(1-P)*C_M`` cannot increase and ``P*C_FA`` cannot decrease, and
+    correctly-rounded arithmetic preserves that ordering -- so the two boundary
+    checks are enough: **every** posterior at or below ``lower`` classifies
+    nonfactual and **every** posterior at or above ``upper`` classifies factual.
+    Those are exactly the two claims the detector's stopping rule makes.
+
+    The classifier is the source of operational truth; the cost formula is not
+    restated here. Returns the full verdict so callers can report which clause
+    failed.
     """
-    return lower_threshold <= threshold < upper_threshold
+    threshold = cost_decision_threshold(c_miss, c_false_alarm)
+    analytic = lower_threshold <= threshold < upper_threshold
+    lower_prediction = cost_based_prediction(lower_threshold, c_miss, c_false_alarm)
+    upper_prediction = cost_based_prediction(upper_threshold, c_miss, c_false_alarm)
+    operational = lower_prediction == 0 and upper_prediction == 1
+    return {
+        "consistent": analytic and operational,
+        "analytic": analytic,
+        "operational": operational,
+        "cost_decision_threshold": threshold,
+        "lower_threshold": float(lower_threshold),
+        "upper_threshold": float(upper_threshold),
+        "lower_classifies_as": lower_prediction,
+        "upper_classifies_as": upper_prediction,
+        "c_miss": float(c_miss),
+        "c_false_alarm": float(c_false_alarm),
+    }
+
+
+def thresholds_are_cost_consistent(
+    lower_threshold, upper_threshold, c_miss, c_false_alarm
+):
+    """``threshold_consistency(...)["consistent"]``, for use as a predicate."""
+    return threshold_consistency(
+        lower_threshold, upper_threshold, c_miss, c_false_alarm
+    )["consistent"]
 
 
 def cost_consistent_thresholds(
@@ -229,14 +277,26 @@ def cost_consistent_thresholds(
     lower_grid = [float(x) for x in lower_grid]
     upper_grid = [float(x) for x in upper_grid]
 
-    effective_lower = [x for x in lower_grid if x <= threshold]
-    effective_upper = [x for x in upper_grid if x > threshold]
+    # Analytic filtering, then the operational boundary check against the
+    # classifier itself. Pairs are then confirmed with the SAME predicate
+    # DDREDetector.__init__ applies, so the search-space provenance, the tuner
+    # and the constructor cannot disagree about what is admissible.
+    effective_lower = [
+        x
+        for x in lower_grid
+        if x <= threshold and cost_based_prediction(x, c_miss, c_false_alarm) == 0
+    ]
+    effective_upper = [
+        x
+        for x in upper_grid
+        if x > threshold and cost_based_prediction(x, c_miss, c_false_alarm) == 1
+    ]
     pairs = [
         (lower, upper)
         for lower in effective_lower
         for upper in effective_upper
         if 0.0 < lower < upper < 1.0
-        and thresholds_are_cost_consistent(lower, upper, threshold)
+        and thresholds_are_cost_consistent(lower, upper, c_miss, c_false_alarm)
     ]
 
     return {
@@ -247,8 +307,8 @@ def cost_consistent_thresholds(
         "candidate_upper_grid": upper_grid,
         "effective_lower_grid": effective_lower,
         "effective_upper_grid": effective_upper,
-        "excluded_lower_grid": [x for x in lower_grid if x > threshold],
-        "excluded_upper_grid": [x for x in upper_grid if x <= threshold],
+        "excluded_lower_grid": [x for x in lower_grid if x not in effective_lower],
+        "excluded_upper_grid": [x for x in upper_grid if x not in effective_upper],
         "threshold_pairs": [list(pair) for pair in pairs],
         "threshold_pairs_evaluated": len(pairs),
         "candidate_pairs_before_filtering": sum(
@@ -259,11 +319,17 @@ def cost_consistent_thresholds(
         ),
         "rule": (
             "Stopping must agree with the final cost rule "
-            "(factual iff (1-P)*C_M < P*C_FA), whose threshold is "
-            "t = C_M/(C_M+C_FA). Stopping low asserts a nonfactual "
-            "classification, and P == t still classifies nonfactual, so "
-            "lower <= t. Stopping high asserts a factual classification, which "
-            "P == t does not give, so upper > t strictly."
+            "(factual iff (1-P)*C_M < P*C_FA) both analytically and "
+            "operationally. Analytic: lower <= t < upper with "
+            "t = C_M/(C_M+C_FA); stopping low asserts a nonfactual "
+            "classification and P == t classifies nonfactual in exact "
+            "arithmetic, so the low bound is inclusive, while stopping high "
+            "asserts factual, which P == t does not give, so the high bound is "
+            "strict. Operational: cost_based_prediction(lower) == 0 and "
+            "cost_based_prediction(upper) == 1, checked against the classifier "
+            "itself because floating-point rounding breaks the analytic "
+            "boundary for some cost pairs. The classifier is monotone in P, so "
+            "the two boundary checks cover every posterior beyond them."
         ),
     }
 
@@ -285,26 +351,41 @@ class DDREDetector:
         if not 0.0 < lower_threshold < upper_threshold < 1.0:
             raise ValueError("Require 0 < lower_threshold < upper_threshold < 1")
 
-        # The stopping rule and the classification rule must agree about what a
-        # stop means. Enforced at construction, not only in the tuner, so an
-        # inconsistent detector cannot be built by hand either.
-        threshold = cost_decision_threshold(c_miss, c_false_alarm)
-        if not thresholds_are_cost_consistent(
-            lower_threshold, upper_threshold, threshold
-        ):
+        # The stopping rule and the classification rule must agree about what
+        # a stop means -- analytically AND against the classifier that will
+        # actually be applied. Enforced at construction, not only in the tuner,
+        # so an inconsistent detector cannot be built by hand either. The tuner
+        # filters with this same predicate, so the two cannot disagree.
+        verdict = threshold_consistency(
+            lower_threshold, upper_threshold, c_miss, c_false_alarm
+        )
+        threshold = verdict["cost_decision_threshold"]
+        if not verdict["consistent"]:
+            failed = []
+            if not verdict["analytic"]:
+                failed.append("analytic (require lower <= t < upper)")
+            if not verdict["operational"]:
+                failed.append(
+                    "operational (require cost_based_prediction(lower) == 0 and "
+                    "cost_based_prediction(upper) == 1)"
+                )
             raise ValueError(
                 "DDRE stopping thresholds contradict the cost-based "
                 "classification rule.\n"
+                f"  failed clause(s)       = {'; '.join(failed)}\n"
                 f"  lower_threshold        = {float(lower_threshold)!r}\n"
                 f"  upper_threshold        = {float(upper_threshold)!r}\n"
                 f"  cost decision threshold= {threshold!r}\n"
                 f"  c_miss                 = {float(c_miss)!r}\n"
                 f"  c_false_alarm          = {float(c_false_alarm)!r}\n"
-                "Require lower_threshold <= t < upper_threshold, where "
-                "t = c_miss / (c_miss + c_false_alarm). Stopping low asserts "
-                "the posterior classifies nonfactual, and stopping high asserts "
-                "it classifies factual; outside this range a stop would assert "
-                "the opposite of what cost_based_prediction returns."
+                f"  cost_based_prediction(lower) = "
+                f"{verdict['lower_classifies_as']} (must be 0, nonfactual)\n"
+                f"  cost_based_prediction(upper) = "
+                f"{verdict['upper_classifies_as']} (must be 1, factual)\n"
+                "Stopping low asserts the posterior classifies nonfactual and "
+                "stopping high asserts it classifies factual; outside this "
+                "range a stop would assert the opposite of what "
+                "cost_based_prediction returns."
             )
 
         self.cost_decision_threshold = threshold
