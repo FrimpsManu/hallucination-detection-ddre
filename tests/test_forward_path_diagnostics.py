@@ -24,22 +24,32 @@ from src.forward_path_diagnostics import (
     DIFFERENCE_NEGLIGIBLE,
     DIFFERENCE_SUBSTANTIAL,
     ENTAILMENT_INDEX,
+    GUARD_NONDETERMINISTIC,
+    GUARD_REFERENCE_NOT_REPRODUCED,
+    HEADLINE_UNDETERMINED_NONDETERMINISTIC,
+    HEADLINE_UNDETERMINED_REFERENCE,
     NEGLIGIBLE_MAX_ABS_DELTA,
     NO,
     REFERENCE_OBSERVATION,
     SOFTMAX_TEMPERATURE,
+    UNDETERMINED,
     YES,
     arm_by_name,
     assess_reference_reproduction,
+    bridge_arm_name,
+    build_forward_kwargs,
     build_verdict,
     classify_difference,
     compare_forward_arms,
     entailment_score_from_probabilities,
     flat_index,
+    forward_once,
     histograms_by_polarity,
     interpret_factor_isolation,
     isolated_factor,
     probe_report,
+    score_matches_reference,
+    score_one_pair,
     score_report,
 )
 from src.scoring_diagnostics import delta_stats, nbc_bucket, round_one_decimal
@@ -392,76 +402,373 @@ class TestIsolationRules(unittest.TestCase):
         self.assertEqual(result["headline"], "NO_FORWARD_PATH_EFFECT")
 
 
+# --------------------------------------------------------------------------
+# Control flow: only the model call may sit inside inference_mode.
+#
+# src/utils.py::EntailmentScorer._infer_batch wraps the model call and nothing
+# else; the softmax runs after the context closes. An arm that also wrapped the
+# softmax would introduce a second uncontrolled variable and would no longer
+# reproduce the repository forward path. torch is injected, so this boundary is
+# asserted directly rather than inspected by eye.
+# --------------------------------------------------------------------------
+
+class FakeTensor:
+    def __init__(self, values):
+        self.values = list(values)
+
+    def __truediv__(self, divisor):
+        return FakeTensor([v / divisor for v in self.values])
+
+    def tolist(self):
+        return list(self.values)
+
+
+class FakeTorch:
+    """Records whether each operation ran inside an inference_mode context."""
+
+    def __init__(self):
+        self.log = []
+        self.inside = False
+
+    def inference_mode(self):
+        outer = self
+
+        class Context:
+            def __enter__(self):
+                outer.inside = True
+                outer.log.append("enter")
+                return self
+
+            def __exit__(self, *exc):
+                outer.inside = False
+                outer.log.append("exit")
+                return False
+
+        return Context()
+
+    def softmax(self, tensor, dim):
+        self.log.append(f"softmax(inside={self.inside})")
+        values = tensor.tolist()
+        total = sum(values) or 1.0
+        return FakeTensor([v / total for v in values])
+
+
+class FakeModel:
+    def __init__(self, torch_module, logits=(2.0, 1.0, 1.0)):
+        self.torch = torch_module
+        self.logits = list(logits)
+        self.calls = []
+
+    def __call__(self, input_ids, **kwargs):
+        self.torch.log.append(f"forward(inside={self.torch.inside})")
+        self.calls.append({"input_ids": input_ids, "kwargs": dict(kwargs)})
+        return {"logits": [FakeTensor(self.logits)]}
+
+
+ENCODED = {
+    "input_ids": "IDS",
+    "attention_mask": "MASK",
+    "token_type_ids": "TTI",
+}
+
+
+class TestForwardControlFlow(unittest.TestCase):
+    def run_arm(self, arm_name):
+        torch_module = FakeTorch()
+        model = FakeModel(torch_module)
+        score = score_one_pair(model, ENCODED, arm_by_name(arm_name), torch_module)
+        return torch_module, model, score
+
+    def test_c0_uses_no_context_at_all(self):
+        torch_module, _, _ = self.run_arm("C0")
+        self.assertEqual(
+            torch_module.log, ["forward(inside=False)", "softmax(inside=False)"]
+        )
+
+    def test_inference_mode_arms_wrap_only_the_forward_call(self):
+        # The regression this guards: softmax must NOT appear between enter and
+        # exit. It runs after the context closes, as src/utils.py does it.
+        for arm in ("C1", "C3", "C4"):
+            with self.subTest(arm=arm):
+                torch_module, _, _ = self.run_arm(arm)
+                self.assertEqual(
+                    torch_module.log,
+                    [
+                        "enter",
+                        "forward(inside=True)",
+                        "exit",
+                        "softmax(inside=False)",
+                    ],
+                )
+
+    def test_softmax_never_runs_inside_the_context_for_any_arm(self):
+        for spec in ARM_SPECS:
+            with self.subTest(arm=spec["name"]):
+                torch_module = FakeTorch()
+                score_one_pair(FakeModel(torch_module), ENCODED, spec, torch_module)
+                self.assertIn("softmax(inside=False)", torch_module.log)
+                self.assertNotIn("softmax(inside=True)", torch_module.log)
+
+    def test_the_context_is_always_exited(self):
+        for spec in ARM_SPECS:
+            with self.subTest(arm=spec["name"]):
+                torch_module = FakeTorch()
+                score_one_pair(FakeModel(torch_module), ENCODED, spec, torch_module)
+                self.assertFalse(torch_module.inside)
+                self.assertEqual(
+                    torch_module.log.count("enter"), torch_module.log.count("exit")
+                )
+
+    def test_forward_once_returns_the_model_output(self):
+        torch_module = FakeTorch()
+        model = FakeModel(torch_module)
+        output = forward_once(model, torch_module, "IDS", {}, inference_mode=True)
+        self.assertIn("logits", output)
+
+    def test_score_extraction_is_identical_across_arms(self):
+        # Same fake logits, so every arm must produce the same score; only the
+        # forward call is allowed to differ.
+        scores = {
+            spec["name"]: self.run_arm(spec["name"])[2] for spec in ARM_SPECS
+        }
+        self.assertEqual(len(set(scores.values())), 1)
+
+    def test_input_ids_is_positional_matching_wangs_call(self):
+        _, model, _ = self.run_arm("C0")
+        self.assertEqual(model.calls[0]["input_ids"], "IDS")
+        self.assertEqual(model.calls[0]["kwargs"], {})
+
+
+class TestForwardKwargs(unittest.TestCase):
+    def test_each_arm_passes_exactly_its_own_arguments(self):
+        expected = {
+            "C0": set(),
+            "C1": set(),
+            "C2": {"attention_mask"},
+            "C3": {"attention_mask"},
+            "C4": {"attention_mask", "token_type_ids"},
+        }
+        for name, keys in expected.items():
+            with self.subTest(arm=name):
+                self.assertEqual(
+                    set(build_forward_kwargs(ENCODED, arm_by_name(name))), keys
+                )
+
+    def test_missing_token_type_ids_is_a_clear_error(self):
+        with self.assertRaises(KeyError):
+            build_forward_kwargs({"input_ids": "IDS"}, arm_by_name("C4"))
+
+
+# --------------------------------------------------------------------------
+# Reference reproduction: bucket agreement alone is not enough.
+# --------------------------------------------------------------------------
+
+class TestScoreMatchesReference(unittest.TestCase):
+    def test_exact_match_reproduces(self):
+        check = score_matches_reference(
+            WANG_169, REFERENCE_OBSERVATION["literal_wang"]
+        )
+        self.assertTrue(check["reproduces"])
+        self.assertEqual(check["raw_delta"], 0.0)
+
+    def test_within_bound_reproduces(self):
+        check = score_matches_reference(
+            WANG_169 + NEGLIGIBLE_MAX_ABS_DELTA / 2,
+            REFERENCE_OBSERVATION["literal_wang"],
+        )
+        self.assertTrue(check["reproduces"])
+
+    def test_right_bucket_but_wrong_raw_does_not_reproduce(self):
+        # 15.0 is bucket 1 and rounds to 15.0, same bucket as 19.9462890625.
+        # A bucket match alone must not count as reproduction.
+        check = score_matches_reference(15.0, REFERENCE_OBSERVATION["literal_wang"])
+        self.assertTrue(check["bucket_matches"])
+        self.assertFalse(check["raw_within_bound"])
+        self.assertFalse(check["reproduces"])
+
+    def test_right_bucket_and_rounded_but_raw_outside_bound_fails(self):
+        # Rounds to 19.9 and buckets to 1, but the raw score is 0.04 away --
+        # six times the divergence under investigation.
+        check = score_matches_reference(19.91, REFERENCE_OBSERVATION["literal_wang"])
+        self.assertTrue(check["rounded_matches"])
+        self.assertTrue(check["bucket_matches"])
+        self.assertFalse(check["reproduces"])
+
+    def test_repository_side_reference(self):
+        check = score_matches_reference(REPO_169, REFERENCE_OBSERVATION["repository"])
+        self.assertTrue(check["reproduces"])
+        self.assertEqual(check["expected_nbc_bucket"], 2)
+
+
+class TestBridgeArmSelection(unittest.TestCase):
+    def test_c4_is_preferred(self):
+        self.assertEqual(bridge_arm_name({"C1", "C2", "C3", "C4"}), "C4")
+
+    def test_c3_stands_in_when_c4_was_not_run(self):
+        self.assertEqual(bridge_arm_name({"C1", "C2", "C3"}), "C3")
+
+    def test_none_available(self):
+        self.assertIsNone(bridge_arm_name({"C1", "C2"}))
+
+
 class TestReferenceReproduction(unittest.TestCase):
-    def build(self, arm_scores, control_scores=None):
+    def build(self, arm_scores, control_scores=None, c3_vs_c4=None):
         scores_by_arm = dict(arm_scores)
         scores_by_arm["C0R"] = control_scores or list(arm_scores["C0"])
         probe = probe_report("positive", 169, scores_by_arm, POLARITIES)
-        control = compare(
-            scores_by_arm["C0"], scores_by_arm["C0R"], "C0", "C0R"
-        )
-        return probe, control
+        control = compare(scores_by_arm["C0"], scores_by_arm["C0R"], "C0", "C0R")
+        return assess_reference_reproduction(probe, control, c3_vs_c4=c3_vs_c4)
 
-    def test_reproduced_when_an_arm_moves_the_probe_to_the_repository_bucket(self):
-        wang = with_probe(WANG_169)
-        repo = with_probe(REPO_169)
-        probe, control = self.build({"C0": wang, "C1": wang, "C2": repo, "C3": repo})
-        result = assess_reference_reproduction(probe, control)
+    def full_chain(self, **overrides):
+        arms = {
+            "C0": with_probe(WANG_169),
+            "C1": with_probe(WANG_169),
+            "C2": with_probe(REPO_169),
+            "C3": with_probe(REPO_169),
+            "C4": with_probe(REPO_169),
+        }
+        arms.update(overrides)
+        return arms
+
+    def test_complete_chain_reproduces(self):
+        identical = compare(with_probe(REPO_169), with_probe(REPO_169), "C3", "C4")
+        result = self.build(self.full_chain(), c3_vs_c4=identical)
         self.assertEqual(result["explains_reference_observation"], YES)
-        self.assertEqual(result["reproduced_by_arms"], ["C2", "C3"])
+        self.assertEqual(result["bridge_arm"], "C4")
+        self.assertTrue(result["required_links_passed"])
+        self.assertTrue(result["token_type_ids_inert"])
 
-    def test_not_reproduced_when_every_arm_stays_in_the_wang_bucket(self):
-        wang = with_probe(WANG_169)
-        probe, control = self.build({"C0": wang, "C1": wang, "C2": wang, "C3": wang})
-        result = assess_reference_reproduction(probe, control)
+    def test_bucket_only_agreement_does_not_count_as_reproduction(self):
+        # C4 lands in bucket 2, but its raw score is nowhere near 19.953125.
+        # This is the exact failure mode the review flagged.
+        arms = self.full_chain(
+            C2=with_probe(25.0), C3=with_probe(25.0), C4=with_probe(25.0)
+        )
+        result = self.build(arms)
+        self.assertEqual(result["arms_reaching_repository_bucket"], ["C2", "C3", "C4"])
         self.assertEqual(result["explains_reference_observation"], NO)
+        self.assertIn("not on its own evidence", result["message"])
+
+    def test_c0_must_reproduce_the_raw_score_not_merely_the_bucket(self):
+        # C0 rounds to 19.9 and buckets to 1 but is 0.04 off the recorded raw.
+        result = self.build(self.full_chain(C0=with_probe(19.91)))
+        self.assertEqual(result["explains_reference_observation"], UNDETERMINED)
+        self.assertEqual(result["guard"], GUARD_REFERENCE_NOT_REPRODUCED)
+        self.assertFalse(result["c0_reproduces_literal_wang"])
+
+    def test_nondeterministic_device_blocks_everything(self):
+        result = self.build(
+            self.full_chain(), control_scores=perturb(with_probe(WANG_169), 0.02)
+        )
+        self.assertEqual(result["explains_reference_observation"], UNDETERMINED)
+        self.assertEqual(result["guard"], GUARD_NONDETERMINISTIC)
+        self.assertFalse(result["determinism_control_passed"])
+
+    def test_determinism_guard_takes_precedence_over_reference_guard(self):
+        result = self.build(
+            self.full_chain(C0=with_probe(19.91)),
+            control_scores=perturb(with_probe(19.91), 0.02),
+        )
+        self.assertEqual(result["guard"], GUARD_NONDETERMINISTIC)
+
+    def test_not_reproduced_when_no_arm_reconstructs_a3(self):
+        wang = with_probe(WANG_169)
+        result = self.build(
+            {"C0": wang, "C1": wang, "C2": wang, "C3": wang, "C4": wang}
+        )
+        self.assertEqual(result["explains_reference_observation"], NO)
+        self.assertIsNone(result["guard"])
         self.assertIn("another difference remains", result["message"])
 
-    def test_nondeterministic_device_blocks_any_attribution(self):
-        # The control gate: if C0 will not reproduce itself, nothing else counts.
-        wang = with_probe(WANG_169)
-        repo = with_probe(REPO_169)
-        probe, control = self.build(
-            {"C0": wang, "C1": wang, "C2": repo, "C3": repo},
-            control_scores=perturb(wang, 0.02),
+    def test_c3_c4_disagreement_is_a_warning_not_a_blocker(self):
+        differing = compare(
+            with_probe(REPO_169), perturb(with_probe(REPO_169), 0.05), "C3", "C4"
         )
-        result = assess_reference_reproduction(probe, control)
-        self.assertEqual(result["explains_reference_observation"], "UNDETERMINED")
-        self.assertFalse(result["determinism_control_passed"])
-        self.assertIn("nondeterministic", result["message"])
+        result = self.build(self.full_chain(), c3_vs_c4=differing)
+        self.assertEqual(result["explains_reference_observation"], YES)
+        self.assertFalse(result["token_type_ids_inert"])
+        self.assertTrue(any("type_vocab_size is 0" in w for w in result["warnings"]))
 
-    def test_c0_not_matching_wang_blocks_attribution(self):
-        repo = with_probe(REPO_169)
-        probe, control = self.build({"C0": repo, "C1": repo, "C2": repo, "C3": repo})
-        result = assess_reference_reproduction(probe, control)
-        self.assertEqual(result["explains_reference_observation"], "UNDETERMINED")
-        self.assertFalse(result["c0_matches_literal_wang"])
-        self.assertIn("not comparable to Step 1", result["message"])
+    def test_missing_c4_falls_back_to_c3_with_a_warning(self):
+        arms = self.full_chain()
+        del arms["C4"]
+        result = self.build(arms)
+        self.assertEqual(result["bridge_arm"], "C3")
+        self.assertTrue(any("C4 was not run" in w for w in result["warnings"]))
 
     def test_the_control_arm_is_never_credited_with_reproducing(self):
         wang = with_probe(WANG_169)
-        probe, control = self.build(
-            {"C0": wang, "C1": wang, "C2": wang, "C3": wang},
-            control_scores=wang,
+        result = self.build({"C0": wang, "C1": wang, "C2": wang, "C3": wang})
+        self.assertNotIn("C0R", result["arms_reaching_repository_bucket"])
+
+    def test_chain_has_five_links_with_three_required(self):
+        result = self.build(self.full_chain())
+        self.assertEqual([link["link"] for link in result["causal_chain"]], [1, 2, 3, 4, 5])
+        self.assertEqual(
+            [link["link"] for link in result["causal_chain"] if link["required"]],
+            [1, 2, 4],
         )
-        result = assess_reference_reproduction(probe, control)
-        self.assertNotIn("C0R", result["reproduced_by_arms"])
-
-    def test_probe_reports_every_arm(self):
-        wang = with_probe(WANG_169)
-        probe, _ = self.build({"C0": wang, "C1": wang, "C2": wang, "C3": wang})
-        self.assertEqual(set(probe["arms"]), {"C0", "C1", "C2", "C3", "C0R"})
-        self.assertEqual(probe["arms"]["C0"]["nbc_bucket"], 1)
-        self.assertEqual(probe["flat_index"], 169)
 
 
-class TestBuildVerdict(unittest.TestCase):
-    def build(self, c0, c1, c2, c3, control=None):
+class TestBuildVerdictGating(unittest.TestCase):
+    """The overall verdict must not attribute a cause when a guard fails."""
+
+    def build(self, c0, c1, c2, c3, control=None, c3_vs_c4=None):
         matrix = matrix_from(c0, c1, c2, c3)
-        scores_by_arm = {"C0": c0, "C1": c1, "C2": c2, "C3": c3, "C0R": control or list(c0)}
+        scores_by_arm = {
+            "C0": c0, "C1": c1, "C2": c2, "C3": c3, "C0R": control or list(c0)
+        }
         probe = probe_report("positive", 169, scores_by_arm, POLARITIES)
         control_block = compare(c0, scores_by_arm["C0R"], "C0", "C0R")
-        return build_verdict(matrix, probe, control_block)
+        return build_verdict(matrix, probe, control_block, c3_vs_c4=c3_vs_c4)
+
+    def test_failed_determinism_control_withholds_attribution(self):
+        c0 = with_probe(WANG_169)
+        repo = with_probe(REPO_169)
+        verdict = self.build(c0, c0, repo, repo, control=perturb(c0, 0.02))
+        self.assertEqual(verdict["headline"], HEADLINE_UNDETERMINED_NONDETERMINISTIC)
+        self.assertTrue(verdict["causal_attribution_withheld"])
+        self.assertFalse(verdict["factor_isolation_promoted"])
+        self.assertEqual(verdict["guard"], GUARD_NONDETERMINISTIC)
+        self.assertIn("withheld", verdict["causal_candidate"])
+        # The unpromoted reading is still carried for inspection.
+        self.assertEqual(
+            verdict["factor_isolation"]["headline"], "ATTENTION_MASK_PRIMARY"
+        )
+
+    def test_failed_reference_comparability_withholds_attribution(self):
+        c0 = with_probe(19.91)
+        repo = with_probe(REPO_169)
+        verdict = self.build(c0, c0, repo, repo)
+        self.assertEqual(verdict["headline"], HEADLINE_UNDETERMINED_REFERENCE)
+        self.assertTrue(verdict["causal_attribution_withheld"])
+        self.assertFalse(verdict["factor_isolation_promoted"])
+        self.assertEqual(verdict["guard"], GUARD_REFERENCE_NOT_REPRODUCED)
+        self.assertIn("withheld", verdict["causal_candidate"])
+
+    def test_a_withheld_verdict_never_names_a_factor(self):
+        c0 = with_probe(WANG_169)
+        repo = with_probe(REPO_169)
+        verdict = self.build(c0, c0, repo, repo, control=perturb(c0, 0.02))
+        for factor in ("attention_mask", "inference_mode"):
+            self.assertNotIn(factor, verdict["causal_candidate"])
+
+    def test_isolation_headline_is_promoted_only_when_both_guards_pass(self):
+        c0 = with_probe(WANG_169)
+        repo = with_probe(REPO_169)
+        verdict = self.build(c0, c0, repo, repo)
+        self.assertEqual(verdict["headline"], "ATTENTION_MASK_PRIMARY")
+        self.assertFalse(verdict["causal_attribution_withheld"])
+        self.assertTrue(verdict["factor_isolation_promoted"])
+        self.assertIsNone(verdict["guard"])
+
+    def test_pairwise_diagnostics_survive_a_withheld_verdict(self):
+        c0 = with_probe(WANG_169)
+        repo = with_probe(REPO_169)
+        verdict = self.build(c0, c0, repo, repo, control=perturb(c0, 0.02))
+        self.assertEqual(verdict["bse_decision_impact"], YES)
+        self.assertIn("C0_vs_C2", verdict["comparisons_with_bse_decision_impact"])
+        self.assertIn("C0_vs_C2", verdict["comparisons_with_numerical_difference"])
 
     def test_clean_run_reports_no_on_both_findings(self):
         scores = with_probe(WANG_169)
@@ -469,6 +776,7 @@ class TestBuildVerdict(unittest.TestCase):
         self.assertEqual(verdict["numerical_difference"], NO)
         self.assertEqual(verdict["bse_decision_impact"], NO)
         self.assertEqual(verdict["headline"], "NO_FORWARD_PATH_EFFECT")
+        self.assertFalse(verdict["causal_attribution_withheld"])
 
     def test_numerical_difference_without_decision_impact_is_representable(self):
         c0 = with_probe(WANG_169)
@@ -481,15 +789,11 @@ class TestBuildVerdict(unittest.TestCase):
         c0 = with_probe(WANG_169)
         repo = with_probe(REPO_169)
         verdict = self.build(c0, c0, repo, repo)
-        self.assertEqual(verdict["bse_decision_impact"], YES)
-        # attention_mask is the toggled factor in every listed comparison, and
-        # the one comparison that toggles only inference_mode is absent.
         self.assertEqual(
             verdict["comparisons_with_bse_decision_impact"],
             ["C0_vs_C2", "C0_vs_C3", "C1_vs_C2", "C1_vs_C3"],
         )
         self.assertNotIn("C0_vs_C1", verdict["comparisons_with_bse_decision_impact"])
-        self.assertNotIn("C2_vs_C3", verdict["comparisons_with_bse_decision_impact"])
 
     def test_verdict_carries_the_reporting_discipline_note(self):
         scores = with_probe(WANG_169)
