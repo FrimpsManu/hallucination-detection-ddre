@@ -26,6 +26,7 @@ from src.ddre_core import (
     DDREDetector,
     cost_consistent_thresholds,
     cost_decision_threshold,
+    threshold_consistency,
     thresholds_are_cost_consistent,
 )
 
@@ -154,17 +155,32 @@ class TestCostDecisionThreshold(unittest.TestCase):
         self.assertEqual(cost_decision_threshold("28", "96"), PRIMARY_THRESHOLD)
 
 
+def first_float_classifying(costs, target, start, direction):
+    """Walk float by float from `start` until the classifier returns `target`."""
+    value = start
+    for _ in range(64):
+        if cost_based_prediction(value, *costs) == target:
+            return value
+        value = math.nextafter(value, direction)
+    raise AssertionError("no nearby float classifies as requested")
+
+
 class TestTheInvariant(unittest.TestCase):
-    def test_lower_may_equal_the_threshold(self):
-        # P == t classifies nonfactual, which is what a low stop asserts.
-        self.assertTrue(
-            thresholds_are_cost_consistent(PRIMARY_THRESHOLD, 0.80, PRIMARY_THRESHOLD)
-        )
+    """Analytic rule AND operational boundary check, both required."""
+
+    def test_lower_may_equal_the_threshold_when_the_classifier_agrees(self):
+        # P == t classifies nonfactual for both experiment cost pairs, which is
+        # what a low stop asserts, so equality is admissible there.
+        for costs in (PRIMARY, GATE_PRIMARY):
+            with self.subTest(costs=costs):
+                t = cost_decision_threshold(*costs)
+                self.assertEqual(cost_based_prediction(t, *costs), 0)
+                self.assertTrue(thresholds_are_cost_consistent(t, 0.80, *costs))
 
     def test_lower_above_the_threshold_is_rejected(self):
         self.assertFalse(
             thresholds_are_cost_consistent(
-                math.nextafter(PRIMARY_THRESHOLD, 1.0), 0.80, PRIMARY_THRESHOLD
+                math.nextafter(PRIMARY_THRESHOLD, 1.0), 0.80, *PRIMARY
             )
         )
 
@@ -172,15 +188,112 @@ class TestTheInvariant(unittest.TestCase):
         # Wang's rule is strict, so P == t is NOT factual; a high stop there
         # would assert the opposite of what the classifier returns.
         self.assertFalse(
-            thresholds_are_cost_consistent(0.10, PRIMARY_THRESHOLD, PRIMARY_THRESHOLD)
+            thresholds_are_cost_consistent(0.10, PRIMARY_THRESHOLD, *PRIMARY)
         )
 
     def test_upper_above_the_threshold_is_permitted(self):
         self.assertTrue(
             thresholds_are_cost_consistent(
-                0.10, math.nextafter(PRIMARY_THRESHOLD, 1.0), PRIMARY_THRESHOLD
+                0.10, math.nextafter(PRIMARY_THRESHOLD, 1.0), *PRIMARY
             )
         )
+
+    def test_both_clauses_are_reported(self):
+        verdict = threshold_consistency(0.10, 0.80, *PRIMARY)
+        self.assertTrue(verdict["consistent"])
+        self.assertTrue(verdict["analytic"])
+        self.assertTrue(verdict["operational"])
+        self.assertEqual(verdict["lower_classifies_as"], 0)
+        self.assertEqual(verdict["upper_classifies_as"], 1)
+
+
+class TestOperationalBoundaryCheck(unittest.TestCase):
+    """Floating-point edges where the analytic rule alone is not enough.
+
+    The analytic rule reasons about real numbers; claims are classified by
+    cost_based_prediction, which compares two rounded floats. For some cost
+    pairs those disagree exactly at the boundary, in both directions.
+    """
+
+    LOW_EDGE = (3.0, 7.0)   # pred(t) == 1: `lower == t` is unsafe
+    HIGH_EDGE = (2.0, 7.0)  # pred(nextafter(t, 1)) == 0: that upper is unsafe
+
+    def test_the_low_edge_cost_pair_classifies_factual_at_the_threshold(self):
+        t = cost_decision_threshold(*self.LOW_EDGE)
+        self.assertEqual(cost_based_prediction(t, *self.LOW_EDGE), 1)
+
+    def test_lower_equal_to_the_threshold_is_rejected_at_the_low_edge(self):
+        # Analytically admissible (lower <= t), operationally wrong: a low stop
+        # exactly there would be classified FACTUAL.
+        t = cost_decision_threshold(*self.LOW_EDGE)
+        verdict = threshold_consistency(t, 0.80, *self.LOW_EDGE)
+        self.assertTrue(verdict["analytic"])
+        self.assertFalse(verdict["operational"])
+        self.assertFalse(verdict["consistent"])
+        self.assertEqual(verdict["lower_classifies_as"], 1)
+        with self.assertRaises(ValueError) as caught:
+            detector(t, 0.80, costs=self.LOW_EDGE)
+        self.assertIn("operational", str(caught.exception))
+
+    def test_the_next_float_below_is_accepted_at_the_low_edge(self):
+        t = cost_decision_threshold(*self.LOW_EDGE)
+        lower = math.nextafter(t, 0.0)
+        self.assertEqual(cost_based_prediction(lower, *self.LOW_EDGE), 0)
+        self.assertTrue(thresholds_are_cost_consistent(lower, 0.80, *self.LOW_EDGE))
+        detector(lower, 0.80, costs=self.LOW_EDGE)
+
+    def test_the_high_edge_cost_pair_still_classifies_nonfactual_above_t(self):
+        t = cost_decision_threshold(*self.HIGH_EDGE)
+        self.assertEqual(
+            cost_based_prediction(math.nextafter(t, 1.0), *self.HIGH_EDGE), 0
+        )
+
+    def test_that_upper_is_rejected_at_the_high_edge(self):
+        # Analytically admissible (upper > t), operationally wrong: a high stop
+        # exactly there would be classified NONFACTUAL.
+        t = cost_decision_threshold(*self.HIGH_EDGE)
+        upper = math.nextafter(t, 1.0)
+        verdict = threshold_consistency(0.10, upper, *self.HIGH_EDGE)
+        self.assertTrue(verdict["analytic"])
+        self.assertFalse(verdict["operational"])
+        self.assertEqual(verdict["upper_classifies_as"], 0)
+        with self.assertRaises(ValueError):
+            detector(0.10, upper, costs=self.HIGH_EDGE)
+
+    def test_the_first_factual_float_above_t_is_accepted_at_the_high_edge(self):
+        t = cost_decision_threshold(*self.HIGH_EDGE)
+        upper = first_float_classifying(self.HIGH_EDGE, 1, t, 1.0)
+        self.assertGreater(upper, t)
+        self.assertEqual(cost_based_prediction(upper, *self.HIGH_EDGE), 1)
+        self.assertTrue(thresholds_are_cost_consistent(0.10, upper, *self.HIGH_EDGE))
+        detector(0.10, upper, costs=self.HIGH_EDGE)
+        # It is strictly more than one ULP above t, which is the whole point.
+        self.assertGreater(upper, math.nextafter(t, 1.0))
+
+    def test_the_classifier_is_monotone_so_two_boundary_checks_suffice(self):
+        # Checking only lower and upper is valid because cost_based_prediction
+        # never goes 1 -> 0 as P rises: (1-P)*C_M cannot increase and P*C_FA
+        # cannot decrease, and correctly-rounded arithmetic preserves order.
+        for costs in (PRIMARY, GATE_PRIMARY, self.LOW_EDGE, self.HIGH_EDGE, (9.0, 1.0)):
+            with self.subTest(costs=costs):
+                previous = 0
+                for step in range(0, 1001):
+                    value = step / 1000.0
+                    current = cost_based_prediction(value, *costs)
+                    self.assertGreaterEqual(current, previous)
+                    previous = current
+
+    def test_every_posterior_below_an_admissible_lower_classifies_nonfactual(self):
+        for costs in (PRIMARY, GATE_PRIMARY, self.LOW_EDGE, self.HIGH_EDGE):
+            space = cost_consistent_thresholds(*costs)
+            for lower, upper in space["threshold_pairs"]:
+                with self.subTest(costs=costs, pair=(lower, upper)):
+                    for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+                        probe = lower * fraction
+                        self.assertEqual(cost_based_prediction(probe, *costs), 0)
+                    for fraction in (0.0, 0.25, 0.5, 0.75, 1.0):
+                        probe = upper + (1.0 - upper) * fraction
+                        self.assertEqual(cost_based_prediction(probe, *costs), 1)
 
 
 class TestDetectorConstruction(unittest.TestCase):
@@ -327,6 +440,50 @@ class TestSearchSpace(unittest.TestCase):
         self.assertEqual(strict["effective_upper_grid"], [0.95])
         self.assertEqual(strict["effective_lower_grid"], list(CANDIDATE_LOWER_GRID))
 
+    def test_every_generated_pair_satisfies_the_operational_check(self):
+        # The property the whole fix exists for: for EVERY surviving pair,
+        # the classifier itself calls `lower` nonfactual and `upper` factual.
+        for c_miss, c_false_alarm in (
+            PRIMARY, GATE_PRIMARY, (3.0, 7.0), (2.0, 7.0), (1, 1), (9, 1),
+            (1, 9), (3, 7), (5, 11), (50, 50),
+        ):
+            space = cost_consistent_thresholds(c_miss, c_false_alarm)
+            for lower, upper in space["threshold_pairs"]:
+                with self.subTest(costs=(c_miss, c_false_alarm), pair=(lower, upper)):
+                    self.assertEqual(
+                        cost_based_prediction(lower, c_miss, c_false_alarm), 0
+                    )
+                    self.assertEqual(
+                        cost_based_prediction(upper, c_miss, c_false_alarm), 1
+                    )
+
+    def test_the_primary_configuration_keeps_lower_equal_to_t(self):
+        # 28/96: `lower == t` stays admissible, and an upper above t that
+        # classifies factual stays admissible.
+        t = cost_decision_threshold(*PRIMARY)
+        self.assertTrue(thresholds_are_cost_consistent(t, 0.60, *PRIMARY))
+        detector(t, 0.60, costs=PRIMARY)
+        self.assertEqual(cost_based_prediction(0.60, *PRIMARY), 1)
+        self.assertTrue(thresholds_are_cost_consistent(0.20, 0.60, *PRIMARY))
+
+    def test_the_gate_configuration_keeps_lower_equal_to_t(self):
+        t = cost_decision_threshold(*GATE_PRIMARY)
+        self.assertTrue(thresholds_are_cost_consistent(t, 0.60, *GATE_PRIMARY))
+        detector(t, 0.60, costs=GATE_PRIMARY)
+
+    def test_the_two_experiment_grids_are_unchanged_by_the_operational_check(self):
+        # The added clause must not shrink either configuration's search space.
+        self.assertEqual(
+            cost_consistent_thresholds(*PRIMARY)["effective_lower_grid"],
+            [0.05, 0.10, 0.15, 0.20],
+        )
+        self.assertEqual(
+            cost_consistent_thresholds(*PRIMARY)["threshold_pairs_evaluated"], 32
+        )
+        self.assertEqual(
+            cost_consistent_thresholds(*GATE_PRIMARY)["excluded_lower_grid"], [0.40]
+        )
+
     def test_every_generated_pair_satisfies_the_invariant(self):
         for c_miss, c_false_alarm in (
             PRIMARY, GATE_PRIMARY, (1, 1), (9, 1), (1, 9), (3, 7), (50, 50),
@@ -338,7 +495,7 @@ class TestSearchSpace(unittest.TestCase):
                     self.assertTrue(0.0 < lower < upper < 1.0)
                     self.assertLessEqual(lower, t)
                     self.assertLess(t, upper)
-                    self.assertTrue(thresholds_are_cost_consistent(lower, upper, t))
+                    self.assertTrue(thresholds_are_cost_consistent(lower, upper, c_miss, c_false_alarm))
 
     def test_no_valid_pair_is_silently_generated_outside_the_invariant(self):
         # The complement direction: every candidate pair that the filter drops
@@ -351,9 +508,84 @@ class TestSearchSpace(unittest.TestCase):
                 for upper in CANDIDATE_UPPER_GRID:
                     if not 0.0 < lower < upper < 1.0:
                         continue
-                    consistent = thresholds_are_cost_consistent(lower, upper, t)
+                    consistent = thresholds_are_cost_consistent(lower, upper, c_miss, c_false_alarm)
                     with self.subTest(costs=(c_miss, c_false_alarm), pair=(lower, upper)):
                         self.assertEqual((lower, upper) in kept, consistent)
+
+    def test_the_reported_grids_apply_the_operational_check_too(self):
+        # The candidate grids never land within a ULP of t, so the operational
+        # clause is a no-op for them -- which is exactly why it has to be
+        # tested with a grid that DOES contain the edge value. Otherwise the
+        # recorded effective grids could drift from the admissible pairs, and
+        # the tuner iterates those grids directly.
+        low_edge = (3.0, 7.0)
+        t = cost_decision_threshold(*low_edge)
+        space = cost_consistent_thresholds(
+            *low_edge, lower_grid=(0.05, math.nextafter(t, 0.0), t), upper_grid=(0.80,)
+        )
+        self.assertIn(math.nextafter(t, 0.0), space["effective_lower_grid"])
+        self.assertNotIn(t, space["effective_lower_grid"])
+        self.assertIn(t, space["excluded_lower_grid"])
+
+        high_edge = (2.0, 7.0)
+        t2 = cost_decision_threshold(*high_edge)
+        just_above = math.nextafter(t2, 1.0)
+        factual = first_float_classifying(high_edge, 1, t2, 1.0)
+        space2 = cost_consistent_thresholds(
+            *high_edge, lower_grid=(0.05,), upper_grid=(just_above, factual, 0.80)
+        )
+        self.assertNotIn(just_above, space2["effective_upper_grid"])
+        self.assertIn(just_above, space2["excluded_upper_grid"])
+        self.assertIn(factual, space2["effective_upper_grid"])
+
+    def test_every_reported_grid_value_passes_the_operational_check(self):
+        low_edge, high_edge = (3.0, 7.0), (2.0, 7.0)
+        for costs, lower_grid, upper_grid in (
+            (low_edge,
+             (0.05, math.nextafter(cost_decision_threshold(*low_edge), 0.0),
+              cost_decision_threshold(*low_edge)),
+             (0.80, 0.95)),
+            (high_edge, (0.05, 0.10),
+             (math.nextafter(cost_decision_threshold(*high_edge), 1.0),
+              first_float_classifying(high_edge, 1,
+                                      cost_decision_threshold(*high_edge), 1.0),
+              0.80)),
+            (PRIMARY, CANDIDATE_LOWER_GRID, CANDIDATE_UPPER_GRID),
+            (GATE_PRIMARY, CANDIDATE_LOWER_GRID, CANDIDATE_UPPER_GRID),
+        ):
+            space = cost_consistent_thresholds(*costs, lower_grid, upper_grid)
+            with self.subTest(costs=costs):
+                for value in space["effective_lower_grid"]:
+                    self.assertEqual(cost_based_prediction(value, *costs), 0)
+                for value in space["effective_upper_grid"]:
+                    self.assertEqual(cost_based_prediction(value, *costs), 1)
+
+    def test_the_reported_grids_and_the_admissible_pairs_agree(self):
+        # A value kept in a reported grid must actually be usable: the tuner
+        # iterates the grids, so a grid entry the pair rule would reject is a
+        # crash waiting to happen in DDREDetector.__init__.
+        low_edge, high_edge = (3.0, 7.0), (2.0, 7.0)
+        for costs, lower_grid, upper_grid in (
+            (PRIMARY, CANDIDATE_LOWER_GRID, CANDIDATE_UPPER_GRID),
+            (GATE_PRIMARY, CANDIDATE_LOWER_GRID, CANDIDATE_UPPER_GRID),
+            (low_edge,
+             (0.05, cost_decision_threshold(*low_edge)), (0.80,)),
+            (high_edge, (0.05,),
+             (math.nextafter(cost_decision_threshold(*high_edge), 1.0), 0.80)),
+        ):
+            space = cost_consistent_thresholds(*costs, lower_grid, upper_grid)
+            expected = [
+                (lower, upper)
+                for lower in space["effective_lower_grid"]
+                for upper in space["effective_upper_grid"]
+                if 0.0 < lower < upper < 1.0
+            ]
+            with self.subTest(costs=costs):
+                self.assertEqual(
+                    [tuple(pair) for pair in space["threshold_pairs"]], expected
+                )
+                for lower, upper in space["threshold_pairs"]:
+                    detector(lower, upper, costs=costs)
 
     def test_the_record_is_auditable(self):
         space = cost_consistent_thresholds(*PRIMARY)
