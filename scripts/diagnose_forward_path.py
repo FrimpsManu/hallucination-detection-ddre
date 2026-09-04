@@ -98,7 +98,11 @@ def parse_args():
     parser.add_argument(
         "--skip-c4",
         action="store_true",
-        help="Skip the confirmation-only token_type_ids arm.",
+        help=(
+            "Skip the C4 token_type_ids arm. Useful for debugging, but a run "
+            "without C4 CANNOT establish the formal causal chain: the verdict "
+            "becomes UNDETERMINED_BRIDGE_NOT_EVALUATED."
+        ),
     )
     parser.add_argument(
         "--hash-weights",
@@ -373,7 +377,10 @@ def main():
     if c4_block is not None:
         print()
         print("-" * 100)
-        print("C4 CONFIRMATION ONLY (type_vocab_size is 0, so token_type_ids are inert)")
+        print(
+            "C3 vs C4 -- REQUIRED LINK 4 (type_vocab_size is 0 predicts inert; "
+            "this measures it)"
+        )
         print("-" * 100)
         print(f"  C3 vs C4: {format_deltas(c4_block['deltas'])}")
         print(f"  numerical_difference: {c4_block['numerical_difference']}")
@@ -430,18 +437,25 @@ def main():
             mark = "PASS" if link["passed"] else "FAIL"
         tag = "required" if link["required"] else "informational"
         print(f"  {mark}  link {link['link']} ({tag}): {link['requirement']}")
-    for check, label in (
-        (reproduction["c0_vs_step1_a1"], "C0 vs Step 1 A1"),
-        (reproduction["bridge_vs_step1_a3"], f"{reproduction['bridge_arm']} vs Step 1 A3"),
-    ):
+    rows = [
+        (reproduction["c0_vs_step1_a1"], "C0 vs Step 1 A1", ""),
+        (reproduction["bridge_vs_step1_a3"], "C4 vs Step 1 A3", ""),
+        (
+            reproduction["c3_vs_step1_a3_informational"],
+            "C3 vs Step 1 A3",
+            "  (informational: exposes a token_type_ids-driven result)",
+        ),
+    ]
+    for check, label, suffix in rows:
         if check is None:
             continue
         print(
             f"    {label}: raw {check['raw']:.10f} vs {check['expected_raw']:.10f}  "
             f"|delta| {check['raw_delta']:.3e} <= {check['bound']:.0e}: "
             f"{check['raw_within_bound']}; rounded {check['rounded_matches']}; "
-            f"bucket {check['bucket_matches']}"
+            f"bucket {check['bucket_matches']}{suffix}"
         )
+    print(f"    all required links passed: {reproduction['required_links_passed']}")
     for warning in reproduction["warnings"]:
         print(f"  WARNING: {warning}")
 

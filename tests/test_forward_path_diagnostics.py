@@ -24,10 +24,14 @@ from src.forward_path_diagnostics import (
     DIFFERENCE_NEGLIGIBLE,
     DIFFERENCE_SUBSTANTIAL,
     ENTAILMENT_INDEX,
+    GUARD_BRIDGE_NOT_EVALUATED,
     GUARD_NONDETERMINISTIC,
     GUARD_REFERENCE_NOT_REPRODUCED,
+    GUARD_TOKEN_TYPE_EFFECT,
+    HEADLINE_UNDETERMINED_BRIDGE,
     HEADLINE_UNDETERMINED_NONDETERMINISTIC,
     HEADLINE_UNDETERMINED_REFERENCE,
+    HEADLINE_UNDETERMINED_TOKEN_TYPE,
     NEGLIGIBLE_MAX_ABS_DELTA,
     NO,
     REFERENCE_OBSERVATION,
@@ -144,6 +148,10 @@ class TestArmSpecs(unittest.TestCase):
             if spec["role"] in ("reference", "factor")
         }
         self.assertEqual(
+            sorted(s["name"] for s in ARM_SPECS if s["role"] in ("reference", "factor")),
+            ["C0", "C1", "C2", "C3"],
+        )
+        self.assertEqual(
             combinations, {(False, False), (False, True), (True, False), (True, True)}
         )
 
@@ -154,11 +162,14 @@ class TestArmSpecs(unittest.TestCase):
         self.assertFalse(c0["inference_mode"])
         self.assertEqual(c0["role"], "reference")
 
-    def test_c4_is_labelled_confirmation_only(self):
+    def test_c4_is_the_required_bridge_arm(self):
         c4 = arm_by_name("C4")
-        self.assertEqual(c4["role"], "confirmation")
-        self.assertIn("CONFIRMATION ONLY", c4["note"])
-        self.assertIn("type_vocab_size is 0", c4["note"])
+        self.assertEqual(c4["role"], "bridge")
+        self.assertTrue(c4["attention_mask"])
+        self.assertTrue(c4["inference_mode"])
+        self.assertTrue(c4["token_type_ids"])
+        self.assertIn("REQUIRED link", c4["note"])
+        self.assertIn("prediction is not a measurement", c4["note"])
 
     def test_control_repeats_c0_exactly(self):
         c0 = arm_by_name("C0")
@@ -601,11 +612,13 @@ class TestScoreMatchesReference(unittest.TestCase):
 
 
 class TestBridgeArmSelection(unittest.TestCase):
-    def test_c4_is_preferred(self):
+    def test_c4_is_the_bridge(self):
         self.assertEqual(bridge_arm_name({"C1", "C2", "C3", "C4"}), "C4")
 
-    def test_c3_stands_in_when_c4_was_not_run(self):
-        self.assertEqual(bridge_arm_name({"C1", "C2", "C3"}), "C3")
+    def test_c3_is_never_accepted_as_a_substitute(self):
+        # The substitution this refuses is exactly what would hide a
+        # token_type_ids-driven result.
+        self.assertIsNone(bridge_arm_name({"C1", "C2", "C3"}))
 
     def test_none_available(self):
         self.assertIsNone(bridge_arm_name({"C1", "C2"}))
@@ -635,16 +648,17 @@ class TestReferenceReproduction(unittest.TestCase):
         result = self.build(self.full_chain(), c3_vs_c4=identical)
         self.assertEqual(result["explains_reference_observation"], YES)
         self.assertEqual(result["bridge_arm"], "C4")
+        self.assertTrue(result["bridge_evaluated"])
         self.assertTrue(result["required_links_passed"])
         self.assertTrue(result["token_type_ids_inert"])
 
     def test_bucket_only_agreement_does_not_count_as_reproduction(self):
         # C4 lands in bucket 2, but its raw score is nowhere near 19.953125.
-        # This is the exact failure mode the review flagged.
         arms = self.full_chain(
             C2=with_probe(25.0), C3=with_probe(25.0), C4=with_probe(25.0)
         )
-        result = self.build(arms)
+        identical = compare(with_probe(25.0), with_probe(25.0), "C3", "C4")
+        result = self.build(arms, c3_vs_c4=identical)
         self.assertEqual(result["arms_reaching_repository_bucket"], ["C2", "C3", "C4"])
         self.assertEqual(result["explains_reference_observation"], NO)
         self.assertIn("not on its own evidence", result["message"])
@@ -673,51 +687,109 @@ class TestReferenceReproduction(unittest.TestCase):
 
     def test_not_reproduced_when_no_arm_reconstructs_a3(self):
         wang = with_probe(WANG_169)
+        identical = compare(wang, wang, "C3", "C4")
         result = self.build(
-            {"C0": wang, "C1": wang, "C2": wang, "C3": wang, "C4": wang}
+            {"C0": wang, "C1": wang, "C2": wang, "C3": wang, "C4": wang},
+            c3_vs_c4=identical,
         )
         self.assertEqual(result["explains_reference_observation"], NO)
         self.assertIsNone(result["guard"])
         self.assertIn("another difference remains", result["message"])
 
-    def test_c3_c4_disagreement_is_a_warning_not_a_blocker(self):
+    def test_c3_c4_disagreement_withholds_attribution(self):
+        # Link 4 is required, not a warning. An empirical C3 != C4 overrides the
+        # type_vocab_size == 0 prediction.
         differing = compare(
             with_probe(REPO_169), perturb(with_probe(REPO_169), 0.05), "C3", "C4"
         )
         result = self.build(self.full_chain(), c3_vs_c4=differing)
-        self.assertEqual(result["explains_reference_observation"], YES)
+        self.assertEqual(result["explains_reference_observation"], UNDETERMINED)
+        self.assertEqual(result["guard"], GUARD_TOKEN_TYPE_EFFECT)
         self.assertFalse(result["token_type_ids_inert"])
-        self.assertTrue(any("type_vocab_size is 0" in w for w in result["warnings"]))
+        self.assertFalse(result["required_links_passed"])
 
-    def test_missing_c4_falls_back_to_c3_with_a_warning(self):
+    def test_the_scenario_the_review_flagged(self):
+        # C0 ~ A1, C3 ~ A1, C4 ~ A3. Every other link passes, but the only
+        # argument that moved the result is token_type_ids, so attention_mask
+        # and inference_mode have reconstructed nothing and must not be credited.
+        arms = self.full_chain(
+            C2=with_probe(WANG_169),
+            C3=with_probe(WANG_169),
+            C4=with_probe(REPO_169),
+        )
+        differing = compare(with_probe(WANG_169), with_probe(REPO_169), "C3", "C4")
+        result = self.build(arms, c3_vs_c4=differing)
+        self.assertTrue(result["c0_reproduces_literal_wang"])
+        self.assertTrue(result["bridge_reproduces_repository"])
+        self.assertNotEqual(result["explains_reference_observation"], YES)
+        self.assertEqual(result["guard"], GUARD_TOKEN_TYPE_EFFECT)
+        self.assertTrue(
+            any("token_type_ids" in w for w in result["warnings"])
+        )
+
+    def test_missing_c4_withholds_attribution(self):
         arms = self.full_chain()
         del arms["C4"]
         result = self.build(arms)
-        self.assertEqual(result["bridge_arm"], "C3")
-        self.assertTrue(any("C4 was not run" in w for w in result["warnings"]))
+        self.assertIsNone(result["bridge_arm"])
+        self.assertFalse(result["bridge_evaluated"])
+        self.assertEqual(result["explains_reference_observation"], UNDETERMINED)
+        self.assertEqual(result["guard"], GUARD_BRIDGE_NOT_EVALUATED)
+        self.assertTrue(any("NOT accepted as a substitute" in w for w in result["warnings"]))
+
+    def test_c3_equal_to_c4_and_reproducing_a3_validates_inertness(self):
+        identical = compare(with_probe(REPO_169), with_probe(REPO_169), "C3", "C4")
+        result = self.build(self.full_chain(), c3_vs_c4=identical)
+        self.assertEqual(result["explains_reference_observation"], YES)
+        self.assertTrue(result["token_type_ids_inert"])
+        self.assertIn("without token_type_ids", result["message"])
+
+    def test_c3_informational_check_against_a3_is_reported(self):
+        arms = self.full_chain(C3=with_probe(WANG_169))
+        differing = compare(with_probe(WANG_169), with_probe(REPO_169), "C3", "C4")
+        result = self.build(arms, c3_vs_c4=differing)
+        self.assertFalse(result["c3_vs_step1_a3_informational"]["reproduces"])
 
     def test_the_control_arm_is_never_credited_with_reproducing(self):
         wang = with_probe(WANG_169)
-        result = self.build({"C0": wang, "C1": wang, "C2": wang, "C3": wang})
+        result = self.build(
+            {"C0": wang, "C1": wang, "C2": wang, "C3": wang, "C4": wang},
+            c3_vs_c4=compare(wang, wang, "C3", "C4"),
+        )
         self.assertNotIn("C0R", result["arms_reaching_repository_bucket"])
 
-    def test_chain_has_five_links_with_three_required(self):
-        result = self.build(self.full_chain())
+    def test_chain_has_five_links_with_four_required(self):
+        identical = compare(with_probe(REPO_169), with_probe(REPO_169), "C3", "C4")
+        result = self.build(self.full_chain(), c3_vs_c4=identical)
         self.assertEqual([link["link"] for link in result["causal_chain"]], [1, 2, 3, 4, 5])
         self.assertEqual(
             [link["link"] for link in result["causal_chain"] if link["required"]],
-            [1, 2, 4],
+            [1, 2, 3, 4],
         )
+        self.assertTrue(result["required_links_passed"])
+
+    def test_required_links_passed_is_false_when_link_4_is_unevaluated(self):
+        # passed is None, not False, when C4 was not run; that must not count.
+        arms = self.full_chain()
+        del arms["C4"]
+        result = self.build(arms)
+        self.assertFalse(result["required_links_passed"])
 
 
 class TestBuildVerdictGating(unittest.TestCase):
     """The overall verdict must not attribute a cause when a guard fails."""
 
-    def build(self, c0, c1, c2, c3, control=None, c3_vs_c4=None):
+    def build(self, c0, c1, c2, c3, c4=None, control=None, include_c4=True):
+        """C4 defaults to C3, so link 3 and link 4 pass unless a test breaks them."""
         matrix = matrix_from(c0, c1, c2, c3)
         scores_by_arm = {
             "C0": c0, "C1": c1, "C2": c2, "C3": c3, "C0R": control or list(c0)
         }
+        c3_vs_c4 = None
+        if include_c4:
+            c4 = c4 if c4 is not None else list(c3)
+            scores_by_arm["C4"] = c4
+            c3_vs_c4 = compare(c3, c4, "C3", "C4")
         probe = probe_report("positive", 169, scores_by_arm, POLARITIES)
         control_block = compare(c0, scores_by_arm["C0R"], "C0", "C0R")
         return build_verdict(matrix, probe, control_block, c3_vs_c4=c3_vs_c4)
@@ -726,10 +798,10 @@ class TestBuildVerdictGating(unittest.TestCase):
         c0 = with_probe(WANG_169)
         repo = with_probe(REPO_169)
         verdict = self.build(c0, c0, repo, repo, control=perturb(c0, 0.02))
+        self.assertEqual(verdict["guard"], GUARD_NONDETERMINISTIC)
         self.assertEqual(verdict["headline"], HEADLINE_UNDETERMINED_NONDETERMINISTIC)
         self.assertTrue(verdict["causal_attribution_withheld"])
         self.assertFalse(verdict["factor_isolation_promoted"])
-        self.assertEqual(verdict["guard"], GUARD_NONDETERMINISTIC)
         self.assertIn("withheld", verdict["causal_candidate"])
         # The unpromoted reading is still carried for inspection.
         self.assertEqual(
@@ -753,7 +825,7 @@ class TestBuildVerdictGating(unittest.TestCase):
         for factor in ("attention_mask", "inference_mode"):
             self.assertNotIn(factor, verdict["causal_candidate"])
 
-    def test_isolation_headline_is_promoted_only_when_both_guards_pass(self):
+    def test_isolation_headline_is_promoted_only_when_every_guard_passes(self):
         c0 = with_probe(WANG_169)
         repo = with_probe(REPO_169)
         verdict = self.build(c0, c0, repo, repo)
@@ -761,6 +833,33 @@ class TestBuildVerdictGating(unittest.TestCase):
         self.assertFalse(verdict["causal_attribution_withheld"])
         self.assertTrue(verdict["factor_isolation_promoted"])
         self.assertIsNone(verdict["guard"])
+        self.assertEqual(
+            verdict["reference_reproduction"]["explains_reference_observation"], YES
+        )
+
+    def test_missing_c4_withholds_attribution(self):
+        c0 = with_probe(WANG_169)
+        repo = with_probe(REPO_169)
+        verdict = self.build(c0, c0, repo, repo, include_c4=False)
+        self.assertEqual(verdict["headline"], HEADLINE_UNDETERMINED_BRIDGE)
+        self.assertEqual(verdict["guard"], GUARD_BRIDGE_NOT_EVALUATED)
+        self.assertTrue(verdict["causal_attribution_withheld"])
+        self.assertFalse(verdict["factor_isolation_promoted"])
+
+    def test_c3_not_equal_to_c4_withholds_attribution(self):
+        # The review scenario, end to end through build_verdict: C0 ~ A1,
+        # C3 ~ A1, C4 ~ A3. attention_mask and inference_mode reconstructed
+        # nothing, so no factor may be named.
+        c0 = with_probe(WANG_169)
+        verdict = self.build(c0, c0, c0, c0, c4=with_probe(REPO_169))
+        self.assertEqual(verdict["headline"], HEADLINE_UNDETERMINED_TOKEN_TYPE)
+        self.assertEqual(verdict["guard"], GUARD_TOKEN_TYPE_EFFECT)
+        self.assertTrue(verdict["causal_attribution_withheld"])
+        self.assertNotEqual(
+            verdict["reference_reproduction"]["explains_reference_observation"], YES
+        )
+        for factor in ("attention_mask", "inference_mode"):
+            self.assertNotIn(factor, verdict["causal_candidate"])
 
     def test_pairwise_diagnostics_survive_a_withheld_verdict(self):
         c0 = with_probe(WANG_169)
