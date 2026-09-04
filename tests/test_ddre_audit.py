@@ -21,7 +21,13 @@ from pathlib import Path
 import numpy as np
 
 from src.baseline_core import BSEDetector, cost_based_prediction
-from src.ddre_core import DDREDetector, ULSIFDensityRatio
+from src.ddre_core import (
+    CANDIDATE_LOWER_GRID,
+    CANDIDATE_UPPER_GRID,
+    DDREDetector,
+    ULSIFDensityRatio,
+    cost_consistent_thresholds,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -543,39 +549,58 @@ class TestCostThreshold(unittest.TestCase):
 
 
 class TestStoppingThresholdConsistency(unittest.TestCase):
-    """AUDIT finding D-01: the stop-low rule can contradict the cost rule."""
+    """AUDIT finding D-01 -- RESOLVED.
+
+    The defect: the tuner's lower grid ran to 0.40 while the CM=28/CFA=96 cost
+    rule switches at 0.225806, so a detector could stop LOW (asserting
+    hallucination) and then be classified FACTUAL. These tests recorded that
+    contradiction; they are now updated to record that it can no longer occur.
+
+    The arithmetic that made it a contradiction is deliberately still asserted
+    below -- cost_based_prediction is unchanged, so 0.25 through 0.40 still
+    classify factual. What changed is that no detector can stop there.
+
+    The positive behaviour lives in tests/test_cost_consistent_thresholds.py.
+    """
 
     def tuner_lower_grid(self):
-        return [float(x) for x in np.round(np.arange(0.05, 0.41, 0.05), 2)]
+        return [float(x) for x in CANDIDATE_LOWER_GRID]
 
-    def test_the_tuner_grid_contains_lower_thresholds_above_the_cost_threshold(self):
+    def test_the_candidate_grid_still_contains_the_contradictory_values(self):
+        # The candidate grid is unchanged; the FILTER is what is new, so the
+        # filter has real work to do.
         inconsistent = [x for x in self.tuner_lower_grid() if x > COST_THRESHOLD]
         self.assertEqual(inconsistent, [0.25, 0.30, 0.35, 0.40])
 
-    def test_AUDIT_stopping_low_above_the_cost_threshold_still_predicts_factual(self):
-        # The detector stops because it is confident the claim is hallucinated,
-        # and the cost rule then labels it FACTUAL. The two rules disagree for
-        # every stopping probability in (COST_THRESHOLD, lower_threshold].
+    def test_the_cost_rule_still_calls_those_probabilities_factual(self):
+        # WAS test_AUDIT_stopping_low_above_the_cost_threshold_still_predicts_factual.
+        # cost_based_prediction is untouched, so the arithmetic is identical;
+        # the contradiction is now prevented upstream instead.
         for lower in (0.25, 0.30, 0.35, 0.40):
             with self.subTest(lower=lower):
                 self.assertEqual(cost_based_prediction(lower, C_MISS, C_FALSE_ALARM), 1)
 
-    def test_AUDIT_the_contradiction_is_reachable_through_the_detector(self):
-        # A single document with r < 1 lands the posterior inside the
-        # contradictory window, the detector stops, and the reported prediction
-        # is FACTUAL despite evidence against.
+    def test_RESOLVED_the_contradiction_is_no_longer_reachable(self):
+        # WAS test_AUDIT_the_contradiction_is_reachable_through_the_detector,
+        # which built lower=0.30, stopped at P=0.28 and reported FACTUAL. That
+        # detector can no longer be constructed at all.
         lower = 0.30
         target = 0.28  # COST_THRESHOLD < target < lower
         ratio = (target / (1 - target)) / (0.5 / 0.5)
-        detector = DDREDetector(
-            ConstantRatio(ratio), lower_threshold=lower, upper_threshold=0.80,
-            p0=0.5, c_miss=C_MISS, c_false_alarm=C_FALSE_ALARM, max_docs=10,
+        with self.assertRaises(ValueError) as caught:
+            DDREDetector(
+                ConstantRatio(ratio), lower_threshold=lower, upper_threshold=0.80,
+                p0=0.5, c_miss=C_MISS, c_false_alarm=C_FALSE_ALARM, max_docs=10,
+            )
+        self.assertIn("contradict the cost-based", str(caught.exception))
+
+    def test_RESOLVED_the_contradictory_values_cannot_enter_tuning(self):
+        space = cost_consistent_thresholds(C_MISS, C_FALSE_ALARM)
+        self.assertEqual(space["effective_lower_grid"], [0.05, 0.10, 0.15, 0.20])
+        self.assertEqual(space["excluded_lower_grid"], [0.25, 0.30, 0.35, 0.40])
+        self.assertEqual(
+            {pair[0] for pair in space["threshold_pairs"]}, {0.05, 0.10, 0.15, 0.20}
         )
-        result = detector.detect_subclaim(Sub(10), FixedScorer(20.0))
-        self.assertEqual(result.documents_used, 1)
-        self.assertLess(result.p_factual, lower)
-        self.assertGreater(result.p_factual, COST_THRESHOLD)
-        self.assertEqual(result.prediction, 1)
 
     def test_lower_thresholds_at_or_below_the_cost_threshold_are_consistent(self):
         for lower in (0.05, 0.10, 0.15, 0.20):
@@ -782,9 +807,16 @@ class TestEvidenceStreamFairness(unittest.TestCase):
         # to KEEP published BSE (CM=28, CFA=96, c_retrieve=1) as the primary
         # comparator and report any tuned BSE variant as a labelled secondary
         # robustness analysis.
-        lower = np.round(np.arange(0.05, 0.41, 0.05), 2)
-        upper = np.round(np.arange(0.60, 0.96, 0.05), 2)
-        self.assertEqual(len(lower) * len(upper), 64)
+        # 64 candidate pairs, of which 32 survive the D-01 cost-consistency
+        # filter at CM=28/CFA=96. Either way DDRE selects from many
+        # configurations and published BSE selects from none.
+        self.assertEqual(len(CANDIDATE_LOWER_GRID) * len(CANDIDATE_UPPER_GRID), 64)
+        self.assertEqual(
+            cost_consistent_thresholds(C_MISS, C_FALSE_ALARM)[
+                "threshold_pairs_evaluated"
+            ],
+            32,
+        )
         bse_init = BSEDetector.__init__.__code__.co_varnames[
             : BSEDetector.__init__.__code__.co_argcount
         ]

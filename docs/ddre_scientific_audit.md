@@ -22,13 +22,19 @@ was not modified.
 
 ### NOT READY
 
+> **Status update.** The single blocker, **D-01, is RESOLVED by PR #8**
+> ("research: enforce cost-consistent DDRE stopping thresholds"). Everything
+> below is preserved as the historical record of what the defect was and how it
+> was found; §10 records the resolution. No other finding is addressed by that
+> PR, so the verdict stands until they are worked through.
+
 **One blocker** must be resolved before any tuning run:
 
-* **D-01** — the stopping-threshold grid contains four values that contradict
-  the CM/CFA classification rule, and the tuner's lexicographic objective
-  optimises average documents first, so it searches that region freely. This is
-  established by exact arithmetic on the released costs and by an end-to-end
-  reproduction, not by simulation.
+* **D-01 — RESOLVED (PR #8).** The stopping-threshold grid contained four values
+  that contradict the CM/CFA classification rule, and the tuner's lexicographic
+  objective optimises average documents first, so it searched that region
+  freely. This was established by exact arithmetic on the released costs and by
+  an end-to-end reproduction, not by simulation.
 
 **One finding requires an empirical check before tuning** and cannot be settled
 by this audit:
@@ -60,7 +66,7 @@ Two things are in good shape and should be stated plainly:
 
 | ID | Severity | Location | Scientific issue | Why it matters | Recommended action |
 | --- | --- | --- | --- | --- | --- |
-| D-01 | **BLOCKER** | `main.py::tune_ddre_thresholds`, `ddre_core.py::DDREDetector.detect_subclaim` | The lower stopping grid is `{0.05 … 0.40}`; the CM=28/CFA=96 classification threshold is `0.225806`. For `lower ∈ {0.25, 0.30, 0.35, 0.40}` the detector can stop *because it is confident of hallucination* and the cost rule then labels the claim **factual**. | The two rules disagree on the same posterior. The selector is lexicographic — average documents first, PR-AUC only on exact ties — and a larger `lower` stops earlier, so within the feasible set nothing but the document count pushes back on choosing a contradictory threshold. | Constrain `lower ≤ CM/(CM+CFA)` (§7 option 1, recommended). Do not silently re-grid. |
+| D-01 | **BLOCKER — RESOLVED by PR #8** | `main.py::tune_ddre_thresholds`, `ddre_core.py::DDREDetector.detect_subclaim` | The lower stopping grid is `{0.05 … 0.40}`; the CM=28/CFA=96 classification threshold is `0.225806`. For `lower ∈ {0.25, 0.30, 0.35, 0.40}` the detector can stop *because it is confident of hallucination* and the cost rule then labels the claim **factual**. | The two rules disagree on the same posterior. The selector is lexicographic — average documents first, PR-AUC only on exact ties — and a larger `lower` stops earlier, so within the feasible set nothing but the document count pushes back on choosing a contradictory threshold. | **Done (PR #8):** §7 option 1 — `cost_decision_threshold` is the single source of the arithmetic, `DDREDetector` refuses `lower > t` or `upper ≤ t` at construction, and `cost_consistent_thresholds` filters the tuner's grid from the *configured* costs. See §10. |
 | D-03 | **MAJOR / NEEDS EMPIRICAL CHECK** | `ddre_core.py::ULSIFDensityRatio.ratio` | The estimate is most empirically constrained where the training data provide local support. Sparse and tail regions are more sensitive to bandwidth, regularisation and kernel extrapolation, so the ratio there can be large or small for reasons that are not evidential. | A large ratio is **not** by itself a defect — where factual support is strong and hallucinated support is weak, a large ratio is exactly what the estimator should report. The question is whether large values come from stable local support or from weak-support instability, and that is **unmeasured** on the actual NBC fit; the demonstrations below use synthetic scores and establish only the mechanism. | Before tuning, run the measurement in §4-A over the fitted score support, **distinguishing large-but-stable ratios from weak-support instability**. Pre-register a per-document log-evidence sensitivity analysis only if the measurement warrants it. **Do not choose a cap value yet.** |
 | D-02 | MAJOR | `ddre_core.py::detect_subclaim` vs `baseline_core.py::detect_subclaim` | Algorithm/protocol asymmetry. BSE's stop/continue rule is decision-theoretic (expected cost of retrieving vs stopping) and can decline the **first** fetch, retrieving **0** documents. DDRE's rule is a fixed probability band evaluated after an update, so it has a floor of **one retrieval per non-empty evaluated subclaim**. | Retrieval counts have different origins. On the 190-passage held-out split that floor is **2,387 documents** (all test subclaims are non-empty); DDRE must spend that before it can win on cost, and where BSE retrieves 0, DDRE cannot win at all. **This currently disadvantages DDRE.** | Report BSE's zero-retrieval frequency and the retrieval-floor difference alongside the efficiency numbers. A threshold pre-check does **not** fix this (see §6); giving DDRE a Bayes-risk pre-retrieval decision would be a **stopping-rule redesign**, not a small fairness fix. |
 | D-07 | MAJOR | `main.py::tune_ddre_thresholds` | The feasibility test constrains only `factual_auc_pr` and `balanced_pr_auc`. Nonfactual AUC-PR — Wang's headline metric — is unconstrained. | Balanced PR-AUC is the mean of the two, so a large factual gain can mask a nonfactual loss and still qualify. The tuner may select a configuration that is worse at detecting hallucination. | Add an explicit nonfactual AUC-PR floor to the feasibility test. |
@@ -481,7 +487,10 @@ labelled secondary analysis already answers.
 
 ## 7. Stopping-threshold consistency with the CM/CFA classification threshold
 
-### The inconsistency exists in the current code. CONFIRMED.
+### The inconsistency existed in the code. CONFIRMED — and RESOLVED by PR #8.
+
+*The analysis below is preserved unchanged as the record of the defect. The
+resolution is in §10.*
 
 **Exactly when it occurs.** The final rule is factual iff
 `(1−P)·C_M < P·C_FA`, i.e. `P > C_M/(C_M+C_FA)`. For CM=28/CFA=96 that is
@@ -554,9 +563,10 @@ tuner's own objective prefers the region the fix removes.
 
 **Blocking — must be resolved before any tuning run:**
 
-1. **D-01** — remove the stopping/classification contradiction (§7, option 1
+1. ~~**D-01** — remove the stopping/classification contradiction (§7, option 1
    recommended). Fix before tuning, not after, because the selector optimises
-   average documents first and a larger `lower` retrieves fewer.
+   average documents first and a larger `lower` retrieves fewer.~~
+   **DONE — PR #8.** See §10.
 
 **Measure before tuning, then decide:**
 
@@ -657,3 +667,61 @@ The D-03 and D-04 tests use **synthetic** fixtures and are labelled as such in
 the source: they establish mechanisms, not rates on the actual formal fit.
 
 No production file was modified by this audit.
+
+---
+
+## 10. Resolution log
+
+### D-01 — RESOLVED by PR #8, *research: enforce cost-consistent DDRE stopping thresholds*
+
+Resolved by §7 **option 1**: constrain the search space to
+`lower ≤ t < upper`, where `t = C_M/(C_M + C_FA)`. Wang's cost rule is
+unchanged.
+
+The invariant is asymmetric, and deliberately so. Stopping LOW asserts the
+posterior will classify **nonfactual**, and `P == t` does classify nonfactual
+under the strict rule `(1−P)·C_M < P·C_FA`, so `lower ≤ t` admits equality.
+Stopping HIGH asserts **factual**, which `P == t` does *not* give, so
+`upper > t` is strict.
+
+Three changes, none of which touch `cost_based_prediction`, `BSEDetector`, the
+costs, the histograms, the scorer, the uLSIF mathematics or the split:
+
+1. **`ddre_core.cost_decision_threshold(c_miss, c_false_alarm)`** — one shared
+   helper, with defensive validation (finite, non-negative, positive total). The
+   detector guard, the tuner's search space and the recorded provenance all read
+   the threshold from here, so the arithmetic exists once. It lives in
+   `ddre_core.py` rather than beside `cost_based_prediction` so that
+   `src/baseline_core.py` stays byte-identical.
+2. **`DDREDetector.__init__` refuses an inconsistent configuration**, reporting
+   `lower`, `upper`, the threshold and both costs. An incoherent detector cannot
+   be built by hand, not merely avoided by the tuner. `BSEDetector` is
+   deliberately untouched — its stopping rule is derived from the costs and must
+   stay exactly as published.
+3. **`cost_consistent_thresholds` derives the tuner's grid from the configured
+   costs.** Nothing is hardcoded: at CM=28/CFA=96 the lower grid becomes
+   `[0.05, 0.10, 0.15, 0.20]` (32 of 64 pairs survive), while at CM=14/CFA=24
+   the threshold is 0.3684 and `0.35` survives but `0.40` does not.
+
+The experiment summary now carries `ddre.threshold_search_space` with the
+decision threshold, the candidate and effective grids, the excluded values, the
+surviving pairs and the counts — so the restriction is auditable prospectively
+rather than inferred from a log line.
+
+**Tests.** `tests/test_cost_consistent_thresholds.py` (37 tests) covers the
+threshold value, the strict/non-strict asymmetry in both directions, the
+constructor guard, both cost configurations, and the property that a low stop
+now always classifies nonfactual and a high stop always factual across every
+surviving pair. The D-01 tests in `tests/test_ddre_audit.py` were **updated,
+not deleted**: they still assert that `cost_based_prediction` calls 0.25–0.40
+factual, and now record that no detector can stop there. Ten mutations are
+caught, including `lower <= t` → `lower < t`, `upper > t` → `upper >= t`,
+removing either filter, hardcoding `0.225806`, using `C_FA/(C_M+C_FA)`, removing
+the constructor guard, and pointing the tuner at the unfiltered grid.
+
+One thing found while testing and **not** fixed here, because it belongs to
+`cost_based_prediction`, which this PR does not touch: for some cost pairs the
+mathematical tie at `P == t` is broken by a 1-ULP rounding in `(1−t)·C_M`, so
+the classifier returns factual exactly at `t`. Both cost pairs this experiment
+uses (28/96 and 14/24) tie exactly, so `lower ≤ t` is sound for them; a test
+records the caveat for any future cost pair.
