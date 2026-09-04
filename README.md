@@ -408,6 +408,46 @@ script changes no baseline behaviour, cost, threshold, metric, tolerance, or
 published reference value; it calls the existing `bse_official`,
 `evaluate_detector` and `evaluate_configuration` unmodified.
 
+### Completing the cache for incomplete placements
+
+The formal sensitivity run against the corrected v2 cache completed 97 of the
+100 CM=14/CFA=24 placements. Three could not be evaluated — `(0,4)`, `(8,4)` and
+`(9,4)` — because the recorded Gate 1 run never consumed the documents those
+histograms cause the policy to retrieve. Under the analysis's own branch logic
+that is `INCONCLUSIVE_PARTIAL_CACHE_COVERAGE`, not a negative result, so the
+missing spans have to be filled before the grid can settle the question.
+
+```bash
+python scripts/complete_nbc_cache.py \
+  --cache-path /content/drive/MyDrive/ddre-gate1/wang_nli_cache_fidelity_v2_batch1.sqlite \
+  --output /content/drive/MyDrive/ddre-gate1/diagnostics/nbc_cache_completion.json
+```
+
+This replays `bse_official` for exactly those three placements under
+**CM=14/CFA=24 only**, using the ordinary production `EntailmentScorer` at
+**batch size 1** against the existing v2 cache with the ordinary read-through /
+write-through mechanism. A span already cached is reused; only a genuinely
+missing span is evaluated and written back.
+
+The work is interleaved rather than precomputed because retrieval is adaptive:
+which document comes next depends on the scores of the documents already
+consumed, so the required spans cannot be enumerated in advance. CM=28/CFA=96 is
+deliberately not evaluated — it retrieves different documents from the same
+placement, and scoring for it would compute spans this step was not asked for.
+
+It reports the number of previously missing span scores, the number of new NLI
+evaluations performed, cache rows before and after, and whether each placement
+now completes — the last verified by replaying it through the same **read-only**
+scorer the sensitivity analysis uses, so a pass is evidence rather than a claim.
+Cache growth and evaluation count are cross-checked against each other; a
+mismatch means a write did not land, and the run says so instead of reporting
+success.
+
+The tool is **cache completion only**. It computes no metric, reaches no
+verdict, and reinterprets nothing. Rerun `scripts/diagnose_nbc_sensitivity.py`
+unchanged against the expanded cache. Running the completion tool twice is a
+no-op: the second pass evaluates zero spans.
+
 ## Gate 1 scoring-path diagnostics
 
 Gate 1 has been run and FAILED against the predeclared tolerances. These two
