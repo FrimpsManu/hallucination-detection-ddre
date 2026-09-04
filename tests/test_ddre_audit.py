@@ -129,12 +129,28 @@ class TestRatioOrientation(unittest.TestCase):
         )
 
     def test_centers_are_drawn_from_the_numerator_sample(self):
-        # Standard uLSIF places kernel centers on the numerator (factual)
-        # sample. This is also the reason r(s) collapses toward zero where no
-        # factual score was observed -- see the extrapolation tests below.
-        estimator = fitted_estimator()
-        self.assertTrue(np.all(estimator.centers >= 0.0))
-        self.assertTrue(np.all(estimator.centers <= 1.0))
+        # Standard uLSIF places kernel centres on the numerator (factual)
+        # sample. Proved with DISJOINT supports, so a centre taken from the
+        # hallucinated sample would be detectable: every centre must be a member
+        # of the normalised factual set and none may lie in the
+        # hallucinated-only support.
+        factual = np.linspace(60.0, 95.0, 60)          # normalised [0.60, 0.95]
+        hallucinated = np.linspace(5.0, 40.0, 60)      # normalised [0.05, 0.40]
+        estimator = ULSIFDensityRatio(max_centers=25, random_state=13).fit(
+            factual, hallucinated, folds=4
+        )
+
+        factual_support = {round(float(x), 12) for x in factual / 100.0}
+        hallucinated_support = {round(float(x), 12) for x in hallucinated / 100.0}
+        self.assertTrue(factual_support.isdisjoint(hallucinated_support))
+
+        centers = [round(float(c), 12) for c in estimator.centers.ravel()]
+        self.assertEqual(len(centers), 25)
+        for center in centers:
+            self.assertIn(center, factual_support)
+            self.assertNotIn(center, hallucinated_support)
+        # And none sits in the hallucinated-only interval at all.
+        self.assertTrue(all(c >= 0.60 for c in centers))
 
     def test_the_ratio_is_larger_on_factual_like_scores(self):
         estimator = fitted_estimator()
@@ -181,17 +197,36 @@ class TestRatioPositivityAndClipping(unittest.TestCase):
         # zero and the clip turns "the model has nothing to say" into
         # log r = -13.8 per document, i.e. near-certain hallucination. Nothing
         # in fit() detects or reports this.
+        #
+        # This test constructs the degenerate state directly. It is NOT
+        # observed in the synthetic audit fixture and is NOT established on the
+        # actual formal fit; the point is only that nothing would report it.
         estimator = fitted_estimator()
         estimator.alpha = np.zeros_like(estimator.alpha)
         self.assertEqual(estimator.ratio(50.0), 1e-6)
         self.assertAlmostEqual(math.log(estimator.ratio(50.0)), -13.8155, places=3)
 
-    def test_AUDIT_the_ratio_is_unbounded_where_the_denominator_has_no_support(self):
-        # AUDIT finding D-03. The kernel model is a positive combination of
-        # Gaussians centred on factual scores, and H only penalises magnitude
-        # where hallucinated scores live. Far above the hallucinated sample the
-        # fitted ratio is therefore free to grow without bound: this is
-        # extrapolation, not evidence.
+    def test_the_ratio_is_bounded_above_by_the_sum_of_the_coefficients(self):
+        # CORRECTION to an earlier draft of the audit, which called the
+        # estimator "unbounded". It is not. Every Gaussian kernel value is <= 1
+        # and the coefficients are finite and non-negative, so on the clipped
+        # [0, 1] input the fitted ratio is bounded above by sum(alpha).
+        estimator = fitted_estimator()
+        bound = float(estimator.alpha.sum())
+        self.assertTrue(math.isfinite(bound))
+        for score in np.linspace(0.0, 100.0, 101):
+            self.assertLessEqual(estimator.ratio(float(score)), bound)
+
+    def test_AUDIT_the_ratio_is_weakly_constrained_away_from_both_supports(self):
+        # AUDIT finding D-03, restated correctly. The estimate is well
+        # determined only where both samples have support; elsewhere its value
+        # is decided by kernel tails and the regulariser. The finite bound
+        # sum(alpha) is itself data-dependent and can be very large, so a single
+        # weakly-identified document can carry large log-evidence.
+        #
+        # This is a SYNTHETIC fixture. It establishes the mechanism only; it is
+        # NOT evidence about the actual formal NBC fit, which this repository
+        # holds no fixed raw scores for.
         rng = np.random.default_rng(11)
         estimator = ULSIFDensityRatio(max_centers=30, random_state=7).fit(
             np.clip(rng.normal(78, 7, 120), 0, 100),
@@ -199,7 +234,24 @@ class TestRatioPositivityAndClipping(unittest.TestCase):
             folds=4,
         )
         self.assertGreater(estimator.ratio(100.0), 100.0)
-        self.assertGreater(math.log(estimator.ratio(100.0)), 4.0)
+        self.assertLessEqual(estimator.ratio(100.0), float(estimator.alpha.sum()))
+
+    def test_neither_synthetic_fixture_reaches_the_clip_bounds(self):
+        # CORRECTION to a second earlier claim: log r = +-13.8 arises ONLY at
+        # the [1e-6, 1e6] clip bounds, and neither synthetic fit comes close.
+        # The clip is a backstop, not the observed operating regime.
+        rng = np.random.default_rng(11)
+        separated = ULSIFDensityRatio(max_centers=30, random_state=7).fit(
+            np.clip(rng.normal(78, 7, 120), 0, 100),
+            np.clip(rng.normal(22, 7, 120), 0, 100),
+            folds=4,
+        )
+        grid = np.linspace(0.0, 100.0, 101)
+        for estimator in (fitted_estimator(), separated):
+            values = np.array([estimator.ratio(float(s)) for s in grid])
+            self.assertGreater(values.min(), 1e-6)
+            self.assertLess(values.max(), 1e6)
+            self.assertLess(float(np.abs(np.log(values)).max()), math.log(1e6))
 
     def test_AUDIT_a_non_finite_score_produces_a_non_finite_ratio(self):
         # AUDIT finding D-06. There is no guard, so NaN passes straight
@@ -601,11 +653,26 @@ class TestEvidenceStreamFairness(unittest.TestCase):
             self.assertIn("cost_based_prediction", source_names)
             self.assertIn("min", source_names)
 
+    def test_a_threshold_pre_check_could_never_stop_at_the_prior(self):
+        # Why a pre-retrieval threshold check does NOT fix D-02. With P0 = 0.5,
+        # every lower in the grid is <= 0.40 and every upper is >= 0.60, so the
+        # prior lies strictly inside the band and a band evaluated before the
+        # first document can never fire. BSE's zero-retrieval behaviour comes
+        # from its decision-theoretic expected-cost rule, not from checking
+        # early, so equalising the floor would be a stopping-rule redesign.
+        p0 = 0.5
+        for lower in np.round(np.arange(0.05, 0.41, 0.05), 2):
+            for upper in np.round(np.arange(0.60, 0.96, 0.05), 2):
+                with self.subTest(lower=float(lower), upper=float(upper)):
+                    self.assertFalse(p0 <= float(lower) or p0 >= float(upper))
+
     def test_AUDIT_ddre_always_retrieves_at_least_one_document_but_bse_may_not(self):
-        # AUDIT finding D-02. BSE tests its stopping rule BEFORE the first
-        # fetch and can therefore retrieve zero documents; DDRE only tests
-        # after an update, so it has a floor of one document per subclaim.
-        # The two retrieval counts are not measured from the same origin.
+        # AUDIT finding D-02, an algorithm/protocol asymmetry. BSE's
+        # decision-theoretic rule can decline the FIRST fetch and retrieve zero
+        # documents; DDRE's probability band is evaluated only after an update,
+        # so it has a floor of one document per subclaim. The two retrieval
+        # counts are not measured from the same origin, and the floor currently
+        # DISADVANTAGES DDRE.
         never = BSEDetector(
             [1] * 10, [1] * 10, mode="official", p0=0.5, c_miss=1.0,
             c_false_alarm=1.0, c_retrieve=1000.0, max_docs=10,
@@ -623,10 +690,14 @@ class TestEvidenceStreamFairness(unittest.TestCase):
         self.assertEqual(ddre.documents_used, 1)
         self.assertEqual(ddre_scorer.calls, 1)
 
-    def test_AUDIT_ddre_has_a_tuned_stopping_rule_and_bse_has_none(self):
-        # AUDIT finding D-09. DDRE selects its stopping band from 64 validation
-        # configurations; BSE's stopping rule is derived from the fixed costs
-        # and has no tunable counterpart in this pipeline.
+    def test_AUDIT_ddre_has_a_tuned_stopping_rule_and_published_bse_has_none(self):
+        # AUDIT finding D-09, a claim boundary rather than an invalid
+        # comparison. DDRE selects its stopping band from 64 validation
+        # configurations; published BSE's stopping rule follows from the fixed
+        # published costs and has no tunable counterpart. The recommendation is
+        # to KEEP published BSE (CM=28, CFA=96, c_retrieve=1) as the primary
+        # comparator and report any tuned BSE variant as a labelled secondary
+        # robustness analysis.
         lower = np.round(np.arange(0.05, 0.41, 0.05), 2)
         upper = np.round(np.arange(0.60, 0.96, 0.05), 2)
         self.assertEqual(len(lower) * len(upper), 64)
@@ -635,6 +706,19 @@ class TestEvidenceStreamFairness(unittest.TestCase):
         ]
         self.assertNotIn("lower_threshold", bse_init)
         self.assertNotIn("upper_threshold", bse_init)
+
+    def test_the_published_primary_comparator_configuration_is_unchanged(self):
+        # The primary baseline stays Wang's published configuration, so that the
+        # comparison remains comparable with the paper. Pinned here so that
+        # swapping in a tuned baseline cannot happen silently.
+        detector = BSEDetector(
+            list(RELEASED_POSITIVE), list(RELEASED_NEGATIVE), mode="official",
+            p0=0.5, c_miss=28, c_false_alarm=96, c_retrieve=1, max_docs=10,
+        )
+        self.assertEqual(detector.mode, "official")
+        self.assertEqual((detector.c_miss, detector.c_false_alarm), (28.0, 96.0))
+        self.assertEqual(detector.c_retrieve, 1.0)
+        self.assertEqual(detector.p0, 0.5)
 
 
 # --------------------------------------------------------------------------
