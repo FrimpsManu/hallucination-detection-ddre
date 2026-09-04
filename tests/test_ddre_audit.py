@@ -25,6 +25,8 @@ from src.ddre_core import (
     CANDIDATE_LOWER_GRID,
     CANDIDATE_UPPER_GRID,
     DDREDetector,
+    DegenerateULSIFFit,
+    NonFiniteScoreError,
     ULSIFDensityRatio,
     cost_consistent_thresholds,
 )
@@ -198,19 +200,29 @@ class TestRatioPositivityAndClipping(unittest.TestCase):
         estimator = fitted_estimator()
         self.assertTrue(np.all(estimator.alpha >= 0.0))
 
-    def test_AUDIT_a_degenerate_all_zero_fit_reads_as_overwhelming_evidence(self):
-        # AUDIT finding D-04. If the solved alpha vanishes, r(s) is identically
-        # zero and the clip turns "the model has nothing to say" into
-        # log r = -13.8 per document, i.e. near-certain hallucination. Nothing
-        # in fit() detects or reports this.
+    def test_RESOLVED_a_degenerate_all_zero_fit_is_rejected_before_use(self):
+        # AUDIT finding D-04 -- RESOLVED by PR #9.
         #
-        # This test constructs the degenerate state directly. It is NOT
-        # observed in the synthetic audit fixture and is NOT established on the
-        # actual formal fit; the point is only that nothing would report it.
+        # WAS: if the solved alpha vanished, r(s) was identically zero and the
+        # clip turned "the model has nothing to say" into log r = -13.8 per
+        # document, i.e. near-certain hallucination. fit() neither detected nor
+        # reported it, and ratio() served 1e-6 as though it were evidence.
+        #
+        # NOW: the final-fit sanity check rejects an all-zero coefficient
+        # vector before the estimator becomes usable. The arithmetic that made
+        # it dangerous is unchanged -- the clip is still 1e-6 -- so the test
+        # still records what that floor would have meant.
+        self.assertAlmostEqual(math.log(1e-6), -13.8155, places=3)
+
         estimator = fitted_estimator()
         estimator.alpha = np.zeros_like(estimator.alpha)
-        self.assertEqual(estimator.ratio(50.0), 1e-6)
-        self.assertAlmostEqual(math.log(estimator.ratio(50.0)), -13.8155, places=3)
+        with self.assertRaises(DegenerateULSIFFit) as caught:
+            estimator._validate_final_fit(
+                estimator._as_column([80.0, 90.0]),
+                estimator._as_column([10.0, 20.0]),
+                cv_objective=-1.0,
+            )
+        self.assertIn("no coefficient is strictly positive", str(caught.exception))
 
     def test_the_ratio_is_bounded_above_by_the_sum_of_the_coefficients(self):
         # CORRECTION to an earlier draft of the audit, which called the
@@ -259,12 +271,18 @@ class TestRatioPositivityAndClipping(unittest.TestCase):
             self.assertLess(values.max(), 1e6)
             self.assertLess(float(np.abs(np.log(values)).max()), math.log(1e6))
 
-    def test_AUDIT_a_non_finite_score_produces_a_non_finite_ratio(self):
-        # AUDIT finding D-06. There is no guard, so NaN passes straight
-        # through, and +inf is silently clipped to a perfect score of 100.
+    def test_RESOLVED_a_non_finite_score_is_rejected_by_ratio(self):
+        # AUDIT finding D-06 -- RESOLVED by PR #9.
+        #
+        # WAS: no guard, so NaN passed straight through and +inf was silently
+        # clipped by normalization to a perfect score of 100.
+        #
+        # NOW: rejected before normalization, so +inf can no longer become 100.
         estimator = fitted_estimator()
-        self.assertTrue(math.isnan(estimator.ratio(float("nan"))))
-        self.assertEqual(estimator.ratio(float("inf")), estimator.ratio(100.0))
+        for bad in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(score=bad):
+                with self.assertRaises(NonFiniteScoreError):
+                    estimator.ratio(bad)
 
 
 # --------------------------------------------------------------------------
@@ -392,17 +410,24 @@ class TestSequentialAccumulation(unittest.TestCase):
         self.assertTrue(math.isfinite(result.p_factual))
         self.assertLessEqual(result.p_factual, 1.0)
 
-    def test_AUDIT_a_nan_score_spends_the_whole_budget_and_yields_nan(self):
-        # AUDIT finding D-06. NaN defeats every comparison, so no stopping rule
-        # fires, the full retrieval budget is spent, and NaN reaches the
-        # metrics. Nothing warns.
+    def test_RESOLVED_a_nan_score_raises_on_the_first_bad_document(self):
+        # AUDIT finding D-06 -- RESOLVED by PR #9.
+        #
+        # WAS: NaN defeated every comparison, so no stopping rule fired, the
+        # full retrieval budget (10 documents) was spent, and a NaN p_factual
+        # reached the metrics with no warning.
+        #
+        # NOW: the first non-finite score raises immediately, and the later
+        # documents are never scored.
         detector = DDREDetector(
             fitted_estimator(), lower_threshold=0.2, upper_threshold=0.8,
             p0=0.5, c_miss=C_MISS, c_false_alarm=C_FALSE_ALARM, max_docs=10,
         )
-        result = detector.detect_subclaim(Sub(10), FixedScorer(float("nan")))
-        self.assertTrue(math.isnan(result.p_factual))
-        self.assertEqual(result.documents_used, 10)
+        scorer = FixedScorer(float("nan"))
+        with self.assertRaises(NonFiniteScoreError) as caught:
+            detector.detect_subclaim(Sub(10), scorer)
+        self.assertIn("document-score numerical failure", str(caught.exception))
+        self.assertEqual(scorer.calls, 1, "later documents must not be scored")
 
 
 class TestSentenceAggregation(unittest.TestCase):

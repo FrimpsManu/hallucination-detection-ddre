@@ -359,6 +359,16 @@ def main():
             f"uLSIF selected sigma={ratio_estimator.sigma:.6f}, "
             f"lambda={ratio_estimator.lam:.6g}"
         )
+        fit_diagnostics = ratio_estimator.fit_diagnostics
+        print(
+            f"uLSIF final-fit sanity check passed: "
+            f"{fit_diagnostics['sanity_check_passed']} "
+            f"({fit_diagnostics['n_positive_alpha']} of "
+            f"{fit_diagnostics['n_alpha']} coefficients strictly positive; "
+            f"raw fitted ratio on the training support in "
+            f"[{fit_diagnostics['raw_ratio_min_on_all_train']:.6g}, "
+            f"{fit_diagnostics['raw_ratio_max_on_all_train']:.6g}])"
+        )
 
         bse_official = BSEDetector(
             pos_hist,
@@ -518,6 +528,7 @@ def main():
                 "ratio_definition": "p(entailment_score | factual) / p(entailment_score | hallucinated)",
                 "sigma": ratio_estimator.sigma,
                 "lambda": ratio_estimator.lam,
+                "ulsif_fit_diagnostics": ratio_estimator.fit_diagnostics,
                 "cv_table": ratio_estimator.cv_table,
                 "selected_lower_threshold": selected["lower"],
                 "selected_upper_threshold": selected["upper"],
