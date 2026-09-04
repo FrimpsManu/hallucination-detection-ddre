@@ -6,7 +6,14 @@ import torch
 from tqdm import tqdm
 
 
-SCORE_VERSION = "wang-emnlp23-temp5-seg400-overlap100-v1"
+# v2 (Gate 1 Step 2): entailment probabilities now leave the tensor BEFORE the
+# * 100 scaling, matching Wang's released utils.py:62. The bump is mandatory,
+# not cosmetic: v1 cache rows were scaled inside the tensor, and on a
+# half-precision run that rounds a score by up to half of 0.015625 in the 16-32
+# range. Reusing them under the corrected scorer would silently mix the two
+# conventions. Historical caches and result artifacts are left untouched; they
+# simply no longer match a v2 key.
+SCORE_VERSION = "wang-emnlp23-temp5-seg400-overlap100-hostscale-v2"
 
 
 def split_text(text, segment_length=400, overlap_length=100):
@@ -120,8 +127,22 @@ class EntailmentScorer:
             outputs = self.model(**inputs)
 
         probs = torch.softmax(outputs.logits / 5.0, dim=-1)
-        scores = probs[:, self.entailment_index] * 100.0
-        return [float(x) for x in scores.detach().cpu().tolist()]
+        # Leave the tensor BEFORE scaling, matching Wang's released
+        # utils.py:59-62, which calls .tolist() on the probabilities and only
+        # then multiplies by 100 in Python float64.
+        #
+        # Scaling inside the tensor rounds the product to the tensor dtype. The
+        # Gate 1 Step 2 diagnostic measured this on the real T4 run: the forward
+        # path and the softmax shape were bit-identical across all 398 NBC
+        # pairs, and the scaling order alone reproduced the recorded
+        # 19.9462890625 -> 19.953125 discrepancy and the exact Step 1 positive
+        # NBC histogram movement.
+        #
+        # No rounding is applied here. Scores stay continuous for DDRE; BSE's
+        # one-decimal rounding and bucketing stay in src/baseline_core.py where
+        # the released implementation puts them.
+        entailment = probs[:, self.entailment_index].detach().cpu().tolist()
+        return [float(x) * 100.0 for x in entailment]
 
     def score_pairs(
         self,
