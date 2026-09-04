@@ -12,7 +12,13 @@ import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from src.baseline_core import BSEDetector, build_nbc_histograms
-from src.ddre_core import DDREDetector, ULSIFDensityRatio
+from src.ddre_core import (
+    CANDIDATE_LOWER_GRID,
+    CANDIDATE_UPPER_GRID,
+    DDREDetector,
+    ULSIFDensityRatio,
+    cost_consistent_thresholds,
+)
 from src.evaluation import evaluate_detector, prediction_rows, summarize_method
 from src.utils import EntailmentScorer
 from src.wang_data import (
@@ -125,14 +131,21 @@ def tune_ddre_thresholds(
 ):
     """Select a retrieval stopping interval on validation data only.
 
+    The search space is derived from the configured costs before any candidate
+    is evaluated: a stopping threshold that contradicts the final cost rule is
+    never scored, so it cannot be selected. See ``cost_consistent_thresholds``.
+
     Primary rule: among configurations that preserve the BSE official baseline's
     factual AUC-PR and balanced PR-AUC within a small tolerance, choose the one
     using the fewest documents. If none qualifies, use a predeclared penalized
     quality/cost objective and explicitly record that the dominance condition was
     not achieved on validation data.
     """
-    lower_grid = np.round(np.arange(0.05, 0.41, 0.05), 2)
-    upper_grid = np.round(np.arange(0.60, 0.96, 0.05), 2)
+    search_space = cost_consistent_thresholds(
+        c_miss, c_false_alarm, CANDIDATE_LOWER_GRID, CANDIDATE_UPPER_GRID
+    )
+    lower_grid = search_space["effective_lower_grid"]
+    upper_grid = search_space["effective_upper_grid"]
     candidates = []
 
     baseline_factual = baseline_metrics["factual"]["auc_pr"]
@@ -205,7 +218,8 @@ def tune_ddre_thresholds(
             "threshold pair preserved BSE-official validation quality"
         )
 
-    return selected, candidates, selection_rule
+    search_space["threshold_pairs_scored"] = len(candidates)
+    return selected, candidates, selection_rule, search_space
 
 
 def hypothesis_comparison(ddre, baseline):
@@ -377,7 +391,7 @@ def main():
         )
 
         print("\nTuning DDRE stopping thresholds on validation data only...")
-        selected, threshold_table, selection_rule = tune_ddre_thresholds(
+        selected, threshold_table, selection_rule, threshold_search_space = tune_ddre_thresholds(
             ratio_estimator,
             validation_records,
             scorer,
@@ -388,6 +402,26 @@ def main():
             max_docs=args.max_docs,
             quality_tolerance=args.quality_tolerance,
             retrieval_penalty=args.retrieval_penalty,
+        )
+        print(
+            f"Cost decision threshold t = C_M/(C_M+C_FA) = "
+            f"{threshold_search_space['cost_decision_threshold']:.10f}"
+        )
+        print(
+            f"  candidate lower grid: {threshold_search_space['candidate_lower_grid']}"
+        )
+        print(
+            f"  effective lower grid: {threshold_search_space['effective_lower_grid']} "
+            f"(excluded {threshold_search_space['excluded_lower_grid']}: lower > t)"
+        )
+        print(
+            f"  effective upper grid: {threshold_search_space['effective_upper_grid']} "
+            f"(excluded {threshold_search_space['excluded_upper_grid']}: upper <= t)"
+        )
+        print(
+            f"  threshold pairs evaluated: "
+            f"{threshold_search_space['threshold_pairs_evaluated']} of "
+            f"{threshold_search_space['candidate_pairs_before_filtering']} candidates"
         )
         print(
             f"Selected DDRE interval: [{selected['lower']:.2f}, {selected['upper']:.2f}] "
@@ -488,6 +522,7 @@ def main():
                 "selected_lower_threshold": selected["lower"],
                 "selected_upper_threshold": selected["upper"],
                 "threshold_selection_rule": selection_rule,
+                "threshold_search_space": threshold_search_space,
                 "threshold_validation_table": threshold_table,
             },
             "test_metrics": {
