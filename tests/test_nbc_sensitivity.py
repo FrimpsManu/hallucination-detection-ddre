@@ -12,6 +12,10 @@ produces a conclusion.
 import unittest
 
 from src.nbc_sensitivity import (
+    HEADLINE_CANNOT_EXPLAIN,
+    HEADLINE_NO_COVERAGE,
+    HEADLINE_PARTIAL_COVERAGE,
+    HEADLINE_PLAUSIBLE,
     MISSING_EXAMPLES_PER_CLASS,
     N_BINS,
     PAPER_EXAMPLES_PER_CLASS,
@@ -26,6 +30,7 @@ from src.nbc_sensitivity import (
     combination_histograms,
     enumerate_combinations,
     interpretation,
+    is_complete,
     metric_distance,
     raw_count,
     summarize,
@@ -44,10 +49,19 @@ METRIC_NAMES = (
 )
 
 
-def configuration_block(verdict, deltas=None):
-    """A minimal stand-in for evaluate_configuration()'s return shape."""
+def config_block(verdict, deltas=None, complete=True):
+    """A minimal stand-in for evaluate_configuration() plus the complete flag."""
+    if not complete:
+        return {
+            "complete": False,
+            "incomplete_reason": "required document score absent from the cache",
+            "verdict": None,
+            "metrics": [],
+        }
     deltas = deltas or {name: 0.0 for name in METRIC_NAMES}
     return {
+        "complete": True,
+        "incomplete_reason": None,
         "verdict": verdict,
         "metrics": [
             {
@@ -63,20 +77,33 @@ def configuration_block(verdict, deltas=None):
     }
 
 
-def row(positive_bin, negative_bin, primary, secondary, deltas=None, incomplete=False):
-    entry = {
+def row(
+    positive_bin,
+    negative_bin,
+    primary=STATUS_FAIL,
+    secondary=STATUS_FAIL,
+    deltas=None,
+    primary_complete=True,
+    secondary_complete=True,
+):
+    """One combination, with each configuration's completeness set separately."""
+    return {
         "positive_bin": positive_bin,
         "negative_bin": negative_bin,
-        "incomplete": incomplete,
-        "incomplete_reason": "cache miss" if incomplete else None,
-        "configurations": {},
+        "configurations": {
+            PRIMARY: config_block(primary, deltas, complete=primary_complete),
+            SECONDARY: config_block(secondary, complete=secondary_complete),
+        },
     }
-    if not incomplete:
-        entry["configurations"] = {
-            PRIMARY: configuration_block(primary, deltas),
-            SECONDARY: configuration_block(secondary),
-        }
-    return entry
+
+
+def full_grid(primary=STATUS_FAIL, secondary=STATUS_FAIL):
+    """All 100 placements, every configuration complete."""
+    return [
+        row(p, n, primary, secondary)
+        for p in range(N_BINS)
+        for n in range(N_BINS)
+    ]
 
 
 class TestReleasedHistograms(unittest.TestCase):
@@ -190,15 +217,17 @@ class TestSummary(unittest.TestCase):
     def test_incomplete_combinations_are_never_counted_as_pass_or_fail(self):
         rows = [
             row(1, 1, STATUS_PASS, STATUS_PASS),
-            row(2, 2, None, None, incomplete=True),
+            row(2, 2, primary_complete=False, secondary_complete=False),
         ]
         summary = summarize(rows)
         self.assertEqual(summary["combinations_evaluated"], 2)
-        self.assertEqual(summary["combinations_complete"], 1)
-        self.assertEqual(summary["combinations_incomplete"], 1)
+        self.assertEqual(summary[f"{PRIMARY}_complete"], 1)
+        self.assertEqual(summary[f"{PRIMARY}_incomplete"], 1)
         self.assertEqual(summary[f"{PRIMARY}_pass"], 1)
         self.assertEqual(summary[f"{PRIMARY}_fail"], 0)
-        self.assertEqual(summary["incomplete_combinations"][0]["positive_bin"], 2)
+        self.assertEqual(
+            summary["incomplete_combinations"][PRIMARY][0]["positive_bin"], 2
+        )
 
     def test_passing_bins_are_reported(self):
         rows = [row(4, 6, STATUS_PASS, STATUS_PASS), row(1, 2, STATUS_FAIL, STATUS_FAIL)]
@@ -241,7 +270,10 @@ class TestClosestCombinations(unittest.TestCase):
         self.assertEqual(len(closest_combinations(rows, limit=3)), 3)
 
     def test_incomplete_rows_are_excluded(self):
-        rows = [self.near(0, 0, 0.5), row(1, 1, None, None, incomplete=True)]
+        rows = [
+            self.near(0, 0, 0.5),
+            row(1, 1, primary_complete=False, secondary_complete=False),
+        ]
         closest = closest_combinations(rows)
         self.assertEqual(len(closest), 1)
         self.assertEqual(closest[0]["positive_bin"], 0)
@@ -255,55 +287,173 @@ class TestClosestCombinations(unittest.TestCase):
         self.assertIsNone(metric_distance(self.near(0, 0, 0.1), "NOT_A_CONFIG"))
 
 
-class TestInterpretation(unittest.TestCase):
-    def test_zero_passes_says_the_missing_examples_cannot_explain_the_gap(self):
-        summary = summarize([row(0, 0, STATUS_FAIL, STATUS_FAIL)])
-        reading = interpretation(summary, primary=PRIMARY)
-        self.assertEqual(reading["headline"], "MISSING_EXAMPLES_CANNOT_EXPLAIN_THE_GAP")
-        self.assertIn("cannot explain", reading["message"])
-        self.assertIn("another source", reading["message"])
+class TestPerConfigurationCompleteness(unittest.TestCase):
+    """A completed primary result must survive a secondary cache miss."""
 
-    def test_some_passes_says_only_that_it_is_plausible(self):
-        summary = summarize([row(0, 0, STATUS_PASS, STATUS_PASS)])
-        reading = interpretation(summary, primary=PRIMARY)
+    def test_primary_pass_is_counted_when_the_secondary_is_incomplete(self):
+        rows = [row(3, 4, STATUS_PASS, None, secondary_complete=False)]
+        summary = summarize(rows, expected_combinations=1)
+        self.assertEqual(summary[f"{PRIMARY}_complete"], 1)
+        self.assertEqual(summary[f"{PRIMARY}_pass"], 1)
+        self.assertEqual(summary[f"{SECONDARY}_complete"], 0)
+        self.assertEqual(summary[f"{SECONDARY}_incomplete"], 1)
+        self.assertEqual(summary["bins_that_make_primary_pass"], [(3, 4)])
+
+    def test_secondary_pass_is_counted_when_the_primary_is_incomplete(self):
+        rows = [row(1, 1, None, STATUS_PASS, primary_complete=False)]
+        summary = summarize(rows, expected_combinations=1)
+        self.assertEqual(summary[f"{SECONDARY}_pass"], 1)
+        self.assertEqual(summary[f"{PRIMARY}_complete"], 0)
+        self.assertEqual(summary[f"{PRIMARY}_pass"], 0)
+
+    def test_both_pass_requires_both_to_complete(self):
+        rows = [row(2, 2, STATUS_PASS, None, secondary_complete=False)]
+        summary = summarize(rows, expected_combinations=1)
+        self.assertEqual(summary[f"{PRIMARY}_pass"], 1)
+        self.assertEqual(summary["both_configurations_pass"], 0)
+        self.assertEqual(summary["both_configurations_complete"], 0)
+
+    def test_both_pass_requires_both_to_pass(self):
+        rows = [row(2, 2, STATUS_PASS, STATUS_WARN)]
+        summary = summarize(rows, expected_combinations=1)
+        self.assertEqual(summary["both_configurations_complete"], 1)
+        self.assertEqual(summary["both_configurations_pass"], 0)
+
+    def test_completion_counts_are_reported_per_configuration(self):
+        rows = [
+            row(0, 0, STATUS_PASS, STATUS_PASS),
+            row(0, 1, STATUS_FAIL, None, secondary_complete=False),
+            row(0, 2, None, STATUS_PASS, primary_complete=False),
+        ]
+        summary = summarize(rows, expected_combinations=3)
+        self.assertEqual(summary[f"{PRIMARY}_complete"], 2)
+        self.assertEqual(summary[f"{PRIMARY}_incomplete"], 1)
+        self.assertEqual(summary[f"{SECONDARY}_complete"], 2)
+        self.assertEqual(summary[f"{SECONDARY}_incomplete"], 1)
+
+    def test_incomplete_lists_are_keyed_by_configuration(self):
+        rows = [row(5, 6, STATUS_PASS, None, secondary_complete=False)]
+        summary = summarize(rows, expected_combinations=1)
+        self.assertEqual(summary["incomplete_combinations"][PRIMARY], [])
         self.assertEqual(
-            reading["headline"], "MISSING_EXAMPLES_ARE_A_PLAUSIBLE_EXPLANATION"
+            summary["incomplete_combinations"][SECONDARY][0]["negative_bin"], 6
         )
+
+    def test_is_complete_reads_the_per_configuration_flag(self):
+        entry = row(0, 0, STATUS_PASS, None, secondary_complete=False)
+        self.assertTrue(is_complete(entry, PRIMARY))
+        self.assertFalse(is_complete(entry, SECONDARY))
+
+    def test_an_incomplete_configuration_has_no_verdict(self):
+        entry = row(0, 0, STATUS_PASS, None, secondary_complete=False)
+        self.assertIsNone(entry["configurations"][SECONDARY]["verdict"])
+        self.assertIsNotNone(
+            entry["configurations"][SECONDARY]["incomplete_reason"]
+        )
+
+
+class TestInterpretation(unittest.TestCase):
+    """The four predeclared branches for the primary CM=14/CFA=24 question."""
+
+    def test_a_all_primary_complete_with_a_pass_is_plausible(self):
+        rows = full_grid(STATUS_FAIL, STATUS_FAIL)
+        rows[17] = row(1, 7, STATUS_PASS, STATUS_PASS)
+        reading = interpretation(summarize(rows), primary=PRIMARY)
+        self.assertEqual(reading["headline"], HEADLINE_PLAUSIBLE)
         self.assertIn("PLAUSIBLE", reading["message"])
         self.assertIn("does NOT identify their true bins", reading["message"])
 
-    def test_a_positive_result_never_licenses_adopting_a_histogram(self):
-        summary = summarize([row(0, 0, STATUS_PASS, STATUS_PASS)])
+    def test_a_one_pass_under_partial_coverage_is_still_plausible(self):
+        # A single reproducing placement is sufficient; unevaluated placements
+        # cannot take that away.
+        rows = full_grid(STATUS_FAIL, STATUS_FAIL)
+        rows[0] = row(0, 0, STATUS_PASS, STATUS_PASS)
+        for index in range(1, 40):
+            rows[index] = row(
+                rows[index]["positive_bin"],
+                rows[index]["negative_bin"],
+                primary_complete=False,
+            )
+        reading = interpretation(summarize(rows), primary=PRIMARY)
+        self.assertEqual(reading["headline"], HEADLINE_PLAUSIBLE)
+        self.assertIn("Coverage was partial", reading["message"])
+        self.assertIn("does not weaken this finding", reading["message"])
+
+    def test_b_zero_passes_with_partial_coverage_is_inconclusive(self):
+        # The review's key case: an unevaluated placement could still pass, so
+        # "cannot explain" is not supported.
+        rows = full_grid(STATUS_FAIL, STATUS_FAIL)
+        rows[5] = row(0, 5, primary_complete=False)
+        reading = interpretation(summarize(rows), primary=PRIMARY)
+        self.assertNotEqual(reading["headline"], HEADLINE_CANNOT_EXPLAIN)
+        self.assertEqual(reading["headline"], HEADLINE_PARTIAL_COVERAGE)
+        # The phrase appears only inside an explicit negation.
+        self.assertIn(
+            "does NOT establish that the missing 200th examples cannot explain",
+            reading["message"],
+        )
+        self.assertIn("could still pass", reading["message"])
+
+    def test_c_full_grid_complete_with_zero_passes_cannot_explain(self):
+        reading = interpretation(summarize(full_grid()), primary=PRIMARY)
+        self.assertEqual(reading["headline"], HEADLINE_CANNOT_EXPLAIN)
+        self.assertIn("All 100", reading["message"])
+        self.assertIn("cannot explain", reading["message"])
+        self.assertIn("another source", reading["message"])
+
+    def test_d_zero_primary_complete_is_insufficient_coverage(self):
+        rows = [
+            row(p, n, primary_complete=False)
+            for p in range(N_BINS)
+            for n in range(N_BINS)
+        ]
+        reading = interpretation(summarize(rows), primary=PRIMARY)
+        self.assertEqual(reading["headline"], HEADLINE_NO_COVERAGE)
+        self.assertIn("Nothing has been established", reading["message"])
+        self.assertNotIn("cannot explain", reading["message"])
+
+    def test_a_truncated_grid_can_never_conclude_cannot_explain(self):
+        # --limit-combinations must not produce a negative conclusion.
+        rows = [row(0, n, STATUS_FAIL, STATUS_FAIL) for n in range(4)]
+        summary = summarize(rows)
+        self.assertFalse(summary["grid_fully_enumerated"])
         reading = interpretation(summary, primary=PRIMARY)
+        self.assertEqual(reading["headline"], HEADLINE_PARTIAL_COVERAGE)
+
+    def test_secondary_incompleteness_does_not_affect_the_primary_reading(self):
+        rows = full_grid(STATUS_FAIL, STATUS_FAIL)
+        rows = [
+            row(r["positive_bin"], r["negative_bin"], STATUS_FAIL, secondary_complete=False)
+            for r in rows
+        ]
+        reading = interpretation(summarize(rows), primary=PRIMARY)
+        self.assertEqual(reading["headline"], HEADLINE_CANNOT_EXPLAIN)
+
+    def test_a_positive_result_never_licenses_adopting_a_histogram(self):
+        rows = full_grid()
+        rows[0] = row(0, 0, STATUS_PASS, STATUS_PASS)
+        reading = interpretation(summarize(rows), primary=PRIMARY)
         self.assertIn("released 199+199 data remain", reading["message"])
         self.assertTrue(reading["released_data_remain_the_baseline"])
         self.assertTrue(reading["does_not_identify_true_bins"])
 
-    def test_no_complete_combinations_is_inconclusive_not_a_conclusion(self):
-        # An empty sample must not yield "cannot explain the gap".
-        summary = summarize([row(0, 0, None, None, incomplete=True)])
-        reading = interpretation(summary, primary=PRIMARY)
-        self.assertEqual(reading["headline"], "INCONCLUSIVE_INSUFFICIENT_CACHE_COVERAGE")
-        self.assertIn("Nothing has been established", reading["message"])
-        self.assertNotIn("cannot explain", reading["message"])
-
-    def test_partial_coverage_is_caveated(self):
-        rows = [
-            row(0, 0, STATUS_FAIL, STATUS_FAIL),
-            row(0, 1, None, None, incomplete=True),
-        ]
-        reading = interpretation(summarize(rows), primary=PRIMARY)
-        self.assertEqual(reading["headline"], "MISSING_EXAMPLES_CANNOT_EXPLAIN_THE_GAP")
-        self.assertIn("could not be evaluated", reading["message"])
-
     def test_every_reading_is_flagged_as_sensitivity_only(self):
-        for rows in (
+        cases = [
+            full_grid(),
+            [row(p, n, primary_complete=False) for p in range(N_BINS) for n in range(N_BINS)],
             [row(0, 0, STATUS_PASS, STATUS_PASS)],
-            [row(0, 0, STATUS_FAIL, STATUS_FAIL)],
-            [row(0, 0, None, None, incomplete=True)],
-        ):
+        ]
+        for rows in cases:
             reading = interpretation(summarize(rows), primary=PRIMARY)
             self.assertTrue(reading["is_sensitivity_analysis_only"])
+            self.assertTrue(reading["released_data_remain_the_baseline"])
+
+    def test_reading_reports_the_primary_completion_counts(self):
+        rows = full_grid()
+        rows[3] = row(0, 3, primary_complete=False)
+        reading = interpretation(summarize(rows), primary=PRIMARY)
+        self.assertEqual(reading["primary_complete"], 99)
+        self.assertEqual(reading["primary_incomplete"], 1)
 
 
 if __name__ == "__main__":
