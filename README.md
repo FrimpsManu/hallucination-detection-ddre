@@ -454,11 +454,35 @@ released NBC pairs:
 | Arm | Forward call | Toggles |
 | --- | --- | --- |
 | `C0` | `model(input_ids)` | reference (literal Wang) |
-| `C1` | `with torch.inference_mode(): model(input_ids)` | inference_mode |
+| `C1` | `model(input_ids)` under `inference_mode` | inference_mode |
 | `C2` | `model(input_ids, attention_mask=...)` | attention_mask |
-| `C3` | `with torch.inference_mode(): model(input_ids, attention_mask=...)` | both |
-| `C4` | `... + token_type_ids=...` | **confirmation only** |
+| `C3` | `model(input_ids, attention_mask=...)` under `inference_mode` | both |
+| `C4` | `... + token_type_ids=...` under `inference_mode` | **confirmation only** |
 | `C0R` | `model(input_ids)`, run last | **determinism control** |
+
+**Only the model call sits inside `torch.inference_mode()`.** That mirrors
+`src/utils.py::EntailmentScorer._infer_batch`, where the `with` block contains
+the forward pass and nothing else:
+
+```python
+with torch.inference_mode():
+    outputs = self.model(**inputs)
+
+probs = torch.softmax(outputs.logits / 5.0, dim=-1)
+```
+
+The softmax runs after the context closes, identically for every arm. Wrapping
+it too would add a second uncontrolled variable and the arm would no longer
+reproduce the repository's forward path. The boundary is load-bearing, so the
+model call lives in its own function (`forward_once`) with `torch` injected, and
+`TestForwardControlFlow` asserts against a recording fake that the softmax never
+executes inside the context for any arm.
+
+Score extraction uses Wang's float64 form (`.tolist()` then `* 100`) for every
+arm alike, so extraction is not a variable here. The production scorer instead
+scales in float32 before widening; that is a separate, already-catalogued
+difference of order `1e-6`, which is why the reference checks below compare
+within a bound rather than demanding bit-equality.
 
 `C4` is confirmation only: `type_vocab_size` is 0, so the argument is expected
 to be inert, and the arm exists to demonstrate that rather than to test a live
@@ -466,8 +490,48 @@ hypothesis.
 
 **`C0R` is what makes any of this attributable.** It re-runs `C0` unchanged at
 the end. If `C0` and `C0R` are not bit-identical, the forward pass is
-nondeterministic on that device and every factor attribution in the report is
-unfounded -- so the report says exactly that and withholds a verdict.
+nondeterministic on that device and every factor attribution would be unfounded.
+
+Two guards can force the verdict to withhold causal attribution outright:
+
+| Guard | Overall headline |
+| --- | --- |
+| `C0R` is not bit-identical to `C0` | `UNDETERMINED_NONDETERMINISTIC` |
+| `C0` does not reproduce Step 1 A1 | `UNDETERMINED_REFERENCE_NOT_REPRODUCED` |
+
+When either fires, the overall `headline` and `causal_candidate` say attribution
+is withheld and name no factor, and `causal_attribution_withheld` is `true`. The
+factor-isolation reading is still computed and carried under `factor_isolation`
+for inspection, but it is not promoted to the verdict -- `factor_isolation_promoted`
+records that. The pairwise numerical diagnostics remain valid measurements
+either way.
+
+#### The causal chain
+
+Reproducing the Step 1 divergence means completing a chain, not matching one
+number. Bucket agreement alone is explicitly **not** sufficient: two scores far
+enough apart to be unrelated can share a bucket by luck, and the whole subject
+here is a 0.0068 divergence.
+
+| Link | Requirement | |
+| --- | --- | --- |
+| 1 | `C0` reproduces Step 1 A1 -- raw within `1e-4`, **and** rounded value, **and** bucket | required |
+| 2 | `C0R` is bit-identical to `C0` | required |
+| 3 | an isolated factor moves the probe pair off the A1 bucket | informational |
+| 4 | the bridge arm reproduces Step 1 A3 -- raw within `1e-4`, rounded, bucket | required |
+| 5 | `C3 == C4`, confirming `token_type_ids` are inert at `type_vocab_size` 0 | confirmation |
+
+The **bridge arm** is `C4`: it carries `attention_mask`, `inference_mode` and
+`token_type_ids` together, so it is the closest available reconstruction of the
+Step 1 repository scorer. If `C4` was not run, `C3` stands in and link 5 is
+reported as unevaluated. A `C3 != C4` result surfaces as a warning rather than
+blocking the claim, since that would be a separate finding about
+`token_type_ids` rather than a fault in the A1 → A3 reconstruction.
+
+`explains_reference_observation: YES` requires links 1, 2 and 4. An arm merely
+landing in the repository bucket is reported under
+`arms_reaching_repository_bucket` and is never on its own treated as evidence
+that the divergence was reproduced.
 
 Four controls keep the forward call the only variable: the tokenizer and model
 are loaded once; every pair is tokenized **once** and the identical tensors are
@@ -496,10 +560,11 @@ diagnostic never emits one. Every comparison reports three separate fields:
 - **`causal_candidate`** -- which factor the comparison toggles, and whether it
   showed an effect.
 
-The verdict adds `explains_reference_observation`, because the goal is not to
-find *a* difference but to find the one that produced the Step 1 result. The
-report prints the raw, rounded and bucketed value of positive pair 169 for every
-arm, beside the two recorded Step 1 values, so that comparison is direct.
+The verdict adds `explains_reference_observation` and, when a guard fires,
+`causal_attribution_withheld`, because the goal is not to find *a* difference but
+to find the one that produced the Step 1 result. The report prints the raw,
+rounded and bucketed value of positive pair 169 for every arm, beside the two
+recorded Step 1 values, plus the per-link status of the causal chain.
 
 The negligible bound is `1e-4` on a 0-100 score. It is anchored to the effect
 being explained: the Step 1 divergence was `0.0068359375`, about 68x the bound.
@@ -507,6 +572,9 @@ A threshold used for attribution has to sit well under the effect it attributes,
 or it would classify the very difference under investigation as noise.
 
 #### Interpretation
+
+These apply only once both guards above have passed; otherwise the verdict is
+`UNDETERMINED` and none of them is promoted.
 
 | Observation | Conclusion |
 | --- | --- |

@@ -75,6 +75,14 @@ DIFFERENCE_SUBSTANTIAL = "SUBSTANTIAL"
 
 YES = "YES"
 NO = "NO"
+UNDETERMINED = "UNDETERMINED"
+
+# Guard reasons that force the overall verdict to withhold causal attribution.
+GUARD_NONDETERMINISTIC = "nondeterministic_device"
+GUARD_REFERENCE_NOT_REPRODUCED = "reference_not_reproduced"
+
+HEADLINE_UNDETERMINED_NONDETERMINISTIC = "UNDETERMINED_NONDETERMINISTIC"
+HEADLINE_UNDETERMINED_REFERENCE = "UNDETERMINED_REFERENCE_NOT_REPRODUCED"
 
 
 # --------------------------------------------------------------------------
@@ -220,6 +228,74 @@ def entailment_score_from_probabilities(probabilities):
     differently, a divergence could not be attributed to the forward call.
     """
     return float(probabilities[ENTAILMENT_INDEX]) * 100.0
+
+
+def build_forward_kwargs(encoded, spec):
+    """Keyword arguments for one arm's model call.
+
+    ``input_ids`` is always positional, matching Wang's released
+    ``model(inputs["input_ids"])``. Only the extra arguments vary by arm.
+    """
+    kwargs = {}
+    if spec["attention_mask"]:
+        kwargs["attention_mask"] = encoded["attention_mask"]
+    if spec["token_type_ids"]:
+        if "token_type_ids" not in encoded:
+            raise KeyError(
+                f"arm {spec['name']} requires token_type_ids but the tokenizer "
+                "emitted none"
+            )
+        kwargs["token_type_ids"] = encoded["token_type_ids"]
+    return kwargs
+
+
+def forward_once(model, torch_module, input_ids, kwargs, inference_mode):
+    """Run the model call, and ONLY the model call, under the chosen context.
+
+    This mirrors ``src/utils.py::EntailmentScorer._infer_batch`` exactly, where
+    the ``with torch.inference_mode():`` block contains the model call and
+    nothing else::
+
+        with torch.inference_mode():
+            outputs = self.model(**inputs)
+
+        probs = torch.softmax(outputs.logits / 5.0, dim=-1)
+
+    Putting the softmax inside the context too would add a second uncontrolled
+    variable and stop the arm from reproducing the repository's forward path.
+    The boundary is therefore load-bearing, which is why the call lives in its
+    own function that a test can wrap.
+    """
+    if inference_mode:
+        with torch_module.inference_mode():
+            return model(input_ids, **kwargs)
+    return model(input_ids, **kwargs)
+
+
+def score_one_pair(model, encoded, spec, torch_module):
+    """Score one tokenized pair under one arm.
+
+    ``torch`` is injected rather than imported so this stays testable without a
+    real torch install, and so the control-flow boundary above can be asserted
+    directly.
+
+    Everything after :func:`forward_once` is common to every arm and always
+    runs OUTSIDE any inference-mode context. The extraction is Wang's released
+    ``utils.py:59-65`` float64 form (``.tolist()`` then ``* 100``) for all arms
+    alike, so score extraction is not a variable in this experiment. Note that
+    the production scorer instead scales in float32 before widening; that is a
+    separate, already-catalogued difference of order 1e-6, not under test here,
+    and it is why the reference-reproduction checks compare within a bound
+    rather than demanding bit-equality.
+    """
+    kwargs = build_forward_kwargs(encoded, spec)
+    output = forward_once(
+        model, torch_module, encoded["input_ids"], kwargs, spec["inference_mode"]
+    )
+    probabilities = torch_module.softmax(
+        output["logits"][0] / SOFTMAX_TEMPERATURE, -1
+    ).tolist()
+    return entailment_score_from_probabilities(probabilities)
 
 
 def score_report(raw):
@@ -453,73 +529,252 @@ def interpret_factor_isolation(matrix):
     }
 
 
-def assess_reference_reproduction(probe, control_block):
-    """Did any single factor reproduce the Step 1 bucket flip?
+def score_matches_reference(raw, expected, bound=NEGLIGIBLE_MAX_ABS_DELTA):
+    """Does a measured score reproduce a recorded Step 1 score?
 
-    The experiment succeeds only if some arm moves positive pair 169 from the
-    literal Wang bucket to the repository bucket. Finding merely *a* numerical
-    difference does not explain the Step 1 result.
+    All three views must agree, not just the bucket. A bucket match alone is far
+    too weak for a causal experiment whose whole subject is a 0.0068 divergence:
+    two scores several buckets' worth of noise apart can share a bucket by luck.
+    The raw score must also land within ``bound`` of the recorded value.
+
+    The comparison is bounded rather than exact because the production scorer
+    scales to 0-100 in float32 while this diagnostic uses Wang's float64 form
+    for every arm. That difference is of order 1e-6, far inside the bound.
+    """
+    report = score_report(raw)
+    raw_delta = abs(float(raw) - float(expected["raw"]))
+    raw_ok = raw_delta <= bound
+    rounded_ok = report["rounded_one_decimal"] == expected["rounded"]
+    bucket_ok = report["nbc_bucket"] == expected["nbc_bucket"]
+    return {
+        "raw": report["raw"],
+        "expected_raw": float(expected["raw"]),
+        "raw_delta": raw_delta,
+        "bound": bound,
+        "raw_within_bound": raw_ok,
+        "rounded_one_decimal": report["rounded_one_decimal"],
+        "expected_rounded": expected["rounded"],
+        "rounded_matches": rounded_ok,
+        "nbc_bucket": report["nbc_bucket"],
+        "expected_nbc_bucket": expected["nbc_bucket"],
+        "bucket_matches": bucket_ok,
+        "reproduces": bool(raw_ok and rounded_ok and bucket_ok),
+    }
+
+
+def bridge_arm_name(available_arms):
+    """The arm that most closely reconstructs the Step 1 repository scorer.
+
+    C4 carries attention_mask, inference_mode and token_type_ids together, so it
+    is the closest available reconstruction of A3. When C4 was not run, C3
+    stands in: at ``type_vocab_size`` 0 the two are expected to be identical,
+    and the C3-vs-C4 check is what tests that expectation.
+    """
+    if "C4" in available_arms:
+        return "C4"
+    if "C3" in available_arms:
+        return "C3"
+    return None
+
+
+def assess_reference_reproduction(probe, control_block, matrix=None, c3_vs_c4=None):
+    """Evaluate the full causal chain against the recorded Step 1 divergence.
+
+    A causal claim needs the whole chain, not one coincidence:
+
+    1. C0 reproduces Step 1 A1 -- raw within bound, rounded value, and bucket;
+    2. C0R is bit-identical to C0, so the device is deterministic;
+    3. some isolated factor moves the probe pair off the A1 bucket;
+    4. the bridge arm reproduces Step 1 A3 -- raw within bound, rounded, bucket;
+    5. C3 and C4 agree, confirming token_type_ids are inert at
+       ``type_vocab_size`` 0.
+
+    Links 1, 2 and 4 are required. Link 3 is informational. Link 5 is a
+    confirmation whose failure surfaces as a warning rather than blocking the
+    reproduction claim, since C3 != C4 would be a separate finding about
+    token_type_ids rather than a fault in the A1 -> A3 reconstruction.
+
+    Landing in the repository bucket is explicitly NOT sufficient on its own.
     """
     reference = REFERENCE_OBSERVATION
+    arms = probe["arms"]
     wang_bucket = reference["literal_wang"]["nbc_bucket"]
     repository_bucket = reference["repository"]["nbc_bucket"]
 
-    arms = probe["arms"]
-    c0 = arms.get("C0")
-    reproduced_by = [
+    deterministic = control_block is None or control_block["numerical_difference"] == NO
+
+    c0_check = (
+        score_matches_reference(arms["C0"]["raw"], reference["literal_wang"])
+        if "C0" in arms
+        else None
+    )
+    bridge = bridge_arm_name(set(arms) - {"C0", "C0R"})
+    bridge_check = (
+        score_matches_reference(arms[bridge]["raw"], reference["repository"])
+        if bridge
+        else None
+    )
+
+    arms_reaching_repository_bucket = sorted(
         name
         for name, row in arms.items()
         if name not in ("C0", "C0R") and row["nbc_bucket"] == repository_bucket
+    )
+
+    c0_reproduces = bool(c0_check and c0_check["reproduces"])
+    bridge_reproduces = bool(bridge_check and bridge_check["reproduces"])
+    token_type_ids_inert = (
+        None if c3_vs_c4 is None else c3_vs_c4["numerical_difference"] == NO
+    )
+
+    chain = [
+        {
+            "link": 1,
+            "requirement": "C0 reproduces Step 1 A1 raw, rounded and bucket",
+            "required": True,
+            "passed": c0_reproduces,
+            "detail": c0_check,
+        },
+        {
+            "link": 2,
+            "requirement": "C0R is bit-identical to C0 (device is deterministic)",
+            "required": True,
+            "passed": bool(deterministic),
+            "detail": None
+            if control_block is None
+            else {"max_absolute_delta": control_block["deltas"]["max_absolute"]},
+        },
+        {
+            "link": 3,
+            "requirement": (
+                f"an isolated factor moves the probe pair off bucket {wang_bucket}"
+            ),
+            "required": False,
+            "passed": bool(arms_reaching_repository_bucket),
+            "detail": {
+                "arms_reaching_repository_bucket": arms_reaching_repository_bucket
+            },
+        },
+        {
+            "link": 4,
+            "requirement": (
+                f"the bridge arm ({bridge or 'none available'}) reproduces Step 1 "
+                "A3 raw, rounded and bucket"
+            ),
+            "required": True,
+            "passed": bridge_reproduces,
+            "detail": bridge_check,
+        },
+        {
+            "link": 5,
+            "requirement": "C3 == C4, confirming token_type_ids are inert",
+            "required": False,
+            "passed": token_type_ids_inert,
+            "detail": None
+            if c3_vs_c4 is None
+            else {
+                "numerical_difference": c3_vs_c4["numerical_difference"],
+                "max_absolute_delta": c3_vs_c4["deltas"]["max_absolute"],
+            },
+        },
     ]
 
-    c0_matches_wang = c0 is not None and c0["nbc_bucket"] == wang_bucket
-    deterministic = control_block is None or control_block["numerical_difference"] == NO
-
     if not deterministic:
-        explains = "UNDETERMINED"
+        guard = GUARD_NONDETERMINISTIC
+        explains = UNDETERMINED
         message = (
             "The determinism control failed: C0 repeated is not bit-identical to "
             "C0, so the forward pass is nondeterministic on this device and no "
-            "attribution in this report is sound. Rerun with deterministic "
-            "kernels before interpreting anything else."
+            "attribution in this report is sound. Causal attribution is withheld. "
+            "Rerun with deterministic kernels before interpreting anything else."
         )
-    elif not c0_matches_wang:
-        explains = "UNDETERMINED"
+    elif not c0_reproduces:
+        guard = GUARD_REFERENCE_NOT_REPRODUCED
+        explains = UNDETERMINED
         message = (
-            "C0 did not reproduce the literal Wang bucket for the probe pair, so "
-            "this run is not comparable to Step 1. Check that the same model "
-            "revision and device are in use before interpreting the arms."
+            "C0 did not reproduce Step 1 A1 within the predeclared bound "
+            f"({NEGLIGIBLE_MAX_ABS_DELTA:.0e} on the raw score, plus the recorded "
+            "rounded value and bucket), so this run is not comparable to Step 1 "
+            "and causal attribution is withheld. Check that the same model "
+            "revision, device and dependency versions are in use."
         )
-    elif reproduced_by:
+    elif bridge_reproduces:
+        guard = None
         explains = YES
         message = (
-            "Reproduced. "
-            + ", ".join(sorted(reproduced_by))
-            + f" move the probe pair from bucket {wang_bucket} to bucket "
-            f"{repository_bucket}, matching the Step 1 divergence."
+            f"Reproduced. C0 matches Step 1 A1 and the bridge arm {bridge} matches "
+            "Step 1 A3 on raw score, rounded value and NBC bucket, so the "
+            "forward-path factors account for the Step 1 divergence."
         )
     else:
+        guard = None
         explains = NO
+        extra = ""
+        if arms_reaching_repository_bucket:
+            extra = (
+                ", although "
+                + ", ".join(arms_reaching_repository_bucket)
+                + " land in the repository bucket, which is not on its own "
+                "evidence that the divergence was reproduced"
+            )
         message = (
-            "Not reproduced. Every arm keeps the probe pair in bucket "
-            f"{wang_bucket}, so neither torch.inference_mode() nor "
-            "attention_mask explains the Step 1 result on this run. Forward-path "
-            "isolation is inconclusive and another difference remains."
+            "Not reproduced. C0 matches Step 1 A1, but no arm reconstructs Step 1 "
+            f"A3 to within {NEGLIGIBLE_MAX_ABS_DELTA:.0e} on the raw score with "
+            "the recorded rounded value and bucket" + extra + ". Neither "
+            "torch.inference_mode() nor attention_mask explains the Step 1 "
+            "result; another difference remains."
+        )
+
+    warnings = []
+    if token_type_ids_inert is False:
+        warnings.append(
+            "C3 and C4 differ even though type_vocab_size is 0. token_type_ids "
+            "were expected to be inert; this is a separate finding and does not "
+            "by itself invalidate the A1 -> A3 reconstruction."
+        )
+    if bridge == "C3":
+        warnings.append(
+            "C4 was not run, so C3 stands in as the bridge arm. Link 5 cannot be "
+            "evaluated and token_type_ids remain unconfirmed as inert."
         )
 
     return {
         "explains_reference_observation": explains,
-        "reproduced_by_arms": sorted(reproduced_by),
-        "c0_matches_literal_wang": c0_matches_wang,
-        "determinism_control_passed": deterministic,
+        "guard": guard,
+        "causal_chain": chain,
+        "bridge_arm": bridge,
+        "c0_vs_step1_a1": c0_check,
+        "bridge_vs_step1_a3": bridge_check,
+        "arms_reaching_repository_bucket": arms_reaching_repository_bucket,
+        "c0_reproduces_literal_wang": c0_reproduces,
+        "bridge_reproduces_repository": bridge_reproduces,
+        "determinism_control_passed": bool(deterministic),
+        "token_type_ids_inert": token_type_ids_inert,
+        "required_links_passed": all(
+            link["passed"] for link in chain if link["required"]
+        ),
+        "warnings": warnings,
         "message": message,
     }
 
 
-def build_verdict(matrix, probe, control_block):
-    """Assemble the interpretation, kept free of any single conflated word."""
+def build_verdict(matrix, probe, control_block, c3_vs_c4=None):
+    """Assemble the interpretation, withholding attribution when guarded.
+
+    The factor-isolation headline is promoted to the overall verdict only when
+    both guards pass: the device reproduced itself, and C0 reproduced the Step 1
+    literal-Wang score. Reporting a causal headline while simultaneously saying
+    attribution is withheld would be a contradiction, so on a guard failure the
+    overall ``headline`` and ``causal_candidate`` say attribution is withheld
+    and nothing else.
+
+    The pairwise numerical diagnostics and the unpromoted isolation block are
+    still carried in full under ``factor_isolation``, for inspection.
+    """
     isolation = interpret_factor_isolation(matrix)
-    reproduction = assess_reference_reproduction(probe, control_block)
+    reproduction = assess_reference_reproduction(
+        probe, control_block, matrix=matrix, c3_vs_c4=c3_vs_c4
+    )
 
     decision_impacting = sorted(
         key for key, block in matrix.items() if block["bse_decision_impact"] == YES
@@ -528,20 +783,46 @@ def build_verdict(matrix, probe, control_block):
         key for key, block in matrix.items() if block["numerical_difference"] == YES
     )
 
+    guard = reproduction["guard"]
+    if guard == GUARD_NONDETERMINISTIC:
+        headline = HEADLINE_UNDETERMINED_NONDETERMINISTIC
+        candidate = (
+            "Causal attribution withheld: the determinism control failed, so a "
+            "difference between arms cannot be distinguished from run-to-run "
+            "nondeterminism on this device."
+        )
+        withheld = True
+    elif guard == GUARD_REFERENCE_NOT_REPRODUCED:
+        headline = HEADLINE_UNDETERMINED_REFERENCE
+        candidate = (
+            "Causal attribution withheld: C0 did not reproduce the Step 1 "
+            "literal-Wang score, so this run is not comparable to the "
+            "observation it is meant to explain."
+        )
+        withheld = True
+    else:
+        headline = isolation["headline"]
+        candidate = isolation["causal_candidate"]
+        withheld = False
+
     return {
         "numerical_difference": YES if numerically_differing else NO,
         "bse_decision_impact": YES if decision_impacting else NO,
-        "causal_candidate": isolation["causal_candidate"],
-        "headline": isolation["headline"],
+        "causal_candidate": candidate,
+        "headline": headline,
+        "causal_attribution_withheld": withheld,
+        "guard": guard,
         "comparisons_with_numerical_difference": numerically_differing,
         "comparisons_with_bse_decision_impact": decision_impacting,
         "factor_isolation": isolation,
+        "factor_isolation_promoted": not withheld,
         "reference_reproduction": reproduction,
         "reporting_note": (
-            "numerical_difference and bse_decision_impact are reported "
-            "separately and are not interchangeable. A raw floating-point score "
-            "change alone is NOT evidence that BSE behaviour changed; only an "
-            "NBC bucket change is, because the Bayesian update consumes the "
-            "bucket."
+            "numerical_difference and bse_decision_impact are reported separately "
+            "and are not interchangeable. A raw floating-point score change alone "
+            "is NOT evidence that BSE behaviour changed; only an NBC bucket "
+            "change is, because the Bayesian update consumes the bucket. When "
+            "causal_attribution_withheld is true the pairwise numbers remain "
+            "valid measurements, but no factor may be named as the cause."
         ),
     }

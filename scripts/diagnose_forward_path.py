@@ -54,9 +54,9 @@ from src.forward_path_diagnostics import (  # noqa: E402
     SOFTMAX_TEMPERATURE,
     build_verdict,
     compare_forward_arms,
-    entailment_score_from_probabilities,
     histograms_by_polarity,
     probe_report,
+    score_one_pair,
 )
 
 OFFICIAL_MODEL = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
@@ -143,40 +143,23 @@ def tokenize_once(tokenizer, pairs, device):
 def score_forward_arm(model, encodings, spec, torch, show_progress=True):
     """Run one arm over the pre-tokenized tensors.
 
-    The score extraction below is Wang's released ``utils.py:59-65`` and is
-    identical in every arm. Only the model call varies.
+    The per-pair work lives in ``src.forward_path_diagnostics.score_one_pair``
+    so that the control-flow boundary -- only the model call inside
+    ``torch.inference_mode()``, the softmax always outside, exactly as
+    ``src/utils.py`` does it -- is unit-testable with an injected fake torch.
     """
     from tqdm import tqdm
 
-    iterator = tqdm(encodings, desc=f"arm {spec['name']}", unit="pair") if show_progress else encodings
+    iterator = (
+        tqdm(encodings, desc=f"arm {spec['name']}", unit="pair")
+        if show_progress
+        else encodings
+    )
 
     scores = []
     start = time.perf_counter()
     for encoded in iterator:
-        kwargs = {}
-        if spec["attention_mask"]:
-            kwargs["attention_mask"] = encoded["attention_mask"]
-        if spec["token_type_ids"]:
-            if "token_type_ids" not in encoded:
-                raise RuntimeError(
-                    "arm C4 requires token_type_ids but the tokenizer emitted none; "
-                    "rerun with --skip-c4"
-                )
-            kwargs["token_type_ids"] = encoded["token_type_ids"]
-
-        if spec["inference_mode"]:
-            with torch.inference_mode():
-                output = model(encoded["input_ids"], **kwargs)
-                probabilities = torch.softmax(
-                    output["logits"][0] / SOFTMAX_TEMPERATURE, -1
-                ).tolist()
-        else:
-            output = model(encoded["input_ids"], **kwargs)
-            probabilities = torch.softmax(
-                output["logits"][0] / SOFTMAX_TEMPERATURE, -1
-            ).tolist()
-
-        scores.append(entailment_score_from_probabilities(probabilities))
+        scores.append(score_one_pair(model, encoded, spec, torch))
     elapsed = time.perf_counter() - start
     return scores, elapsed
 
@@ -305,13 +288,13 @@ def main():
     )
 
     c4_block = None
-    if "C4" in available:
+    if "C4" in available and "C3" in available:
         c4_block = compare_forward_arms(
             "C3", "C4", scores_by_arm["C3"], scores_by_arm["C4"], polarities
         )
 
     probe = probe_report(args.probe_polarity, args.probe_index, scores_by_arm, polarities)
-    verdict = build_verdict(matrix, probe, control_block)
+    verdict = build_verdict(matrix, probe, control_block, c3_vs_c4=c4_block)
 
     report = {
         "step": "2-forward-path-isolation",
@@ -435,6 +418,33 @@ def main():
         histogram = report["histograms_by_arm"][name]
         print(f"  {name:<8} negative: {histogram['negative']}")
 
+    reproduction = verdict["reference_reproduction"]
+    print()
+    print("-" * 100)
+    print("CAUSAL CHAIN")
+    print("-" * 100)
+    for link in reproduction["causal_chain"]:
+        if link["passed"] is None:
+            mark = "n/a "
+        else:
+            mark = "PASS" if link["passed"] else "FAIL"
+        tag = "required" if link["required"] else "informational"
+        print(f"  {mark}  link {link['link']} ({tag}): {link['requirement']}")
+    for check, label in (
+        (reproduction["c0_vs_step1_a1"], "C0 vs Step 1 A1"),
+        (reproduction["bridge_vs_step1_a3"], f"{reproduction['bridge_arm']} vs Step 1 A3"),
+    ):
+        if check is None:
+            continue
+        print(
+            f"    {label}: raw {check['raw']:.10f} vs {check['expected_raw']:.10f}  "
+            f"|delta| {check['raw_delta']:.3e} <= {check['bound']:.0e}: "
+            f"{check['raw_within_bound']}; rounded {check['rounded_matches']}; "
+            f"bucket {check['bucket_matches']}"
+        )
+    for warning in reproduction["warnings"]:
+        print(f"  WARNING: {warning}")
+
     print()
     print("=" * 100)
     print(f"VERDICT: {verdict['headline']}")
@@ -444,9 +454,16 @@ def main():
     print(f"  causal_candidate:      {verdict['causal_candidate']}")
     print()
     isolation = verdict["factor_isolation"]
-    print(f"  inference_mode contributes:  {isolation['inference_mode_contributes']}")
-    print(f"  attention_mask contributes:  {isolation['attention_mask_contributes']}")
-    reproduction = verdict["reference_reproduction"]
+    if verdict["causal_attribution_withheld"]:
+        print(
+            "  Causal attribution is WITHHELD. The unpromoted factor-isolation\n"
+            f"  reading was {isolation['headline']}, and the pairwise numbers above\n"
+            "  remain valid measurements, but no factor may be named as the cause\n"
+            "  until the failed guard is resolved."
+        )
+    else:
+        print(f"  inference_mode contributes:  {isolation['inference_mode_contributes']}")
+        print(f"  attention_mask contributes:  {isolation['attention_mask_contributes']}")
     print()
     print(
         f"  explains Step 1 observation: "
