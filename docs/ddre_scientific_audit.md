@@ -818,13 +818,28 @@ score, because its bucket discretiser calls `int()` on it — `ValueError` for N
 and its message names neither the subclaim nor the document, but it does mean BSE
 never silently converted NaN into evidence. `baseline_core.py` is untouched.
 
-**Tests.** `tests/test_ddre_numerical_safety.py` (59 tests) covers training-input
+**Failed and repeated fits.** A fit attempt must leave the object representing
+*that* attempt, or no usable fit at all. `_clear_fit_state()` discards centres,
+`α`, σ, λ, the diagnostics and the CV table, and it runs **at the start of every
+fit attempt — before input validation and before model selection** — as well as
+on a final-fit failure. Without it, a second fit that failed early (non-finite
+training input, a non-finite CV objective) left the previous successful model in
+place: `ratio()` went on serving evidence from a fit the caller believed was
+replaced, and `fit_diagnostics` described that older fit, making provenance
+ambiguous exactly when something had gone wrong. The final-fit failure path now
+clears the *whole* state; previously it left σ and λ behind, describing a model
+that no longer existed. After any failed attempt `ratio()` reports "must be fit
+before use".
+
+**Tests.** `tests/test_ddre_numerical_safety.py` (67 tests) covers training-input
 validation, model-selection safety, every final-fit rejection reason, the
 diagnostics record, `ratio()` input and output validation, all seven detector
-failure modes, and the claim boundary. The D-04 and D-06 tests in
+failure modes, failed and repeated fit state management, and the claim
+boundary. The D-04 and D-06 tests in
 `tests/test_ddre_audit.py` were **updated, not deleted**, and still explain the
-historical behaviour. Sixteen mutations are caught, including removing any
-individual guard and turning any failure into silent clipping.
+historical behaviour. Twenty-five mutations are caught, including removing any
+individual guard, turning any failure into silent clipping, and failing to clear
+any single element of the fitted state on a failed or repeated fit.
 
 Three of those mutations initially escaped, which sharpened the tests: the
 finite-`α` check was masked by the later fitted-ratio check (now pinned by

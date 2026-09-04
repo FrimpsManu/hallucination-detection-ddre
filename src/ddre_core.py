@@ -75,6 +75,29 @@ class ULSIFDensityRatio:
         self.cv_table = []
         self._fit_diagnostics = None
 
+    def _clear_fit_state(self):
+        """Discard every trace of a previous fit.
+
+        Called at the START of each fit attempt and on any failure, so the
+        object always represents *this* attempt or no usable fit at all. Without
+        it a second fit that fails early -- non-finite training input, a
+        non-finite CV objective -- would leave the previous successful model in
+        place, and ``ratio()`` would go on serving evidence from a fit the
+        caller believes was replaced. ``fit_diagnostics`` would describe that
+        older fit too, so provenance would be ambiguous exactly when something
+        has gone wrong.
+
+        ``cv_table`` is reset here as well: it is provenance for the current
+        attempt, and a stale table masquerading as current is the same failure
+        in a quieter form.
+        """
+        self.centers = None
+        self.alpha = None
+        self.sigma = None
+        self.lam = None
+        self._fit_diagnostics = None
+        self.cv_table = []
+
     @property
     def fit_diagnostics(self):
         """Read-only provenance for the successful final fit, or None.
@@ -123,6 +146,9 @@ class ULSIFDensityRatio:
         return float(0.5 * np.mean(ratio_h ** 2) - np.mean(ratio_f))
 
     def fit(self, factual_scores, hallucinated_scores, folds=5):
+        # Before input validation, before model selection, before anything: a
+        # fit attempt invalidates whatever came before it.
+        self._clear_fit_state()
         _require_finite_scores("factual_scores", factual_scores)
         _require_finite_scores("hallucinated_scores", hallucinated_scores)
         factual_x = self._as_column(factual_scores)
@@ -181,7 +207,6 @@ class ULSIFDensityRatio:
             )
 
         best = None
-        self.cv_table = []
         for sigma in sigma_grid:
             # A non-finite or non-positive bandwidth would make every kernel
             # value meaningless, and NaN loses every comparison, so a NaN
@@ -243,9 +268,9 @@ class ULSIFDensityRatio:
                 factual_x, hallucinated_x, float(best["cv_objective"])
             )
         except DegenerateULSIFFit:
-            self.centers = None
-            self.alpha = None
-            self._fit_diagnostics = None
+            # The whole fitted state, not a subset: leaving sigma and lambda
+            # behind would describe a model that no longer exists.
+            self._clear_fit_state()
             raise
         return self
 
