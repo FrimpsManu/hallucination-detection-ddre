@@ -12,11 +12,13 @@ downloads nothing, and opens the cache **read-only** (SQLite ``mode=ro``), so a
 formal cache cannot be modified even by accident.
 
 Coverage is the one real hazard. Retrieval is adaptive: which documents get
-scored depends on the histogram, so a different histogram can require a
-document the recorded run never consumed. Rather than silently substituting a
-default, a missing score raises :class:`MissingDocumentScore`, and the caller
-marks that whole combination incomplete. A sensitivity analysis that quietly
-invented scores for the documents it had not seen would be worthless.
+scored depends on the histogram *and* on the cost configuration, so a different
+histogram can require a document the recorded run never consumed. Rather than
+silently substituting a default, a missing score raises
+:class:`MissingDocumentScore`, and the caller marks only the cost configuration
+that hit it incomplete -- a result the other configuration already produced for
+the same placement is preserved. A sensitivity analysis that quietly invented
+scores for the documents it had not seen would be worthless.
 """
 
 import hashlib

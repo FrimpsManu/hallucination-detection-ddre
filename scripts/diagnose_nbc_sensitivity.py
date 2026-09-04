@@ -17,9 +17,16 @@ Everything it evaluates is the existing, unmodified machinery: ``BSEDetector`` i
 against the published Table 1 values and the frozen tolerances.
 
 No inference. No Hugging Face downloads. No model is constructed. Document
-scores are replayed from an existing NLI cache opened READ-ONLY. A document the
-recorded run never consumed has no cached score; rather than inventing one, the
-whole combination is marked incomplete and excluded from the tallies.
+scores are replayed from an existing NLI cache opened READ-ONLY.
+
+A document the recorded run never consumed has no cached score. Rather than
+inventing one, completeness is tracked PER COST CONFIGURATION: the miss marks
+only the configuration that hit it, and a result the other configuration already
+produced is preserved and still counted. Retrieval is adaptive, so CM=14/CFA=24
+and CM=28/CFA=96 consume different documents from the same placement, and one
+can complete while the other cannot. A completed CM=14/CFA=24 evaluation is a
+real measurement and is never discarded because CM=28/CFA=96 later ran short of
+cached scores. Only ``both_configurations_pass`` requires both to have completed.
 """
 
 import argparse

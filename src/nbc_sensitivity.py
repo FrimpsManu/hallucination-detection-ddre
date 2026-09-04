@@ -16,14 +16,28 @@ distributed across the ten discretized bins, and reports how the frozen Gate 1
 verdict responds. It does **not** identify the true bins, and it must never be
 used to select a favourable histogram: the released data remain the baseline.
 
-Interpretation, fixed in advance so the result cannot be re-read after the fact:
+Interpretation of the primary CM=14/CFA=24 question, fixed in advance so the
+result cannot be re-read after the fact. Four branches, evaluated in this order:
 
-* **Zero combinations reproduce CM=14/CFA=24** -> the missing 200th examples
-  cannot explain the remaining discrepancy under this model. The gap has
-  another source.
-* **Some combinations reproduce it** -> the unreleased examples are a
-  *plausible* explanation. That is all. It does not identify their true bins,
+* **Zero primary placements completed** -> ``INCONCLUSIVE_INSUFFICIENT_CACHE_COVERAGE``.
+  Nothing was measured, so nothing is established either way.
+* **At least one completed primary placement PASSes** ->
+  ``MISSING_EXAMPLES_ARE_A_PLAUSIBLE_EXPLANATION``. The unreleased examples are
+  a *plausible* explanation. That is all. It does not identify their true bins,
   and it is not evidence that any particular combination is the real one.
+* **Zero PASSes, but some primary placements were not evaluated** ->
+  ``INCONCLUSIVE_PARTIAL_CACHE_COVERAGE``. An unevaluated placement could still
+  pass, so a negative claim is not supported.
+* **All 100 primary placements completed and none PASSes** ->
+  ``MISSING_EXAMPLES_CANNOT_EXPLAIN_THE_GAP``. Under this model -- one
+  additional observed example per class, placed in any bin -- the missing 200th
+  examples cannot explain the remaining discrepancy, and the gap has another
+  source.
+
+The asymmetry between the positive and negative readings is deliberate. One
+reproducing placement is sufficient to establish plausibility, so a positive
+finding survives partial coverage. A negative finding needs the whole grid,
+because any placement left unevaluated could have been the one that passes.
 
 Standard library only, so the enumeration and summary logic are testable
 without torch, a model, or the released data.
