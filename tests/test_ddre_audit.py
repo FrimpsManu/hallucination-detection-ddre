@@ -444,6 +444,90 @@ class TestSentenceAggregation(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 
+class TestOneDocumentStoppingRule(unittest.TestCase):
+    """The general rule, and why |log r| is only a symmetric special case.
+
+    After one document the state is `logit(P0) + log r`. A LOW stop needs that
+    to be <= logit(lower); a HIGH stop needs it >= logit(upper). The |log r|
+    shorthand collapses to this only when P0 = 0.5 (so logit(P0) = 0) AND the
+    band is symmetric in log-odds (so logit(upper) = -logit(lower)).
+    """
+
+    @staticmethod
+    def logit(p):
+        return math.log(p / (1.0 - p))
+
+    def one_document_state(self, p0, ratio):
+        detector = DDREDetector(
+            ConstantRatio(ratio), lower_threshold=0.2, upper_threshold=0.8,
+            p0=p0, c_miss=C_MISS, c_false_alarm=C_FALSE_ALARM, max_docs=1,
+        )
+        result = detector.detect_subclaim(Sub(1), FixedScorer(50.0))
+        return self.logit(result.p_factual)
+
+    def test_the_state_after_one_document_is_logit_p0_plus_log_r(self):
+        for p0 in (0.3, 0.5, 0.7):
+            for ratio in (0.25, 1.0, 4.0):
+                with self.subTest(p0=p0, ratio=ratio):
+                    self.assertAlmostEqual(
+                        self.one_document_state(p0, ratio),
+                        self.logit(p0) + math.log(ratio),
+                        places=9,
+                    )
+
+    def test_the_shorthand_is_exact_for_a_symmetric_band_at_p0_one_half(self):
+        # P0 = 0.5 and [0.20, 0.80]: logit(P0) = 0 and the band is symmetric,
+        # so |log r| >= logit(0.8/0.2) reproduces the general rule exactly.
+        lower, upper, p0 = 0.20, 0.80, 0.5
+        self.assertAlmostEqual(self.logit(upper), -self.logit(lower))
+        for ratio in (0.05, 0.2, 0.5, 1.0, 2.0, 5.0, 20.0):
+            with self.subTest(ratio=ratio):
+                state = self.logit(p0) + math.log(ratio)
+                general = state <= self.logit(lower) or state >= self.logit(upper)
+                shorthand = abs(math.log(ratio)) >= self.logit(upper)
+                self.assertEqual(general, shorthand)
+
+    def test_AUDIT_the_shorthand_is_wrong_for_an_asymmetric_band(self):
+        # AUDIT correction. With [0.05, 0.80] at P0 = 0.5 the band is no longer
+        # symmetric in log-odds: logit(0.05) = -2.944 but logit(0.80) = +1.386.
+        # A ratio of 0.2 gives |log r| = 1.609, which clears the shorthand
+        # threshold, yet the state -1.609 reaches NEITHER boundary. The
+        # shorthand would count a stop that does not happen.
+        lower, upper, p0, ratio = 0.05, 0.80, 0.5, 0.2
+        state = self.logit(p0) + math.log(ratio)
+        general = state <= self.logit(lower) or state >= self.logit(upper)
+        shorthand = abs(math.log(ratio)) >= self.logit(upper)
+        self.assertFalse(general)
+        self.assertTrue(shorthand)
+        self.assertNotEqual(general, shorthand)
+
+    def test_AUDIT_the_shorthand_is_wrong_when_p0_is_not_one_half(self):
+        # AUDIT correction. logit(P0) shifts the whole state, so a prior other
+        # than 0.5 breaks the shorthand even on a symmetric band: at P0 = 0.35
+        # a ratio of 1.0 carries no evidence at all, yet the state already sits
+        # at or below logit(lower) for lower = 0.35.
+        lower, upper, p0, ratio = 0.35, 0.80, 0.35, 1.0
+        state = self.logit(p0) + math.log(ratio)
+        general = state <= self.logit(lower) or state >= self.logit(upper)
+        shorthand = abs(math.log(ratio)) >= self.logit(upper)
+        self.assertTrue(general)
+        self.assertFalse(shorthand)
+
+    def test_low_and_high_stops_must_be_counted_separately(self):
+        # They have opposite consequences for the cost rule, so a combined
+        # "either stop" figure hides which one drives a retrieval saving.
+        lower, upper, p0 = 0.20, 0.80, 0.5
+        ratios = (0.05, 0.2, 5.0, 20.0)
+        low = [r for r in ratios
+               if self.logit(p0) + math.log(r) <= self.logit(lower)]
+        high = [r for r in ratios
+                if self.logit(p0) + math.log(r) >= self.logit(upper)]
+        self.assertEqual(low, [0.05, 0.2])
+        self.assertEqual(high, [5.0, 20.0])
+        self.assertEqual(set(low) & set(high), set())
+        self.assertEqual(len(set(low) | set(high)), len(low) + len(high))
+
+
 class TestCostThreshold(unittest.TestCase):
     def test_the_classification_threshold_is_cm_over_cm_plus_cfa(self):
         self.assertAlmostEqual(COST_THRESHOLD, 0.2258064516129032)
