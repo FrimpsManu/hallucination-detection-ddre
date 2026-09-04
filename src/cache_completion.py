@@ -356,7 +356,10 @@ def completion_report(
     requested = sum(entry["spans_requested"] for entry in per_placement)
     rows_added = rows_after - rows_before
 
-    source_intact = source_check is None or bool(source_check.get("unchanged"))
+    # Fail closed, like every other gate here: no source-integrity check means
+    # nobody confirmed the formal artifact survived the run, and an unconfirmed
+    # artifact cannot support a sound result.
+    source_intact = bool(source_check) and source_check.get("unchanged") is True
     # Fail closed: a run whose derived cache was never shown to be a faithful
     # copy of the source cannot be sound, and a report that carries no cache
     # identity at all has not shown it either.

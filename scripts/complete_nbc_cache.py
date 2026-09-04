@@ -628,7 +628,7 @@ def _run_compatibility_probe(args, tokenizer, model, score_version, source_cache
     """
     import tempfile
 
-    from src.cache_completion import sha256_file, verify_source_unchanged
+    from src.cache_completion import sha256_file
     from src.wang_data import load_nbc_pairs
 
     positive, negative = load_nbc_pairs(args.data_root, per_class=None)
@@ -642,14 +642,22 @@ def _run_compatibility_probe(args, tokenizer, model, score_version, source_cache
         f"({len(positive)} positive + {len(negative)} negative), batch size "
         f"{PROBE_BATCH_SIZE}, cache read and cache write both disabled."
     )
-    source_sha_before = sha256_file(source_cache)
-
     with tempfile.TemporaryDirectory(prefix="compat-probe-") as scratch_dir:
         scratch_path = str(Path(scratch_dir) / "scratch.sqlite")
         scorer = scratch_scorer(
             tokenizer, model, args.model_name, scratch_path,
             batch_size=PROBE_BATCH_SIZE,
         )
+        closed = {"done": False}
+
+        def finalize():
+            """Read the scratch row count, then close it. Called once, after
+            the last forward pass and before the post-probe source digest."""
+            rows = scorer.cache_size()
+            scorer.close()
+            closed["done"] = True
+            return rows
+
         try:
             report = run_compatibility_probe(
                 pairs=pairs,
@@ -660,11 +668,12 @@ def _run_compatibility_probe(args, tokenizer, model, score_version, source_cache
                 model_name=args.model_name,
                 score_version=score_version,
                 scorer=scorer,
-                scratch_row_count=scorer.cache_size,
-                source_check=verify_source_unchanged(source_cache, source_sha_before),
+                finalize=finalize,
+                source_digest=lambda: sha256_file(source_cache),
             )
         finally:
-            scorer.close()
+            if not closed["done"]:
+                scorer.close()
     return report
 
 

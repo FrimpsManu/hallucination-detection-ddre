@@ -39,6 +39,11 @@ For each of the 398 pairs:
    read AND the cache write both disabled.
 4. Compare fresh against stored.
 
+The source digest is taken before step 1 and again after step 3 has finished
+for every pair and the scratch scorer is closed. The two must be equal, or
+compatibility is not established -- a formal artifact that changed while it was
+being read cannot certify anything.
+
 Equality is **exact float equality**. The provenance guard has already required
 the same pinned model, dtype, device, torch/transformers/tokenizers versions,
 batch size 1, and the same v2 extraction and scaling path, so anything less
@@ -108,6 +113,41 @@ def read_stored_scores(cache_path, keys):
         return found
     finally:
         connection.close()
+
+
+def source_integrity_check(source_cache, sha256_before, sha256_after):
+    """Compare the source digest taken before the probe against the one after.
+
+    The "after" digest must be taken once every forward pass has run and the
+    scratch scorer is closed. A digest read before the work has happened proves
+    nothing about the work.
+    """
+    unchanged = (
+        sha256_before is not None
+        and sha256_after is not None
+        and sha256_before == sha256_after
+    )
+    return {
+        "source_cache": str(source_cache),
+        "sha256_before_probe": sha256_before,
+        "sha256_after_probe": sha256_after,
+        "unchanged": unchanged,
+        "message": (
+            "The source cache is byte-identical after the 398 forward passes."
+            if unchanged
+            else (
+                "SOURCE CACHE CHANGED DURING THE COMPATIBILITY PROBE. A formal "
+                "Gate 1 artifact was modified while it was being read. Do not "
+                "extend anything derived from it until this is understood."
+            )
+            if sha256_before is not None and sha256_after is not None
+            else (
+                "The source digest could not be measured on both sides of the "
+                "probe, so integrity is unverified. Unverified is treated as "
+                "failed."
+            )
+        ),
+    }
 
 
 def recompute_scores(scorer, pairs):
@@ -195,8 +235,12 @@ def compatibility_report(
     )
     all_present = len(present) == probed
     all_exact = len(exact) == probed
-    no_writes = scratch_cache_rows_after in (0, None)
-    source_intact = source_check is None or bool(source_check.get("unchanged"))
+    # Fail closed on the integrity measurements too. An absent measurement is
+    # not a passing one: ``None`` here means nobody looked, and a probe that
+    # did not look cannot certify what it did not observe. In particular
+    # ``scratch_cache_rows_after is None`` must NOT count as "zero writes".
+    no_writes = scratch_cache_rows_after == 0
+    source_intact = bool(source_check) and source_check.get("unchanged") is True
 
     established = bool(
         counts_expected
@@ -235,13 +279,27 @@ def compatibility_report(
             "cached numbers, so extending the cache would mix two scoring "
             "behaviours. Bucket or one-decimal agreement does not substitute."
         )
+    elif scratch_cache_rows_after is None:
+        reason = (
+            "The probe's scratch cache row count was never measured, so it "
+            "cannot be shown that the probe wrote nothing. Unmeasured is "
+            "treated as failed."
+        )
     elif not no_writes:
         reason = (
             f"The probe's scratch cache holds {scratch_cache_rows_after} rows; "
             "it must hold zero. The probe must write nothing."
         )
+    elif not source_check:
+        reason = (
+            "No post-probe source-integrity check was performed, so it cannot "
+            "be shown that the formal cache is unchanged. Unmeasured is treated "
+            "as failed."
+        )
     else:
-        reason = "The source cache changed during the probe."
+        reason = source_check.get("message") or (
+            "The source cache did not survive the probe unchanged."
+        )
 
     return {
         "probe": "nbc-398-score-compatibility",
@@ -282,6 +340,9 @@ def compatibility_report(
         "cache_writes_performed": 0,
         "scratch_cache_rows_after": scratch_cache_rows_after,
         "source_cache_check": source_check,
+        "source_sha256_before_probe": (source_check or {}).get("sha256_before_probe"),
+        "source_sha256_after_probe": (source_check or {}).get("sha256_after_probe"),
+        "source_cache_unchanged": source_intact,
         "score_compatibility_established": established,
         "verdict_reason": reason,
         "equality_rule": (
@@ -329,21 +390,33 @@ def run_compatibility_probe(
     model_name,
     score_version,
     scorer,
-    scratch_row_count,
-    source_check=None,
+    finalize,
+    source_digest,
 ):
-    """Key, read, recompute, compare, and report -- in that order.
+    """Key, read, recompute, finalize, re-hash, compare, report -- in that order.
 
-    ``scratch_row_count`` is called after the recompute and its result is
-    carried into the verdict, so "the probe wrote nothing" is measured rather
-    than asserted in prose.
+    The order is the point. ``source_digest`` is called once before anything
+    happens and once *after* every one of the 398 forward passes has run and
+    ``finalize`` has closed the scratch scorer. A digest taken before the work
+    would only restate the file's starting state; taken after, it is evidence
+    that reading the formal cache 398 times changed nothing.
+
+    ``finalize`` closes the scratch scorer and returns its row count, so
+    "the probe wrote nothing" is a measurement carried into the verdict rather
+    than a claim in prose. Both measurements fail closed if absent.
     """
     keys = [
         production_cache_key(model_name, score_version, premise, hypothesis)
         for premise, hypothesis in pairs
     ]
+    sha256_before = source_digest()
     stored = read_stored_scores(source_cache, keys)
     fresh = recompute_scores(scorer, pairs)
+
+    # Every forward pass is done; close the scratch scorer, then measure.
+    scratch_rows_after = finalize()
+    sha256_after = source_digest()
+
     entries = compare_pair_scores(pairs, polarities, keys, stored, fresh)
     return compatibility_report(
         entries,
@@ -352,8 +425,10 @@ def run_compatibility_probe(
         score_version=score_version,
         positive_pairs=positive_pairs,
         negative_pairs=negative_pairs,
-        scratch_cache_rows_after=scratch_row_count(),
-        source_check=source_check,
+        scratch_cache_rows_after=scratch_rows_after,
+        source_check=source_integrity_check(
+            source_cache, sha256_before, sha256_after
+        ),
     )
 
 
@@ -374,6 +449,9 @@ def format_compatibility(report):
         f"  NBC bucket matches:         {report['nbc_bucket_matches']}  (diagnostic only)",
         f"  cache writes performed:     {report['cache_writes_performed']}",
         f"  scratch cache rows after:   {report['scratch_cache_rows_after']}",
+        f"  source sha256 before probe: {report['source_sha256_before_probe']}",
+        f"  source sha256 after probe:  {report['source_sha256_after_probe']}",
+        f"  source cache unchanged:     {report['source_cache_unchanged']}",
     ]
     if report["mismatch_examples"]:
         lines.append("  first mismatches:")

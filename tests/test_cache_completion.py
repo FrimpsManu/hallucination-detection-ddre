@@ -507,6 +507,18 @@ class TestFaithfulCopyGate(DerivedCacheTestCase):
         self.assertFalse(report["run_sound"])
         self.assertTrue(report["all_requested_placements_complete"])
 
+    def test_run_sound_requires_a_source_integrity_check_at_all(self):
+        # Fail closed: nobody confirmed the formal artifact survived the run.
+        identity = prepare_derived_cache(self.source, self.destination)
+        report = completion_report(
+            INCOMPLETE_PRIMARY_PLACEMENTS, 7, 9,
+            [placement_entry("a", 2, 50)], [verified("a")],
+            cache_identity=identity, source_check=None,
+            guard={"passed": True}, compatibility=PASSING_COMPATIBILITY,
+        )
+        self.assertFalse(report["source_cache_unchanged"])
+        self.assertFalse(report["run_sound"])
+
     def test_run_sound_requires_a_cache_identity_at_all(self):
         report = completion_report(
             INCOMPLETE_PRIMARY_PLACEMENTS, 7, 9,
