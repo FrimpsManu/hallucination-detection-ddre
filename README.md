@@ -424,6 +424,294 @@ The verdict follows predeclared rules:
 `--dry-run` builds and writes the sample and reports its size without loading
 the model, so the sample can be checked before spending GPU time.
 
+### Step 2: which forward-path argument explains the Step 1 divergence
+
+```bash
+python scripts/diagnose_forward_path.py
+```
+
+Step 1 narrowed the question to a single observation. The literal Wang scorer
+and this repository's scorer tokenized identically -- 589/589 `input_ids`
+matched -- yet disagreed on exactly one BSE decision:
+
+| | raw | rounded | NBC bucket |
+| --- | --- | --- | --- |
+| literal Wang (A1) | 19.9462890625 | 19.9 | 1 |
+| repository (A3) | 19.953125 | 20.0 | 2 |
+
+which moved the positive Laplace-smoothed histogram from
+`[1, 78, 19, 13, 6, 5, 28, 57, 1, 1]` to `[1, 77, 20, 13, 6, 5, 28, 57, 1, 1]`.
+
+Tokenization is excluded. But the two scorers differ in **two** independent
+places, not one — and the second is the stronger candidate.
+
+#### The extraction/scaling path
+
+Released `utils.py:59-65` leaves the tensor and *then* scales; `src/utils.py:122-124`
+scales *inside* the tensor and then leaves it:
+
+```python
+# Wang
+probabilities = torch.softmax(output["logits"][0] / 5, -1).tolist()
+raw = float(probabilities[0]) * 100.0          # float64 multiply
+
+# repository
+probs = torch.softmax(outputs.logits / 5.0, dim=-1)
+scores = probs[:, entailment_index] * 100.0    # multiply in tensor dtype
+```
+
+For the probe pair the underlying probability is `0.199462890625`, which is
+exactly representable in float16. Then:
+
+| path | value | Step 1 record |
+| --- | --- | --- |
+| `float(p) * 100` | 19.9462890625 | A1 = 19.9462890625 |
+| `float16(p * 100)` | 19.953125 | A3 = 19.953125 |
+
+The gap is `0.0068359375` — **exactly** the recorded divergence. float16 spacing
+in [16, 32) is `0.015625`, and 19.9462890625 sits 0.5625 of a step above
+19.9375, so it rounds up. The same arithmetic in float32 does **not** reproduce
+it, so this mechanism requires the half-precision tensor the T4 run appears to
+have used.
+
+That makes extraction a candidate that must be tested **first**: a forward-only
+factorial holds extraction fixed at Wang's form for every arm, which would
+remove the very factor under suspicion.
+
+#### Primary: 2×2 over two independent factors
+
+| | `X0` Wang extraction | `X1` repository extraction |
+| --- | --- | --- |
+| **`F0`** literal Wang forward | `D00` — exact A1 reconstruction | `D01` — extraction changed only |
+| **`F1`** repository batch-1 forward | `D10` — forward changed only | `D11` — exact A3 reconstruction |
+
+Both extractions are pure functions of the logits, so **one forward pass per row
+serves both columns**: `D00`/`D01` share bit-identical logits, and so do
+`D10`/`D11`. The extraction comparison is exact by construction rather than by
+assumption.
+
+Four comparisons, each isolating one factor: `D00`↔`D01` and `D10`↔`D11`
+isolate extraction; `D00`↔`D10` and `D01`↔`D11` isolate the forward path.
+
+Two endpoints must be reconstructed before anything is attributed — `D00` must
+reproduce Step 1 A1 and `D11` must reproduce Step 1 A3 — otherwise the 2×2 does
+not span the observed divergence and the verdict is
+`UNDETERMINED_ENDPOINTS_NOT_RECONSTRUCTED`. Determinism controls re-run each
+forward row and gate everything.
+
+The **strongest verdict**, `EXTRACTION_PATH_EXPLAINS`, requires the whole
+conjunction — not merely that the forward raw delta looks small:
+
+- `D01` reproduces Step 1 A3 — changing extraction alone reaches the repository
+  endpoint;
+- `D10` reproduces Step 1 A1 — changing the forward alone stays at the Wang
+  endpoint;
+- `D00`→`D01` reproduces the pair-169 bucket flip (and preferably the recorded
+  positive-histogram movement);
+- **neither forward comparison changes any NBC bucket.**
+
+That last condition is checked directly rather than inferred from the raw
+delta. A forward perturbation *below* the `1e-4` bound can still cross a bucket
+edge, and the BSE update consumes the bucket — so a sub-threshold forward delta
+that moves a bucket counts as an effect and blocks the strong verdict. If both
+paths change buckets, the verdict is `BOTH_PATHS_CONTRIBUTE`. A forward raw
+perturbation with zero bucket impact is permitted and reported, but the causal
+text then says exactly that instead of claiming the forward path is
+bit-identical.
+
+Endpoint checks are reported directly as `D00_vs_step1_a1`, `D11_vs_step1_a3`,
+`D01_vs_step1_a3` and `D10_vs_step1_a1`.
+
+#### Sub-diagnostic: softmax shape vs scaling order
+
+`X0` and `X1` differ in **two** ways at once — the softmax is applied to a 1-D
+row in one and the 2-D batch in the other, *and* the `* 100` happens outside
+versus inside the tensor. So the 2×2 alone can establish that the *extraction
+path* explains the discrepancy, but not that the *scaling order specifically*
+does.
+
+A sub-diagnostic separates them using the **same logits**, so it adds no forward
+calls. It reports, before any scaling, the entailment probability from both
+softmax shapes and their delta; then, holding one shared probability tensor
+fixed, `scale_after` (`float(p[0, i].tolist()) * 100`) against `scale_inside`
+(`float((p[:, i] * 100).tolist()[0])`).
+
+- If the shape probability is identical/negligible **and** the scaling-only
+  comparison spans `19.9462890625 → 19.953125`, the scaling **order** is
+  specifically sufficient.
+- If the softmax shape also differs materially, the report says the *combined*
+  extraction path is implicated and does **not** attribute everything to
+  scaling order alone.
+
+#### Secondary: forward-path factorial
+
+The C0–C4 factorial below decomposes the forward call into its individual
+arguments. Every arm uses Wang extraction, so if the primary attributes the
+divergence to the extraction path, **no secondary arm can reconstruct A3** and
+the secondary chain will report that it did not. The report states that
+expectation explicitly so it is not misread as a failure.
+
+| Arm | Forward call | Toggles |
+| --- | --- | --- |
+| `C0` | `model(input_ids)` | reference (literal Wang) |
+| `C1` | `model(input_ids)` under `inference_mode` | inference_mode |
+| `C2` | `model(input_ids, attention_mask=...)` | attention_mask |
+| `C3` | `model(input_ids, attention_mask=...)` under `inference_mode` | both |
+| `C4` | `... + token_type_ids=...` under `inference_mode` | **repository-side bridge (required)** |
+| `C0R` | `model(input_ids)`, run last | **determinism control** |
+
+**Only the model call sits inside `torch.inference_mode()`.** That mirrors
+`src/utils.py::EntailmentScorer._infer_batch`, where the `with` block contains
+the forward pass and nothing else:
+
+```python
+with torch.inference_mode():
+    outputs = self.model(**inputs)
+
+probs = torch.softmax(outputs.logits / 5.0, dim=-1)
+```
+
+The softmax runs after the context closes, identically for every arm. Wrapping
+it too would add a second uncontrolled variable and the arm would no longer
+reproduce the repository's forward path. The boundary is load-bearing, so the
+model call lives in its own function (`forward_once`) with `torch` injected, and
+`TestForwardControlFlow` asserts against a recording fake that the softmax never
+executes inside the context for any arm.
+
+Score extraction is held fixed at Wang's form for every arm in this secondary
+factorial, so it cannot see an extraction effect — that is what the primary 2×2
+above is for. The reference checks below compare within a bound to absorb
+kernel- and library-level perturbation, **not** to absorb the extraction
+difference, which is a separate factor capable of moving a score by 0.0068 on a
+half-precision tensor.
+
+`C4` is the **repository-side bridge**: the only arm carrying `attention_mask`,
+`inference_mode` and `token_type_ids` together, so the only one that
+reconstructs Step 1 A3. `type_vocab_size` being 0 *predicts* `token_type_ids`
+are inert, but a prediction is not a measurement — `C3` vs `C4` measures it, and
+that check is a **required link**, not a confirmation.
+
+**`C0R` is what makes any of this attributable.** It re-runs `C0` unchanged at
+the end. If `C0` and `C0R` are not bit-identical, the forward pass is
+nondeterministic on that device and every factor attribution would be unfounded.
+
+Four guards can force the verdict to withhold causal attribution outright:
+
+| Guard | Overall headline |
+| --- | --- |
+| `C0R` is not bit-identical to `C0` | `UNDETERMINED_NONDETERMINISTIC` |
+| `C0` does not reproduce Step 1 A1 | `UNDETERMINED_REFERENCE_NOT_REPRODUCED` |
+| `C4` was not run | `UNDETERMINED_BRIDGE_NOT_EVALUATED` |
+| `C3 != C4` | `UNDETERMINED_TOKEN_TYPE_EFFECT` |
+
+When either fires, the overall `headline` and `causal_candidate` say attribution
+is withheld and name no factor, and `causal_attribution_withheld` is `true`. The
+factor-isolation reading is still computed and carried under `factor_isolation`
+for inspection, but it is not promoted to the verdict -- `factor_isolation_promoted`
+records that. The pairwise numerical diagnostics remain valid measurements
+either way.
+
+#### The causal chain
+
+Reproducing the Step 1 divergence means completing a chain, not matching one
+number. Bucket agreement alone is explicitly **not** sufficient: two scores far
+enough apart to be unrelated can share a bucket by luck, and the whole subject
+here is a 0.0068 divergence.
+
+| Link | Requirement | |
+| --- | --- | --- |
+| 1 | `C0` reproduces Step 1 A1 — raw within `1e-4`, **and** rounded value, **and** bucket | required |
+| 2 | `C0R` is bit-identical to `C0` | required |
+| 3 | `C4` reproduces Step 1 A3 — raw within `1e-4`, rounded, bucket | required |
+| 4 | `C3` and `C4` are bit-identical | required |
+| 5 | an isolated factor moves the probe pair off the A1 bucket | informational |
+
+**Link 4 is required, not a confirmation.** Consider a run where `C0 ≈ A1`,
+`C3 ≈ A1` and `C4 ≈ A3`. Every other link passes — yet the only argument that
+moved the result is `token_type_ids`, and `attention_mask` and
+`torch.inference_mode()` have reconstructed nothing. Treating `C3 != C4` as a
+warning would report that run as a success for the target factors, which would
+be wrong. An empirical `C3 != C4` overrides the `type_vocab_size == 0`
+prediction, and the verdict becomes `UNDETERMINED_TOKEN_TYPE_EFFECT`.
+
+When link 4 *does* pass alongside link 3, `C3` is bit-identical to an arm that
+reproduces A3, so `C3` reconstructs the repository-side behaviour **without**
+`token_type_ids`. That is the empirical validation of inertness, and only then
+may the `C0`/`C1`/`C2`/`C3` factorial identify `attention_mask`,
+`torch.inference_mode()`, their interaction, or no effect.
+
+`C3` is **never** accepted as a substitute bridge arm — that substitution is
+exactly what would hide a `token_type_ids`-driven result. A run without `C4`
+yields `UNDETERMINED_BRIDGE_NOT_EVALUATED`; `--skip-c4` stays useful for
+debugging but cannot establish the formal causal chain.
+
+`explains_reference_observation: YES` requires links 1–4. An arm merely landing
+in the repository bucket is reported under `arms_reaching_repository_bucket` and
+is never on its own treated as evidence that the divergence was reproduced. The
+report also carries `c3_vs_step1_a3_informational`, which is what exposes the
+`C3 ≈ A1` / `C4 ≈ A3` pattern link 4 exists to catch.
+
+Four controls keep the forward call the only variable: the tokenizer and model
+are loaded once; every pair is tokenized **once** and the identical tensors are
+reused by every arm; the score extraction is byte-identical across arms; and
+the batch size is exactly 1 everywhere, so padding is never involved.
+
+Comparisons are computed pairwise, and each is labelled with the factor that
+genuinely differs between its two arms rather than with the right-hand arm's
+description. This matters: `C1` vs `C3` toggles `attention_mask` alone (both
+already run under inference_mode) and `C2` vs `C3` toggles
+`torch.inference_mode()` alone (both already pass a mask). Those two are what
+separate a dominant factor from an interaction.
+
+#### Reporting discipline
+
+A single word like "MATERIAL" conflates two different findings, so this
+diagnostic never emits one. Every comparison reports three separate fields:
+
+- **`numerical_difference`** -- YES when the raw scores are not bit-identical.
+  A statement about floating point and nothing else.
+- **`bse_decision_impact`** -- YES only when at least one NBC bucket changes.
+  The Bayesian update consumes the bucket, so this is the only field that
+  licenses a claim about baseline behaviour. **A raw floating-point score change
+  alone is NOT evidence that BSE behaviour changed**, and a comparison can
+  legitimately be `numerical_difference: YES, bse_decision_impact: NO`.
+- **`causal_candidate`** -- which factor the comparison toggles, and whether it
+  showed an effect.
+
+The verdict adds `explains_reference_observation` and, when a guard fires,
+`causal_attribution_withheld`, because the goal is not to find *a* difference but
+to find the one that produced the Step 1 result. The report prints the raw,
+rounded and bucketed value of positive pair 169 for every arm, beside the two
+recorded Step 1 values, plus the per-link status of the causal chain.
+
+The negligible bound is `1e-4` on a 0-100 score. It is anchored to the effect
+being explained: the Step 1 divergence was `0.0068359375`, about 68x the bound.
+A threshold used for attribution has to sit well under the effect it attributes,
+or it would classify the very difference under investigation as noise.
+
+#### Interpretation
+
+These apply only once **all four** guards above have passed — that is, once the
+required links of the causal chain are complete. Otherwise the verdict is
+`UNDETERMINED` and none of them is promoted.
+
+| Observation | Conclusion |
+| --- | --- |
+| C0 ~ C1 and C2 ~ C3, C0 vs C2 substantial | `attention_mask` is the primary candidate |
+| C0 ~ C2 and C1 ~ C3, C0 vs C1 substantial | `torch.inference_mode()` is the primary candidate |
+| C0 ~ C1 and C0 ~ C2, but C0 vs C3 substantial | interaction between the two |
+| both factors move the score independently | both contribute, neither dominant |
+| nothing substantial anywhere | forward-path isolation inconclusive; another difference remains |
+
+Cost: the primary 2×2 needs 4 × 398 = 1,592 forward calls (one per row plus a
+determinism repeat of each), and the secondary factorial 6 × 398 = 2,388, for
+3,980 total at batch size 1. `--dry-run` loads and counts the pairs without
+loading the model; `--skip-secondary` runs the primary alone.
+
+`model_dtype` is recorded in `environment_summary` and is the decisive field for
+the extraction hypothesis: the half-precision mechanism only operates if the
+probability tensor is float16.
+
 ### Running the formal follow-up on Colab
 
 The completed Gate 1 artifacts live on Google Drive. Neither script hardcodes a
@@ -449,9 +737,18 @@ Step 1 writes both `sample.json` and `step1_scorer_ab.json` into that directory.
 Run it from a checkout whose `--data-root` points at the prepared Wang data;
 pass `--data-root` explicitly if that is also on Drive.
 
+Step 2 takes an explicit output file:
+
+```bash
+python scripts/diagnose_forward_path.py \
+  --output /content/drive/MyDrive/ddre-gate1/diagnostics/step2_forward_path.json
+```
+
 The formal cache at `/content/drive/MyDrive/ddre-gate1/wang_nli_cache.sqlite` is
-**never opened or modified** by either script, wherever the output goes. There
-is no flag that would make them read it: both repository arms are hardcoded to
+**never opened or modified** by any of these scripts, wherever the output goes.
+Step 2 does not construct an `EntailmentScorer` at all -- it calls the model
+directly -- so it has no cache code path whatsoever. In Step 1 there is no flag
+that would make it read the cache: both repository arms are hardcoded to
 `use_cache=False, write_cache=False`, and their scratch database is created in a
 local `TemporaryDirectory` that is deleted on exit. Reading that cache would
 measure the cache instead of the model, and writing to it would contaminate the
