@@ -269,8 +269,9 @@ class TestFinalFitSanityCheck(unittest.TestCase):
         # overflows to infinity, so only the fitted-ratio check can catch it.
         self.estimator.alpha = np.full_like(self.estimator.alpha, 1e308)
         self.assertTrue(np.all(np.isfinite(self.estimator.alpha)))
-        with self.assertRaises(DegenerateULSIFFit) as caught:
-            self.validate()
+        with np.errstate(over="ignore"):  # the overflow is the point of the test
+            with self.assertRaises(DegenerateULSIFFit) as caught:
+                self.validate()
         self.assertIn("fitted ratios on the training support", str(caught.exception))
 
     def test_an_empty_alpha_is_rejected(self):
@@ -436,6 +437,130 @@ class TestFitDiagnostics(unittest.TestCase):
         self.assertIn(
             '"ulsif_fit_diagnostics": ratio_estimator.fit_diagnostics', source
         )
+
+
+# --------------------------------------------------------------------------
+# Failed / repeated fit state management
+# --------------------------------------------------------------------------
+
+
+class TestFailedFitInvalidatesPreviousState(unittest.TestCase):
+    """A fit attempt must leave the object representing THAT attempt, or nothing.
+
+    Otherwise a second fit that fails early leaves the previous successful model
+    in place, and ratio() goes on serving evidence from a fit the caller
+    believes was replaced -- while fit_diagnostics describes that older fit,
+    making provenance ambiguous exactly when something has gone wrong.
+    """
+
+    def setUp(self):
+        rng = np.random.default_rng(4)
+        self.factual = np.clip(rng.normal(75, 8, 40), 0, 100)
+        self.hallucinated = np.clip(rng.normal(25, 8, 40), 0, 100)
+        self.estimator = ULSIFDensityRatio(max_centers=20, random_state=4)
+        self.estimator.fit(self.factual, self.hallucinated, folds=4)
+        # A usable model really is in place before each scenario.
+        self.assertIsNotNone(self.estimator.alpha)
+        self.assertTrue(self.estimator.fit_diagnostics["sanity_check_passed"])
+        self.assertGreater(self.estimator.ratio(80.0), 0.0)
+        self.first_sigma = self.estimator.sigma
+
+    def assert_no_usable_fit(self):
+        self.assertIsNone(self.estimator.alpha)
+        self.assertIsNone(self.estimator.centers)
+        self.assertIsNone(self.estimator.sigma)
+        self.assertIsNone(self.estimator.lam)
+        self.assertIsNone(self.estimator.fit_diagnostics)
+        with self.assertRaises(RuntimeError) as caught:
+            self.estimator.ratio(50.0)
+        self.assertIn("must be fit before use", str(caught.exception))
+
+    def test_a_failed_input_validation_invalidates_the_previous_fit(self):
+        bad = self.factual.copy()
+        bad[0] = float("nan")
+        with self.assertRaises(NonFiniteScoreError):
+            self.estimator.fit(bad, self.hallucinated, folds=4)
+        self.assert_no_usable_fit()
+
+    def test_a_failed_cv_objective_invalidates_the_previous_fit(self):
+        original_objective = ULSIFDensityRatio._objective
+        try:
+            ULSIFDensityRatio._objective = lambda *a, **k: float("nan")
+            with self.assertRaises(DegenerateULSIFFit):
+                self.estimator.fit(self.factual, self.hallucinated, folds=4)
+        finally:
+            ULSIFDensityRatio._objective = original_objective
+        self.assert_no_usable_fit()
+
+    def test_a_failed_final_sanity_check_invalidates_sigma_and_lambda_too(self):
+        # The earlier version of this path cleared centers/alpha/diagnostics but
+        # left sigma and lambda behind, describing a model that no longer exists.
+        # Cross-validation runs normally here; only the final check fails, so
+        # sigma and lambda ARE set by the time it does.
+        original_validate = ULSIFDensityRatio._validate_final_fit
+        seen = {}
+
+        def failing_validate(instance, *args, **kwargs):
+            seen["sigma"] = instance.sigma
+            seen["lam"] = instance.lam
+            raise DegenerateULSIFFit("synthetic final-fit failure")
+
+        try:
+            ULSIFDensityRatio._validate_final_fit = failing_validate
+            with self.assertRaises(DegenerateULSIFFit):
+                self.estimator.fit(self.factual, self.hallucinated, folds=4)
+        finally:
+            ULSIFDensityRatio._validate_final_fit = original_validate
+
+        self.assertIsNotNone(seen["sigma"], "sigma was set before the failure")
+        self.assertIsNotNone(seen["lam"], "lambda was set before the failure")
+        self.assert_no_usable_fit()
+
+    def test_a_third_valid_fit_recovers_normally(self):
+        bad = self.factual.copy()
+        bad[3] = float("inf")
+        with self.assertRaises(NonFiniteScoreError):
+            self.estimator.fit(bad, self.hallucinated, folds=4)
+        self.assert_no_usable_fit()
+
+        self.estimator.fit(self.factual, self.hallucinated, folds=4)
+        self.assertIsNotNone(self.estimator.alpha)
+        self.assertTrue(self.estimator.fit_diagnostics["sanity_check_passed"])
+        self.assertEqual(self.estimator.fit_diagnostics["n_factual"], 40)
+        self.assertEqual(self.estimator.sigma, self.first_sigma)
+        self.assertGreater(self.estimator.ratio(80.0), self.estimator.ratio(20.0))
+
+    def test_the_diagnostics_describe_the_current_fit_not_an_earlier_one(self):
+        smaller_factual = self.factual[:20]
+        smaller_hallucinated = self.hallucinated[:20]
+        self.estimator.fit(smaller_factual, smaller_hallucinated, folds=4)
+        self.assertEqual(self.estimator.fit_diagnostics["n_factual"], 20)
+        self.assertEqual(self.estimator.fit_diagnostics["n_hallucinated"], 20)
+
+    def test_the_cv_table_belongs_only_to_the_current_attempt(self):
+        self.assertGreater(len(self.estimator.cv_table), 0)
+        bad = self.hallucinated.copy()
+        bad[1] = float("-inf")
+        with self.assertRaises(NonFiniteScoreError):
+            self.estimator.fit(self.factual, bad, folds=4)
+        self.assertEqual(
+            self.estimator.cv_table, [],
+            "a stale CV table would masquerade as provenance for the failed attempt",
+        )
+
+    def test_the_state_is_cleared_before_input_validation_runs(self):
+        # The clear must precede validation, or an input that fails immediately
+        # would leave the old model untouched.
+        with self.assertRaises(NonFiniteScoreError):
+            self.estimator.fit([float("nan")] * 10, self.hallucinated, folds=4)
+        self.assert_no_usable_fit()
+
+    def test_clearing_is_idempotent_and_safe_on_a_fresh_estimator(self):
+        fresh = ULSIFDensityRatio()
+        fresh._clear_fit_state()
+        fresh._clear_fit_state()
+        self.assertIsNone(fresh.alpha)
+        self.assertEqual(fresh.cv_table, [])
 
 
 # --------------------------------------------------------------------------
