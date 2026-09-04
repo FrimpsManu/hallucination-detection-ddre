@@ -39,6 +39,13 @@ It is never opened for writing. New scores go into a **derived copy**, and the
 source's SHA-256 is recorded before the copy and recomputed afterwards to prove
 it did not change. The later sensitivity rerun uses the derived cache.
 
+That copy is itself verified. ``prepare_derived_cache`` reports
+``copy_faithful``: whether the derived file matches the source in both digest
+and row count immediately after copying, before anything is written. The caller
+refuses to construct a scorer at all unless it is True, and ``run_sound`` is
+False without it. Extending an unfaithful copy would put correct new scores on
+top of a base that is already wrong.
+
 Standard library only at module scope, so the accounting and reporting logic is
 testable without torch or a model.
 """
@@ -86,6 +93,31 @@ class UnsafeCacheTarget(RuntimeError):
     """The requested source/destination pair would modify a formal artifact."""
 
 
+class UnfaithfulDerivedCache(RuntimeError):
+    """The derived cache did not match the source immediately after copying."""
+
+
+def assert_copy_faithful(cache_identity):
+    """Refuse to go any further unless the copy was verified faithful.
+
+    Called from ``build_counting_scorer``, which is the only place a scorer
+    capable of inference or of writing a cache row comes into existence. So a
+    derived cache that did not match the source cannot be extended: there is
+    nothing to extend it with.
+    """
+    if not cache_identity:
+        raise UnfaithfulDerivedCache(
+            "No cache identity was supplied, so the derived cache was never "
+            "shown to be a faithful copy of the source. Refusing to score."
+        )
+    if cache_identity.get("copy_faithful") is not True:
+        raise UnfaithfulDerivedCache(
+            "The derived cache is not a faithful copy of the source: "
+            f"{cache_identity.get('copy_faithful_note')} Refusing to construct a "
+            "scorer, so zero inference is performed and zero rows are written."
+        )
+
+
 def prepare_derived_cache(
     source, destination, *, allow_in_place=False, overwrite=False
 ):
@@ -130,6 +162,14 @@ def prepare_derived_cache(
             "destination_sha256_after_copy": source_sha_before,
             "destination_rows_after_copy": source_rows,
             "copied": False,
+            # No copy was made, so the destination is byte-identical to the
+            # source because it *is* the source. Stated explicitly because the
+            # caller refuses to score unless this key is True.
+            "copy_faithful": True,
+            "copy_faithful_note": (
+                "No copy was made: --unsafe-allow-in-place is set and the "
+                "destination is the source file."
+            ),
             "warning": (
                 "UNSAFE: writing in place into the source cache. This modifies a "
                 "formal artifact and must never be used for a formal result."
@@ -160,6 +200,19 @@ def prepare_derived_cache(
         "copied": True,
         "copy_faithful": destination_sha == source_sha_before
         and destination_rows == source_rows,
+        "copy_faithful_note": (
+            "The derived cache is byte-identical to the source immediately "
+            "after the copy."
+            if destination_sha == source_sha_before and destination_rows == source_rows
+            else (
+                "THE COPY IS NOT FAITHFUL. The derived cache differs from the "
+                "source in digest or row count immediately after copying, before "
+                "anything was written. It must not be extended: new rows would "
+                "sit on top of an already-wrong base. Investigate the copy "
+                "(disk space, a concurrent writer, a truncated write) before "
+                "retrying."
+            )
+        ),
         "warning": None,
     }
 
@@ -240,14 +293,27 @@ class SpanCountingMixin:
 
 
 def build_counting_scorer(
-    tokenizer, model, model_name, cache_path, batch_size=WANG_BATCH_SIZE
+    tokenizer,
+    model,
+    model_name,
+    cache_path,
+    batch_size=WANG_BATCH_SIZE,
+    *,
+    cache_identity,
 ):
     """A production ``EntailmentScorer`` that also counts what it did.
 
-    ``EntailmentScorer`` is imported here rather than at module scope so this
-    module stays importable without torch. The scorer is the unmodified
-    production class; the mixin only observes.
+    ``cache_identity`` is the ``prepare_derived_cache`` result for the cache
+    being written, and is required: the faithfulness of the copy is checked
+    here, before torch is even imported, so an unfaithful copy cannot produce a
+    scorer and therefore cannot cause a forward pass or a cache write.
+
+    ``EntailmentScorer`` is imported after that check rather than at module
+    scope so this module stays importable without torch. The scorer is the
+    unmodified production class; the mixin only observes.
     """
+    assert_copy_faithful(cache_identity)
+
     from src.utils import EntailmentScorer
 
     counting_class = type(
@@ -283,11 +349,16 @@ def completion_report(
     rows_added = rows_after - rows_before
 
     source_intact = source_check is None or bool(source_check.get("unchanged"))
+    # Fail closed: a run whose derived cache was never shown to be a faithful
+    # copy of the source cannot be sound, and a report that carries no cache
+    # identity at all has not shown it either.
+    copy_faithful = bool(cache_identity) and cache_identity.get("copy_faithful") is True
 
     return {
         "placements_requested": [list(p) for p in placements],
         "configuration_completed": PRIMARY_CONFIGURATION,
         "cache_identity": cache_identity,
+        "derived_cache_copy_faithful": copy_faithful,
         "source_cache_check": source_check,
         "source_cache_unchanged": source_intact,
         "provenance_guard": guard,
@@ -320,6 +391,7 @@ def completion_report(
             and all(entry["complete"] for entry in verification)
             and rows_after - rows_before == evaluated
             and source_intact
+            and copy_faithful
         ),
         "scope_note": (
             "Cache completion only. No metric was computed, no verdict reached, "

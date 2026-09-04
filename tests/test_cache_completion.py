@@ -20,7 +20,10 @@ from src.cache_completion import (
     PRIMARY_CONFIGURATION,
     WANG_BATCH_SIZE,
     SpanCountingMixin,
+    UnfaithfulDerivedCache,
     UnsafeCacheTarget,
+    assert_copy_faithful,
+    build_counting_scorer,
     cache_row_count,
     completion_report,
     parse_placement,
@@ -401,6 +404,189 @@ class TestPrepareDerivedCache(DerivedCacheTestCase):
         check = verify_source_unchanged(self.source, identity["source_sha256_before"])
         self.assertFalse(check["unchanged"])
         self.assertIn("SOURCE CACHE CHANGED", check["message"])
+
+
+class TestFaithfulCopyGate(DerivedCacheTestCase):
+    """A derived cache that did not copy correctly is never extended.
+
+    The check lives in ``build_counting_scorer``, which is the only place a
+    scorer capable of a forward pass or a cache write is created. So the
+    "zero inference, zero rows" property is structural: on an unfaithful copy
+    there is nothing that could perform either.
+    """
+
+    def unfaithful(self):
+        identity = prepare_derived_cache(self.source, self.destination)
+        identity["copy_faithful"] = False
+        identity["copy_faithful_note"] = "digest differs immediately after copy"
+        return identity
+
+    def test_an_unfaithful_copy_performs_zero_inference(self):
+        # No scorer is constructed, so nothing exists that could score a span.
+        # torch is never imported: the check runs before that import.
+        with self.assertRaises(UnfaithfulDerivedCache) as caught:
+            build_counting_scorer(
+                None, None, "model", str(self.destination),
+                cache_identity=self.unfaithful(),
+            )
+        self.assertIn("zero inference", str(caught.exception))
+
+    def test_an_unfaithful_copy_writes_zero_new_rows(self):
+        rows_before = cache_row_count(self.destination) if self.destination.exists() else None
+        identity = self.unfaithful()
+        rows_after_copy = cache_row_count(self.destination)
+        with self.assertRaises(UnfaithfulDerivedCache):
+            build_counting_scorer(
+                None, None, "model", str(self.destination), cache_identity=identity
+            )
+        self.assertIsNone(rows_before)
+        self.assertEqual(cache_row_count(self.destination), rows_after_copy)
+        self.assertEqual(cache_row_count(self.destination), 7)
+        self.assertEqual(cache_row_count(self.source), 7)
+
+    def test_a_missing_cache_identity_is_refused(self):
+        # Fail closed: no identity means the copy was never verified at all.
+        for identity in (None, {}):
+            with self.subTest(identity=identity):
+                with self.assertRaises(UnfaithfulDerivedCache):
+                    assert_copy_faithful(identity)
+
+    def test_a_faithful_copy_passes_the_gate(self):
+        identity = prepare_derived_cache(self.source, self.destination)
+        self.assertTrue(identity["copy_faithful"])
+        assert_copy_faithful(identity)  # does not raise
+
+    def test_copy_faithful_is_computed_from_both_digest_and_row_count(self):
+        # A truncated or partially-written copy can differ in either, so both
+        # are required. Each is faulted independently.
+        import src.cache_completion as module
+
+        real_sha, real_rows = module.sha256_file, module.cache_row_count
+        try:
+            module.sha256_file = lambda path, *a, **k: (
+                "digest-differs" if Path(path) == self.destination else real_sha(path)
+            )
+            identity = prepare_derived_cache(
+                self.source, self.destination, overwrite=True
+            )
+            self.assertFalse(identity["copy_faithful"])
+            self.assertIn("NOT FAITHFUL", identity["copy_faithful_note"])
+        finally:
+            module.sha256_file = real_sha
+
+        try:
+            module.cache_row_count = lambda path: (
+                999 if Path(path) == self.destination else real_rows(path)
+            )
+            identity = prepare_derived_cache(
+                self.source, self.destination, overwrite=True
+            )
+            self.assertFalse(identity["copy_faithful"])
+        finally:
+            module.cache_row_count = real_rows
+
+        with self.assertRaises(UnfaithfulDerivedCache):
+            assert_copy_faithful(identity)
+
+    def test_run_sound_is_false_when_the_copy_is_not_faithful(self):
+        identity = self.unfaithful()
+        source_check = {
+            "source_cache": str(self.source),
+            "expected_sha256": identity["source_sha256_before"],
+            "observed_sha256": identity["source_sha256_before"],
+            "unchanged": True,
+            "message": "",
+        }
+        report = completion_report(
+            INCOMPLETE_PRIMARY_PLACEMENTS, 7, 9,
+            [placement_entry("a", 2, 50)], [verified("a")],
+            cache_identity=identity, source_check=source_check,
+            guard={"passed": True},
+        )
+        self.assertFalse(report["derived_cache_copy_faithful"])
+        self.assertFalse(report["run_sound"])
+        self.assertTrue(report["all_requested_placements_complete"])
+
+    def test_run_sound_requires_a_cache_identity_at_all(self):
+        report = completion_report(
+            INCOMPLETE_PRIMARY_PLACEMENTS, 7, 9,
+            [placement_entry("a", 2, 50)], [verified("a")],
+        )
+        self.assertFalse(report["derived_cache_copy_faithful"])
+        self.assertFalse(report["run_sound"])
+
+
+class TestScriptOrdering(unittest.TestCase):
+    """The gates must sit ahead of the expensive, irreversible steps.
+
+    Asserted structurally against the script's AST rather than by running it,
+    because the ordering is the property under review and running it needs a
+    real checkpoint. A gate that fires after the model has been fetched, or
+    after the scorer exists, is not the gate the review asked for.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import ast
+
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "scripts"
+            / "complete_nbc_cache.py"
+        ).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        cls.ast = ast
+        cls.main = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "main"
+        )
+
+    def line_of_import(self, module):
+        return min(
+            node.lineno
+            for node in self.ast.walk(self.main)
+            if isinstance(node, self.ast.ImportFrom) and node.module == module
+        )
+
+    def line_of_call(self, name):
+        return min(
+            node.lineno
+            for node in self.ast.walk(self.main)
+            if isinstance(node, self.ast.Call)
+            and isinstance(node.func, self.ast.Name)
+            and node.func.id == name
+        )
+
+    def test_the_static_guard_aborts_before_from_pretrained(self):
+        # The whole point of the static half: a missing or wrong revision must
+        # abort before anything is fetched from Hugging Face.
+        static_abort = self.line_of_call("_write_aborted")
+        self.assertLess(static_abort, self.line_of_import("transformers"))
+
+    def test_the_static_guard_runs_before_the_derived_cache_is_prepared(self):
+        self.assertLess(
+            self.line_of_call("check_static_preconditions"),
+            self.line_of_call("prepare_derived_cache"),
+        )
+
+    def test_the_runtime_guard_runs_before_the_derived_cache_is_prepared(self):
+        self.assertLess(
+            self.line_of_call("check_runtime_preconditions"),
+            self.line_of_call("prepare_derived_cache"),
+        )
+
+    def test_the_copy_gate_runs_before_the_scorer_is_constructed(self):
+        self.assertLess(
+            self.line_of_call("_write_copy_abort"),
+            self.line_of_call("build_counting_scorer"),
+        )
+
+    def test_the_reference_bundle_is_merged_before_any_check(self):
+        self.assertLess(
+            self.line_of_call("merge_reference"),
+            self.line_of_call("check_static_preconditions"),
+        )
 
 
 class TestReportCarriesCacheIdentity(DerivedCacheTestCase):

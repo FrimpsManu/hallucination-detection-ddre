@@ -421,7 +421,8 @@ missing spans have to be filled before the grid can settle the question.
 python scripts/complete_nbc_cache.py \
   --source-cache /content/drive/MyDrive/ddre-gate1/wang_nli_cache_fidelity_v2_batch1.sqlite \
   --output-cache /content/drive/MyDrive/ddre-gate1/wang_nli_cache_fidelity_v2_batch1_nbc_complete.sqlite \
-  --reference-provenance /content/drive/MyDrive/ddre-gate1/diagnostics/step2_forward_path.json \
+  --formal-provenance /content/drive/MyDrive/ddre-gate1/wang_reproduction_fidelity_v2_batch1.json \
+  --checkpoint-provenance /content/drive/MyDrive/ddre-gate1/diagnostics/step2_scoring_path.json \
   --output /content/drive/MyDrive/ddre-gate1/diagnostics/nbc_cache_completion.json
 ```
 
@@ -435,15 +436,62 @@ byte-identical; if it is not, the run reports that and exits non-zero.
 Recorded in the report: source and destination paths, source SHA-256 before,
 destination SHA-256 after completion, and both row counts.
 
+The copy is then verified and **gated on**. `prepare_derived_cache` reports
+`copy_faithful`: whether the derived file matches the source in both digest and
+row count immediately after copying, before anything is written. The check lives
+in `build_counting_scorer`, which is the only place a scorer capable of a
+forward pass or a cache write comes into existence — so an unfaithful copy is
+never extended, and "zero inference, zero rows" is structural rather than a
+promise. `run_sound` is false without it.
+
+#### The reference bundle
+
+No single recorded artifact carries everything the guard needs, so the reference
+is a bundle of two, passed explicitly:
+
+| flag | role |
+| --- | --- |
+| `--formal-provenance` | the final formal v2 batch-1 Gate report — **authoritative** wherever it records a field |
+| `--checkpoint-provenance` | a checkpoint-provenance artifact (the Step 2 scoring-path diagnostic) — **supplements only** what the Gate report does not record |
+
+The Gate report is authoritative for the corrected score version, the Wang
+source commit, batch size, model name, the truncation precondition, and the
+runtime/library fields it actually records. It does not record a resolved
+Hugging Face revision, the model/tokenizer commit hashes, the model dtype, the
+GPU identity, or the `tokenizers`/`sentencepiece` versions; the supplement
+provides exactly those.
+
+A field recorded by **both** must agree, and a disagreement aborts the run: two
+artifacts describing different environments cannot be spliced into one
+reference. The single exception is `score_version` — the Step 2 diagnostic
+predates the PR #4 scorer correction, so a divergence there is structural rather
+than evidence of two machines. It does not gate; it is recorded, and it counts
+against checkpoint identity below. The report records **which artifact supplied
+every guarded field**.
+
+##### The limitation, stated
+
+The formal v2 Gate report does not record a resolved revision. So the revision
+pinned here comes from a separate diagnostic run, and **no artifact establishes
+that the v2 cache rows were produced at that revision.** Exact checkpoint
+identity with the formal v2 run cannot be established retrospectively.
+
+Pinning is still strictly better than resolving against moving Hugging Face
+main: it makes this completion internally consistent and reproducible. It is not
+proof of identity, and the run reports `checkpoint_identity_established: false`
+with the reasons rather than implying otherwise.
+
 #### Pre-write provenance guard
 
 Scores added to an existing cache are only sound if produced under the same
 semantics as the scores already in it — a cache mixing two checkpoints is worse
 than an incomplete one, because the incompleteness is visible and the mixture is
 not. `from_pretrained(model_name)` resolves against Hugging Face main, which
-moves, so the tool compares this environment against the **previously recorded
-formal provenance** and loads the model *and* tokenizer with `revision=` pinned
-to the revision that run recorded.
+moves, so the tool compares this environment against the recorded reference
+bundle and loads the model *and* tokenizer with `revision=` pinned.
+
+The **presence** of a resolved revision is a static check. Without one the run
+aborts before `from_pretrained` — there is no fallback to Hugging Face main.
 
 Verified before the derived cache is opened for writes and before any inference:
 
@@ -454,6 +502,7 @@ Verified before the derived cache is opened for writes and before any inference:
 | truncation equivalence | resolved checkpoint revision |
 | model/tokenizer commit hashes | model dtype, device, GPU |
 | `torch` / `transformers` / `tokenizers` versions | model in eval mode |
+| cross-artifact agreement of the bundle | tokenizer limit vs the recorded one |
 
 **Unverifiable is treated as failed.** A reference that does not record a field
 cannot establish that the field matches, and silently accepting the current
