@@ -9,6 +9,7 @@ satisfied by bucket agreement, refuse when a sentinel is missing, and write
 nothing anywhere.
 """
 
+import hashlib
 import sqlite3
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ from src.score_compatibility import (
     PROBE_BATCH_SIZE,
     compare_pair_scores,
     compatibility_report,
+    source_integrity_check,
     format_compatibility,
     production_cache_key,
     read_stored_scores,
@@ -46,17 +48,26 @@ def truth_score(index):
 
 
 class FakeScorer:
-    """Records how it was called and returns whatever it was told to return."""
+    """Records how it was called and returns whatever it was told to return.
 
-    def __init__(self, scores):
+    ``during`` is invoked inside the scoring call, which is where the real
+    398 forward passes happen -- the window a post-probe integrity check has to
+    cover and a pre-probe one does not.
+    """
+
+    def __init__(self, scores, during=None):
         self.scores = list(scores)
         self.calls = []
+        self.during = during
+        self.finalized_after_calls = None
 
     def score_pairs(self, pairs, *, use_cache, write_cache, show_progress=False,
                     description=""):
         self.calls.append(
             {"pairs": len(pairs), "use_cache": use_cache, "write_cache": write_cache}
         )
+        if self.during is not None:
+            self.during()
         return self.scores[: len(pairs)]
 
 
@@ -89,7 +100,13 @@ class ProbeTestCase(unittest.TestCase):
     def tearDown(self):
         self._tempdir.cleanup()
 
-    def probe(self, stored=None, fresh=None, scratch_rows=0, source_check=None):
+    def probe(self, stored=None, fresh=None, scratch_rows=0, mutate_during=None):
+        """Drive the probe end to end against a real on-disk source cache.
+
+        ``mutate_during`` runs from inside ``FakeScorer.score_pairs``, i.e.
+        between the pre-probe digest and the post-probe digest, so it simulates
+        the source cache changing while the forward passes are running.
+        """
         stored = self.truth if stored is None else stored
         fresh = self.truth if fresh is None else fresh
         build_source_cache(
@@ -100,7 +117,14 @@ class ProbeTestCase(unittest.TestCase):
                 if score is not None
             ],
         )
-        scorer = FakeScorer(fresh)
+        scorer = FakeScorer(fresh, during=mutate_during)
+        self.digest_calls = []
+
+        def source_digest():
+            digest = hashlib.sha256(self.source.read_bytes()).hexdigest()
+            self.digest_calls.append(digest)
+            return digest
+
         report = run_compatibility_probe(
             pairs=self.pairs,
             polarities=self.polarities,
@@ -110,11 +134,15 @@ class ProbeTestCase(unittest.TestCase):
             model_name=MODEL,
             score_version=SCORE_VERSION,
             scorer=scorer,
-            scratch_row_count=lambda: scratch_rows,
-            source_check=source_check,
+            finalize=lambda: self._finalize(scorer, scratch_rows),
+            source_digest=source_digest,
         )
         self.scorer = scorer
         return report
+
+    def _finalize(self, scorer, scratch_rows):
+        scorer.finalized_after_calls = len(scorer.calls)
+        return scratch_rows
 
 
 class TestCacheKey(unittest.TestCase):
@@ -205,9 +233,24 @@ class TestCompatibilityVerdict(ProbeTestCase):
         self.assertFalse(report["score_compatibility_established"])
         self.assertIn("must be used whole", report["verdict_reason"])
 
-    def test_a_changed_source_cache_fails(self):
-        report = self.probe(source_check={"unchanged": False})
+    def test_a_source_cache_changed_during_the_probe_fails(self):
+        # The mutation lands between the two digests, i.e. while the forward
+        # passes are running. A pre-probe-only check could not see this.
+        def append_row():
+            connection = sqlite3.connect(str(self.source))
+            connection.execute(
+                "INSERT INTO nli_scores VALUES ('intruder', ?, ?, 1.0)",
+                (MODEL, SCORE_VERSION),
+            )
+            connection.commit()
+            connection.close()
+
+        report = self.probe(mutate_during=append_row)
+        self.assertEqual(report["exact_raw_matches"], EXPECTED_PAIR_COUNT)
+        self.assertFalse(report["source_cache_unchanged"])
         self.assertFalse(report["score_compatibility_established"])
+        self.assertIn("CHANGED DURING THE COMPATIBILITY PROBE",
+                      report["verdict_reason"])
 
     def test_the_maximum_delta_is_reported(self):
         fresh = list(self.truth)
@@ -268,6 +311,125 @@ class TestTheProbeWritesNothing(ProbeTestCase):
                 "SELECT COUNT(*) FROM nli_scores"
             ).fetchone()[0],
             rows_before,
+        )
+
+
+class TestSourceIntegrityOrdering(ProbeTestCase):
+    """The digest that decides the verdict must be the one taken afterwards."""
+
+    def test_the_digest_is_taken_before_and_after_the_forward_passes(self):
+        report = self.probe()
+        self.assertEqual(len(self.digest_calls), 2)
+        self.assertEqual(
+            report["source_sha256_before_probe"], self.digest_calls[0]
+        )
+        self.assertEqual(report["source_sha256_after_probe"], self.digest_calls[1])
+        self.assertTrue(report["source_cache_unchanged"])
+        self.assertTrue(report["score_compatibility_established"])
+
+    def test_the_post_probe_digest_is_the_one_used_in_the_verdict(self):
+        # The pre-probe digest is taken while the file is still pristine, so a
+        # verdict built on it would pass here. The post-probe digest is not.
+        pristine = {}
+
+        def append_row():
+            pristine["digest"] = self.digest_calls[0]
+            connection = sqlite3.connect(str(self.source))
+            connection.execute(
+                "INSERT INTO nli_scores VALUES ('intruder', ?, ?, 1.0)",
+                (MODEL, SCORE_VERSION),
+            )
+            connection.commit()
+            connection.close()
+
+        report = self.probe(mutate_during=append_row)
+        self.assertEqual(report["source_sha256_before_probe"], pristine["digest"])
+        self.assertNotEqual(
+            report["source_sha256_after_probe"], report["source_sha256_before_probe"]
+        )
+        self.assertFalse(report["score_compatibility_established"])
+
+    def test_the_scratch_scorer_is_finalized_before_the_post_probe_digest(self):
+        # finalize() closes the scratch scorer; the digest that follows is
+        # therefore taken with nothing still holding a database open.
+        self.probe()
+        self.assertEqual(self.scorer.finalized_after_calls, 1)
+
+    def test_the_report_carries_both_digests_and_the_verdict(self):
+        report = self.probe()
+        for key in ("source_sha256_before_probe", "source_sha256_after_probe",
+                    "source_cache_unchanged"):
+            self.assertIn(key, report)
+        self.assertEqual(
+            report["source_cache_check"]["sha256_after_probe"],
+            report["source_sha256_after_probe"],
+        )
+
+
+class TestMissingMeasurementsFailClosed(unittest.TestCase):
+    """An unmeasured integrity property is a failed one, never a passing one."""
+
+    def entries(self):
+        pairs, polarities, n_pos, n_neg = synthetic_pairs()
+        keys = [f"key-{i}" for i in range(len(pairs))]
+        truth = [truth_score(i) for i in range(len(pairs))]
+        return (
+            compare_pair_scores(
+                pairs, polarities, keys, dict(zip(keys, truth)), truth
+            ),
+            n_pos,
+            n_neg,
+        )
+
+    def report(self, **overrides):
+        entries, n_pos, n_neg = self.entries()
+        kwargs = {
+            "source_cache": "formal.sqlite",
+            "model_name": MODEL,
+            "score_version": SCORE_VERSION,
+            "positive_pairs": n_pos,
+            "negative_pairs": n_neg,
+            "scratch_cache_rows_after": 0,
+            "source_check": source_integrity_check("formal.sqlite", "abc", "abc"),
+        }
+        kwargs.update(overrides)
+        return compatibility_report(entries, **kwargs)
+
+    def test_the_baseline_passes(self):
+        report = self.report()
+        self.assertEqual(report["exact_raw_matches"], EXPECTED_PAIR_COUNT)
+        self.assertTrue(report["score_compatibility_established"])
+
+    def test_no_source_check_fails(self):
+        report = self.report(source_check=None)
+        self.assertFalse(report["source_cache_unchanged"])
+        self.assertFalse(report["score_compatibility_established"])
+        self.assertIn("No post-probe source-integrity check",
+                      report["verdict_reason"])
+
+    def test_an_unmeasured_scratch_row_count_fails(self):
+        # None must never be read as "zero writes".
+        report = self.report(scratch_cache_rows_after=None)
+        self.assertFalse(report["score_compatibility_established"])
+        self.assertIn("never measured", report["verdict_reason"])
+
+    def test_a_half_measured_digest_fails(self):
+        for before, after in (("abc", None), (None, "abc"), (None, None)):
+            with self.subTest(before=before, after=after):
+                check = source_integrity_check("formal.sqlite", before, after)
+                self.assertFalse(check["unchanged"])
+                self.assertIn("unverified", check["message"])
+                self.assertFalse(
+                    self.report(source_check=check)[
+                        "score_compatibility_established"
+                    ]
+                )
+
+    def test_differing_digests_fail(self):
+        check = source_integrity_check("formal.sqlite", "abc", "def")
+        self.assertFalse(check["unchanged"])
+        self.assertFalse(
+            self.report(source_check=check)["score_compatibility_established"]
         )
 
 

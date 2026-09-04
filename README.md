@@ -514,10 +514,25 @@ first few mismatches with their stored and fresh values.
 
 The probe performs 398 forward passes — that is the cost of the evidence — and
 **zero cache writes**: the recompute runs against a scratch database that is
-deleted afterwards, and its row count is asserted to be zero and recorded. If
-any sentinel is missing or any score differs, the run aborts **before**
-`prepare_derived_cache`, so no derived cache exists, no completion inference
-runs, and no row is written.
+deleted afterwards, and its row count is measured and recorded.
+
+The source digest is taken **twice**: once before anything happens, and again
+only after all 398 forward passes have run and the scratch scorer is closed. A
+digest read before the work would merely restate the file's starting state; the
+post-probe one is what the verdict uses, and both appear in the report as
+`source_sha256_before_probe` and `source_sha256_after_probe`. If the source
+changes at any point during the probe — even with all 398 scores matching
+exactly — compatibility is not established.
+
+Every integrity measurement is **fail-closed, and absence is failure**: no
+source-integrity check means compatibility is not established, and an unmeasured
+scratch row count (`None`) never counts as zero writes. The same rule applies to
+`run_sound`, which cannot be true without an actual source-integrity check that
+passed.
+
+If any sentinel is missing, any score differs, or the source changed, the run
+aborts **before** `prepare_derived_cache`, so no derived cache exists, no
+completion inference runs, and no row is written.
 
 The two flags stay separate and are never merged:
 
@@ -573,7 +588,8 @@ was used — `cpu` vs `cuda` is already gated by the device check.
 2. static provenance checks — abort here is **before any download**
 3. load model and tokenizer pinned to the recorded revision
 4. runtime provenance checks
-5. 398-pair score-compatibility probe against the source cache, read-only
+5. 398-pair score-compatibility probe against the source cache, read-only,
+   with the source digest re-taken after the last forward pass
 6. abort if compatibility fails — nothing has been created yet
 7. `prepare_derived_cache`
 8. require `copy_faithful`
@@ -585,7 +601,8 @@ was used — `cpu` vs `cuda` is already gated by the device check.
 passed: provenance guard passed, `score_compatibility_established`,
 `copy_faithful`, source cache unchanged, accounting consistent, and all
 requested placements complete. Each clause is fail-closed — a run that cannot
-show it passed a gate has not passed it.
+show it passed a gate has not passed it, so an absent probe, an absent guard, an
+absent cache identity or an absent source-integrity check all disqualify.
 
 Two loudly-named debug overrides exist and are **never used by the formal
 command**: `--unsafe-allow-in-place` permits `source == destination`, and
