@@ -501,7 +501,7 @@ class TestFaithfulCopyGate(DerivedCacheTestCase):
             INCOMPLETE_PRIMARY_PLACEMENTS, 7, 9,
             [placement_entry("a", 2, 50)], [verified("a")],
             cache_identity=identity, source_check=source_check,
-            guard={"passed": True},
+            guard={"passed": True}, compatibility=PASSING_COMPATIBILITY,
         )
         self.assertFalse(report["derived_cache_copy_faithful"])
         self.assertFalse(report["run_sound"])
@@ -576,6 +576,41 @@ class TestScriptOrdering(unittest.TestCase):
             self.line_of_call("prepare_derived_cache"),
         )
 
+    def test_the_compatibility_probe_runs_before_the_derived_cache_is_prepared(self):
+        # A compatibility failure must leave nothing behind, so the probe has
+        # to come before the copy, not after it.
+        self.assertLess(
+            self.line_of_call("_run_compatibility_probe"),
+            self.line_of_call("prepare_derived_cache"),
+        )
+
+    def test_the_compatibility_abort_runs_before_the_derived_cache_is_prepared(self):
+        self.assertLess(
+            self.line_of_call("_write_compatibility_abort"),
+            self.line_of_call("prepare_derived_cache"),
+        )
+
+    def test_the_compatibility_probe_runs_after_the_runtime_guard(self):
+        # It needs the revision-pinned, provenance-checked model.
+        self.assertLess(
+            self.line_of_call("check_runtime_preconditions"),
+            self.line_of_call("_run_compatibility_probe"),
+        )
+
+    def test_the_compatibility_probe_runs_before_any_completion_scorer(self):
+        self.assertLess(
+            self.line_of_call("_run_compatibility_probe"),
+            self.line_of_call("build_counting_scorer"),
+        )
+
+    def test_the_completion_loop_runs_after_every_gate(self):
+        completion = self.line_of_call("complete_placement")
+        for gate in ("check_static_preconditions", "check_runtime_preconditions",
+                     "_run_compatibility_probe", "prepare_derived_cache",
+                     "build_counting_scorer"):
+            with self.subTest(gate=gate):
+                self.assertLess(self.line_of_call(gate), completion)
+
     def test_the_copy_gate_runs_before_the_scorer_is_constructed(self):
         self.assertLess(
             self.line_of_call("_write_copy_abort"),
@@ -589,8 +624,16 @@ class TestScriptOrdering(unittest.TestCase):
         )
 
 
+PASSING_COMPATIBILITY = {
+    "pairs_probed": 398,
+    "exact_raw_matches": 398,
+    "score_compatibility_established": True,
+}
+
+
 class TestReportCarriesCacheIdentity(DerivedCacheTestCase):
-    def build_report(self, source_unchanged=True, guard_passed=True):
+    def build_report(self, source_unchanged=True, guard_passed=True,
+                     compatibility=PASSING_COMPATIBILITY):
         identity = prepare_derived_cache(
             self.source, self.destination, overwrite=True
         )
@@ -612,6 +655,7 @@ class TestReportCarriesCacheIdentity(DerivedCacheTestCase):
             cache_identity=identity,
             source_check=source_check,
             guard={"passed": guard_passed},
+            compatibility=compatibility,
         )
 
     def test_both_cache_paths_and_hashes_are_recorded(self):
@@ -636,6 +680,21 @@ class TestReportCarriesCacheIdentity(DerivedCacheTestCase):
     def test_the_guard_is_carried_in_the_report(self):
         report = self.build_report()
         self.assertEqual(report["provenance_guard"], {"passed": True})
+
+    def test_a_sound_run_requires_the_provenance_guard_to_have_passed(self):
+        self.assertFalse(self.build_report(guard_passed=False)["run_sound"])
+
+    def test_a_sound_run_requires_score_compatibility(self):
+        failed = dict(PASSING_COMPATIBILITY, score_compatibility_established=False)
+        report = self.build_report(compatibility=failed)
+        self.assertFalse(report["score_compatibility_established"])
+        self.assertFalse(report["run_sound"])
+
+    def test_run_sound_is_false_when_no_compatibility_probe_was_run(self):
+        # Fail closed: an absent probe has not established anything.
+        report = self.build_report(compatibility=None)
+        self.assertFalse(report["score_compatibility_established"])
+        self.assertFalse(report["run_sound"])
 
 
 if __name__ == "__main__":
