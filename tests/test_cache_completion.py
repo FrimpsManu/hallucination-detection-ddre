@@ -10,17 +10,25 @@ number of evaluations performed and the number of rows the cache gained measure
 the same quantity two ways, and a disagreement means a write did not land.
 """
 
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 
 from src.cache_completion import (
     INCOMPLETE_PRIMARY_PLACEMENTS,
     PRIMARY_CONFIGURATION,
     WANG_BATCH_SIZE,
     SpanCountingMixin,
+    UnsafeCacheTarget,
+    cache_row_count,
     completion_report,
     parse_placement,
     placement_label,
+    prepare_derived_cache,
+    sha256_file,
     verification_summary,
+    verify_source_unchanged,
 )
 
 
@@ -278,6 +286,170 @@ class TestVerificationSummary(unittest.TestCase):
     def test_one_line_per_placement(self):
         lines = verification_summary([verified("a"), verified("b"), verified("c")])
         self.assertEqual(len(lines), 3)
+
+
+# --------------------------------------------------------------------------
+# Derived-cache handling.
+#
+# The formal v2 cache is an immutable completed Gate 1 artifact. Writing into it
+# would make the recorded sensitivity result unreproducible, so the formal path
+# always copies first and extends only the copy.
+# --------------------------------------------------------------------------
+
+def build_cache(path, rows=5):
+    connection = sqlite3.connect(str(path))
+    connection.execute(
+        "CREATE TABLE nli_scores ("
+        "cache_key TEXT PRIMARY KEY, model_name TEXT NOT NULL, "
+        "score_version TEXT NOT NULL, score REAL NOT NULL)"
+    )
+    connection.executemany(
+        "INSERT INTO nli_scores VALUES (?, ?, ?, ?)",
+        [(f"key{i}", "m", "v2", float(i)) for i in range(rows)],
+    )
+    connection.commit()
+    connection.close()
+
+
+def append_row(path, key="extra"):
+    connection = sqlite3.connect(str(path))
+    connection.execute(
+        "INSERT INTO nli_scores VALUES (?, ?, ?, ?)", (key, "m", "v2", 1.0)
+    )
+    connection.commit()
+    connection.close()
+
+
+class DerivedCacheTestCase(unittest.TestCase):
+    def setUp(self):
+        self._tempdir = tempfile.TemporaryDirectory(prefix="derived-cache-")
+        self.root = Path(self._tempdir.name)
+        self.source = self.root / "formal_v2.sqlite"
+        self.destination = self.root / "formal_v2_nbc_complete.sqlite"
+        build_cache(self.source, rows=7)
+
+    def tearDown(self):
+        self._tempdir.cleanup()
+
+
+class TestPrepareDerivedCache(DerivedCacheTestCase):
+    def test_the_destination_is_a_faithful_copy(self):
+        identity = prepare_derived_cache(self.source, self.destination)
+        self.assertTrue(identity["copied"])
+        self.assertTrue(identity["copy_faithful"])
+        self.assertEqual(
+            identity["destination_sha256_after_copy"],
+            identity["source_sha256_before"],
+        )
+        self.assertEqual(identity["destination_rows_after_copy"], 7)
+        self.assertEqual(sha256_file(self.destination), sha256_file(self.source))
+
+    def test_the_source_is_unchanged_by_writes_to_the_copy(self):
+        identity = prepare_derived_cache(self.source, self.destination)
+        append_row(self.destination)
+        check = verify_source_unchanged(self.source, identity["source_sha256_before"])
+        self.assertTrue(check["unchanged"])
+        self.assertEqual(cache_row_count(self.source), 7)
+        self.assertEqual(cache_row_count(self.destination), 8)
+
+    def test_source_equal_to_destination_is_refused(self):
+        with self.assertRaises(UnsafeCacheTarget) as caught:
+            prepare_derived_cache(self.source, self.source)
+        self.assertIn("immutable artifact", str(caught.exception))
+
+    def test_source_equal_to_destination_by_relative_path_is_refused(self):
+        alias = Path(str(self.source))
+        with self.assertRaises(UnsafeCacheTarget):
+            prepare_derived_cache(self.source, alias)
+
+    def test_the_in_place_override_is_opt_in_only(self):
+        identity = prepare_derived_cache(
+            self.source, self.source, allow_in_place=True
+        )
+        self.assertTrue(identity["in_place"])
+        self.assertFalse(identity["copied"])
+        self.assertIn("UNSAFE", identity["warning"])
+
+    def test_an_existing_destination_is_not_silently_overwritten(self):
+        build_cache(self.destination, rows=2)
+        with self.assertRaises(UnsafeCacheTarget) as caught:
+            prepare_derived_cache(self.source, self.destination)
+        self.assertIn("already exists", str(caught.exception))
+        self.assertEqual(cache_row_count(self.destination), 2)
+
+    def test_overwrite_is_honoured_when_requested(self):
+        build_cache(self.destination, rows=2)
+        identity = prepare_derived_cache(
+            self.source, self.destination, overwrite=True
+        )
+        self.assertTrue(identity["copy_faithful"])
+        self.assertEqual(cache_row_count(self.destination), 7)
+
+    def test_a_missing_source_is_an_error(self):
+        with self.assertRaises(FileNotFoundError):
+            prepare_derived_cache(self.root / "nope.sqlite", self.destination)
+
+    def test_nested_destination_directories_are_created(self):
+        nested = self.root / "a" / "b" / "derived.sqlite"
+        identity = prepare_derived_cache(self.source, nested)
+        self.assertTrue(nested.exists())
+        self.assertTrue(identity["copy_faithful"])
+
+    def test_a_modified_source_is_detected(self):
+        identity = prepare_derived_cache(self.source, self.destination)
+        append_row(self.source, key="tamper")
+        check = verify_source_unchanged(self.source, identity["source_sha256_before"])
+        self.assertFalse(check["unchanged"])
+        self.assertIn("SOURCE CACHE CHANGED", check["message"])
+
+
+class TestReportCarriesCacheIdentity(DerivedCacheTestCase):
+    def build_report(self, source_unchanged=True, guard_passed=True):
+        identity = prepare_derived_cache(
+            self.source, self.destination, overwrite=True
+        )
+        source_check = {
+            "source_cache": str(self.source),
+            "expected_sha256": identity["source_sha256_before"],
+            "observed_sha256": identity["source_sha256_before"]
+            if source_unchanged
+            else "different",
+            "unchanged": source_unchanged,
+            "message": "",
+        }
+        return completion_report(
+            INCOMPLETE_PRIMARY_PLACEMENTS,
+            7,
+            9,
+            [placement_entry("a", 2, 50)],
+            [verified("a")],
+            cache_identity=identity,
+            source_check=source_check,
+            guard={"passed": guard_passed},
+        )
+
+    def test_both_cache_paths_and_hashes_are_recorded(self):
+        report = self.build_report()
+        identity = report["cache_identity"]
+        self.assertEqual(identity["source_cache"], str(self.source))
+        self.assertEqual(identity["destination_cache"], str(self.destination))
+        self.assertTrue(identity["source_sha256_before"])
+        self.assertEqual(identity["source_rows"], 7)
+
+    def test_a_sound_run_requires_the_source_to_be_unchanged(self):
+        self.assertTrue(self.build_report()["run_sound"])
+        tampered = self.build_report(source_unchanged=False)
+        self.assertFalse(tampered["source_cache_unchanged"])
+        self.assertFalse(tampered["run_sound"])
+
+    def test_the_scope_note_points_at_the_derived_cache(self):
+        report = self.build_report()
+        self.assertIn("DERIVED", report["scope_note"])
+        self.assertIn("source cache is unmodified", report["scope_note"])
+
+    def test_the_guard_is_carried_in_the_report(self):
+        report = self.build_report()
+        self.assertEqual(report["provenance_guard"], {"passed": True})
 
 
 if __name__ == "__main__":

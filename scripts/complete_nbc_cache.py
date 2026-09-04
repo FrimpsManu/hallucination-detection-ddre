@@ -17,9 +17,23 @@ What it does
 ------------
 Replays the unmodified ``bse_official`` loop for those three placements under
 CM=14/CFA=24 only, using the ordinary production ``EntailmentScorer`` at batch
-size 1 against the existing v2 cache, with the ordinary read-through /
-write-through cache mechanism. A span already cached is reused; only a span that
-is genuinely missing is evaluated and written back.
+size 1, with the ordinary read-through / write-through cache mechanism. A span
+already cached is reused; only a span that is genuinely missing is evaluated and
+written back.
+
+The formal v2 cache is an immutable completed Gate 1 artifact and is NEVER
+written to. It is copied to a derived cache, and only the copy is extended. The
+source SHA-256 is recorded before the copy and recomputed afterwards to prove
+the original is byte-identical. The sensitivity rerun uses the derived cache.
+
+Before the derived cache is opened for writes and before any inference, a
+provenance guard compares this environment against the previously recorded
+formal provenance: model name, resolved checkpoint revision, SCORE_VERSION,
+Wang source commit, batch size, truncation equivalence, dtype, device and the
+score-affecting library versions. The model and tokenizer are loaded with
+``revision=`` pinned to the recorded revision rather than moving Hugging Face
+main. On any mismatch the run aborts having performed zero inference and written
+zero cache rows. Unverifiable is treated as failed.
 
 The work has to be interleaved rather than precomputed: retrieval is adaptive,
 so which document comes next depends on the scores of the documents already
@@ -50,11 +64,22 @@ from src.cache_completion import (  # noqa: E402
     INCOMPLETE_PRIMARY_PLACEMENTS,
     PRIMARY_CONFIGURATION,
     WANG_BATCH_SIZE,
+    UnsafeCacheTarget,
     build_counting_scorer,
     completion_report,
     parse_placement,
     placement_label,
+    prepare_derived_cache,
     verification_summary,
+    verify_source_unchanged,
+)
+from src.provenance_guard import (  # noqa: E402
+    OFFICIAL_NLI_MODEL,
+    check_runtime_preconditions,
+    check_static_preconditions,
+    extract_reference,
+    format_guard,
+    guard_report,
 )
 from src.cached_document_scores import (  # noqa: E402
     CachedDocumentScorer,
@@ -63,8 +88,11 @@ from src.cached_document_scores import (  # noqa: E402
 from src.nbc_sensitivity import combination_histograms  # noqa: E402
 from src.reproduction_gate import PUBLISHED_TABLE1  # noqa: E402
 
-OFFICIAL_MODEL = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
-DEFAULT_CACHE = "results/wang_nli_cache_fidelity_v2_batch1.sqlite"
+OFFICIAL_MODEL = OFFICIAL_NLI_MODEL
+DEFAULT_SOURCE_CACHE = "results/wang_nli_cache_fidelity_v2_batch1.sqlite"
+DEFAULT_DERIVED_CACHE = (
+    "results/wang_nli_cache_fidelity_v2_batch1_nbc_complete.sqlite"
+)
 DEFAULT_OUTPUT = "results/diagnostics/nbc_cache_completion.json"
 
 
@@ -78,11 +106,54 @@ def parse_args():
     parser.add_argument("--data-root", default="data/wang")
     parser.add_argument("--model-name", default=OFFICIAL_MODEL)
     parser.add_argument(
-        "--cache-path",
-        default=DEFAULT_CACHE,
+        "--source-cache",
+        default=DEFAULT_SOURCE_CACHE,
         help=(
-            "The corrected Wang-fidelity v2 cache to extend IN PLACE. Must be "
-            "the same cache the sensitivity analysis replays."
+            "The corrected Wang-fidelity v2 cache. Treated as an immutable "
+            "completed Gate 1 artifact: read and hashed, never written to."
+        ),
+    )
+    parser.add_argument(
+        "--output-cache",
+        default=DEFAULT_DERIVED_CACHE,
+        help=(
+            "The derived cache to create and extend. The sensitivity rerun must "
+            "use this file, not the source."
+        ),
+    )
+    parser.add_argument(
+        "--reference-provenance",
+        required=True,
+        metavar="PATH",
+        help=(
+            "Recorded provenance from the formal batch-1 run (the Gate 1 "
+            "reproduction report, the Step 2 scoring-path report, or a previous "
+            "completion report). The guard compares this environment against it "
+            "and pins from_pretrained(revision=...) to the revision it records."
+        ),
+    )
+    parser.add_argument(
+        "--overwrite-output",
+        action="store_true",
+        help="Replace an existing derived cache instead of refusing.",
+    )
+    parser.add_argument(
+        "--unsafe-allow-in-place",
+        action="store_true",
+        help=(
+            "DEBUG ONLY. Permit source == destination, modifying the source "
+            "cache. Never used by the documented formal command."
+        ),
+    )
+    parser.add_argument(
+        "--unsafe-allow-local-checkpoint",
+        action="store_true",
+        help=(
+            "DEBUG ONLY. Downgrade the checkpoint-identity checks (model name "
+            "and revision) to advisory, for exercising the tool against a local "
+            "checkpoint. Score version, batch size, Wang commit, truncation, "
+            "dtype, device and library versions still gate. Never used by the "
+            "documented formal command."
         ),
     )
     parser.add_argument(
@@ -177,25 +248,48 @@ def verify_placement(records, cache_path, model_name, score_version, split_text,
     return entry
 
 
+def load_reference(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def wang_source_commit(data_root):
+    """The released-artifact commit recorded beside the local Wang data."""
+    source = Path(data_root) / "SOURCE.json"
+    if not source.exists():
+        return None
+    try:
+        with source.open("r", encoding="utf-8") as handle:
+            return json.load(handle).get("source_commit")
+    except Exception:  # noqa: BLE001 - unreadable is as disqualifying as absent
+        return None
+
+
 def main():
     args = parse_args()
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     placements = resolve_placements(args)
-    cache_path = Path(args.cache_path)
+    source_cache = Path(args.source_cache)
+    derived_cache = Path(args.output_cache)
 
     print("=" * 100)
     print("NBC SENSITIVITY CACHE COMPLETION")
     print("=" * 100)
     print(f"  configuration completed: {PRIMARY_CONFIGURATION} only")
     print(f"  batch size:              {WANG_BATCH_SIZE} (released Wang semantics)")
-    print(f"  cache (extended in place): {cache_path}")
+    print(f"  source cache (immutable): {source_cache}")
+    print(f"  derived cache (written):  {derived_cache}")
+    print(f"  reference provenance:     {args.reference_provenance}")
     print(f"  placements: {', '.join(placement_label(*p) for p in placements)}")
     print("  cached spans are reused; only genuinely missing spans are evaluated")
+    if args.unsafe_allow_in_place:
+        print("  *** --unsafe-allow-in-place: the SOURCE cache may be modified ***")
+    if args.unsafe_allow_local_checkpoint:
+        print("  *** --unsafe-allow-unpinned-revision: revision checks are advisory ***")
 
-    if not cache_path.exists():
-        print(f"\nERROR: cache not found at {cache_path}")
-        print("Point --cache-path at the corrected Wang-fidelity v2 cache.")
+    if not source_cache.exists():
+        print(f"\nERROR: source cache not found at {source_cache}")
         return 1
 
     if args.dry_run:
@@ -203,36 +297,97 @@ def main():
         print("=" * 100)
         return 0
 
-    import torch
+    # ---------------------------------------------------------------- guard
+    # Everything below runs BEFORE the derived cache is created and BEFORE any
+    # inference. An abort here leaves zero rows written and no derived cache.
+    reference = extract_reference(load_reference(args.reference_provenance))
+
+    from src.utils import SCORE_VERSION, split_text
+    from src.wang_data import load_sentence_records
+
+    static_checks = check_static_preconditions(
+        reference,
+        score_version=SCORE_VERSION,
+        batch_size=WANG_BATCH_SIZE,
+        wang_source_commit=wang_source_commit(args.data_root),
+        model_name=args.model_name,
+        allow_local_checkpoint=args.unsafe_allow_local_checkpoint,
+    )
+    static = guard_report(static_checks, reference_path=args.reference_provenance)
+    if not static["passed"]:
+        print()
+        print(format_guard(static))
+        _write_aborted(output_path, args, placements, static, stage="static")
+        return 1
+
+    revision = reference.get("resolved_revision")
+    print(f"\n  pinning checkpoint revision: {revision!r}")
+
+    import torch  # noqa: F401  (imported for the device probe below)
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
     from src.diagnostic_probe import collect_live_environment
-    from src.utils import SCORE_VERSION, split_text
-    from src.wang_data import load_sentence_records
+
+    load_kwargs = {"revision": revision} if revision else {}
+    print(f"Loading {args.model_name} ...")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, **load_kwargs)
+    model = AutoModelForSequenceClassification.from_pretrained(
+        args.model_name, **load_kwargs
+    )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    model.eval()
+
+    observed = collect_live_environment(
+        model_name=args.model_name, model=model, tokenizer=tokenizer,
+        repo_root=PROJECT_ROOT, score_version=SCORE_VERSION,
+    )
+    runtime_checks = check_runtime_preconditions(
+        reference,
+        observed,
+        allow_local_checkpoint=args.unsafe_allow_local_checkpoint,
+    )
+    guard = guard_report(
+        static_checks + runtime_checks, reference_path=args.reference_provenance
+    )
+    print()
+    print(format_guard(guard))
+    if not guard["passed"]:
+        _write_aborted(output_path, args, placements, guard, stage="runtime",
+                       environment=observed)
+        return 1
+
+    # ------------------------------------------------------- derived cache
+    try:
+        identity = prepare_derived_cache(
+            source_cache,
+            derived_cache,
+            allow_in_place=args.unsafe_allow_in_place,
+            overwrite=args.overwrite_output,
+        )
+    except (UnsafeCacheTarget, FileNotFoundError) as exc:
+        print(f"\nERROR: {exc}")
+        print("Zero inference performed, zero cache rows written.")
+        return 1
+
+    print()
+    print(f"  source sha256 before: {identity['source_sha256_before']}")
+    print(f"  source rows:          {identity['source_rows']}")
+    if identity["copied"]:
+        print(f"  derived cache created: {identity['destination_cache']}")
+        print(f"  copy faithful:         {identity['copy_faithful']}")
+    if identity.get("warning"):
+        print(f"  *** {identity['warning']} ***")
 
     records = load_sentence_records(args.data_root, strict=True)
     print(f"  sentences: {len(records)}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\nLoading {args.model_name} on {device}...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    model = AutoModelForSequenceClassification.from_pretrained(args.model_name).to(device)
-    model.eval()
-
-    environment = collect_live_environment(
-        model_name=args.model_name, model=model, tokenizer=tokenizer,
-        repo_root=PROJECT_ROOT, score_version=SCORE_VERSION,
-    )
-    model_block = environment.get("model") or {}
-    if model_block.get("training_mode"):
-        raise RuntimeError("model.eval() did not take effect; refusing to score")
-
     scorer = build_counting_scorer(
-        tokenizer, model, args.model_name, str(cache_path), batch_size=WANG_BATCH_SIZE
+        tokenizer, model, args.model_name, str(derived_cache),
+        batch_size=WANG_BATCH_SIZE,
     )
     rows_before = scorer.cache_size()
-    print(f"  score_version: {SCORE_VERSION}")
-    print(f"  cache rows before: {rows_before}")
+    print(f"  derived cache rows before: {rows_before}")
 
     per_placement = []
     try:
@@ -249,23 +404,37 @@ def main():
     finally:
         scorer.close()
 
-    print(f"\n  cache rows after: {rows_after}")
+    print(f"\n  derived cache rows after: {rows_after}")
 
-    print("\nVerifying each placement now completes from the cache alone...")
+    source_check = verify_source_unchanged(
+        source_cache, identity["source_sha256_before"]
+    )
+    print(f"  source cache unchanged: {source_check['unchanged']}")
+    if not source_check["unchanged"]:
+        print(f"  *** {source_check['message']} ***")
+
+    print("\nVerifying each placement now completes from the derived cache alone...")
     verification = [
         verify_placement(
-            records, str(cache_path), args.model_name, SCORE_VERSION, split_text,
+            records, str(derived_cache), args.model_name, SCORE_VERSION, split_text,
             positive_bin, negative_bin,
         )
         for positive_bin, negative_bin in placements
     ]
 
+    identity["destination_sha256_after_completion"] = None
+    identity["destination_rows_after_completion"] = rows_after
+    from src.cache_completion import sha256_file
+
+    identity["destination_sha256_after_completion"] = sha256_file(derived_cache)
+
     report = completion_report(
-        placements, rows_before, rows_after, per_placement, verification
+        placements, rows_before, rows_after, per_placement, verification,
+        cache_identity=identity, source_check=source_check, guard=guard,
     )
-    report["environment"] = environment
+    report["environment"] = observed
     report["score_version"] = SCORE_VERSION
-    report["cache_path"] = str(cache_path)
+    report["pinned_revision"] = revision
     report["dataset"] = {
         "sentences": len(records),
         "subclaims": sum(len(r.subclaims) for r in records),
@@ -280,16 +449,29 @@ def main():
     print(f"  previously missing span scores:   {report['previously_missing_span_scores']}")
     print(f"  new NLI evaluations performed:    {report['new_nli_evaluations_performed']}")
     print(f"  spans served from existing cache: {report['spans_served_from_existing_cache']}")
-    print(f"  cache rows before:                {report['cache_rows_before']}")
-    print(f"  cache rows after:                 {report['cache_rows_after']}")
-    print(f"  cache rows added:                 {report['cache_rows_added']}")
+    print(f"  derived cache rows before:        {report['cache_rows_before']}")
+    print(f"  derived cache rows after:         {report['cache_rows_after']}")
+    print(f"  derived cache rows added:         {report['cache_rows_added']}")
     print(f"  accounting consistent:            {report['accounting_consistent']}")
     if not report["accounting_consistent"]:
         print(f"  *** {report['accounting_note']} ***")
 
     print()
     print("-" * 100)
-    print("PLACEMENT COMPLETENESS (read-only cache replay)")
+    print("CACHE IDENTITY")
+    print("-" * 100)
+    print(f"  source cache:      {identity['source_cache']}")
+    print(f"  source sha256:     {identity['source_sha256_before']}")
+    print(f"  source rows:       {identity['source_rows']}")
+    print(f"  destination cache: {identity['destination_cache']}")
+    print(f"  destination sha256 after completion: "
+          f"{identity['destination_sha256_after_completion']}")
+    print(f"  destination rows after completion:   {rows_after}")
+    print(f"  source unchanged:  {source_check['unchanged']}")
+
+    print()
+    print("-" * 100)
+    print("PLACEMENT COMPLETENESS (read-only replay of the derived cache)")
     print("-" * 100)
     for line in verification_summary(verification):
         print(line)
@@ -302,9 +484,40 @@ def main():
     print(f"Written to {output_path}")
     print(f"  {report['scope_note']}")
     print("=" * 100)
-    return 0 if report["all_requested_placements_complete"] and report[
-        "accounting_consistent"
-    ] else 1
+    return 0 if report["run_sound"] else 1
+
+
+def _write_aborted(output_path, args, placements, guard, stage, environment=None):
+    """Record an aborted run: zero inference, zero rows, no derived cache."""
+    report = {
+        "analysis": "nbc-cache-completion",
+        "aborted": True,
+        "abort_stage": stage,
+        "abort_reason": "provenance guard failed",
+        "provenance_guard": guard,
+        "placements_requested": [list(p) for p in placements],
+        "source_cache": args.source_cache,
+        "destination_cache": args.output_cache,
+        "derived_cache_created": False,
+        "new_nli_evaluations_performed": 0,
+        "cache_rows_added": 0,
+        "environment": environment,
+        "scope_note": (
+            "Aborted before any inference and before the derived cache was "
+            "created. Zero cache rows were written and the source cache was "
+            "not touched."
+        ),
+    }
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, default=str)
+    print()
+    print("ABORTED: provenance guard failed.")
+    for message in guard["failure_messages"]:
+        print(f"  - {message}")
+    print("  Zero inference performed. Zero cache rows written. "
+          "No derived cache created.")
+    print(f"\nWritten to {output_path}")
+    print("=" * 100)
 
 
 if __name__ == "__main__":
