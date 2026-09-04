@@ -442,14 +442,78 @@ matched -- yet disagreed on exactly one BSE decision:
 which moved the positive Laplace-smoothed histogram from
 `[1, 78, 19, 13, 6, 5, 28, 57, 1, 1]` to `[1, 77, 20, 13, 6, 5, 28, 57, 1, 1]`.
 
-Tokenization is excluded, and so are `token_type_ids` -- they are emitted with
-values 0 and 1, but `type_vocab_size` is 0, so no token-type embedding exists to
-consume them. Two candidate differences remain between Wang's released
-`model(inputs["input_ids"])` and our `model(**inputs)`:
-`torch.inference_mode()`, and passing `attention_mask`.
+Tokenization is excluded. But the two scorers differ in **two** independent
+places, not one — and the second is the stronger candidate.
 
-Step 2 is a controlled factorial over exactly those two factors, on all 398
-released NBC pairs:
+#### The extraction/scaling path
+
+Released `utils.py:59-65` leaves the tensor and *then* scales; `src/utils.py:122-124`
+scales *inside* the tensor and then leaves it:
+
+```python
+# Wang
+probabilities = torch.softmax(output["logits"][0] / 5, -1).tolist()
+raw = float(probabilities[0]) * 100.0          # float64 multiply
+
+# repository
+probs = torch.softmax(outputs.logits / 5.0, dim=-1)
+scores = probs[:, entailment_index] * 100.0    # multiply in tensor dtype
+```
+
+For the probe pair the underlying probability is `0.199462890625`, which is
+exactly representable in float16. Then:
+
+| path | value | Step 1 record |
+| --- | --- | --- |
+| `float(p) * 100` | 19.9462890625 | A1 = 19.9462890625 |
+| `float16(p * 100)` | 19.953125 | A3 = 19.953125 |
+
+The gap is `0.0068359375` — **exactly** the recorded divergence. float16 spacing
+in [16, 32) is `0.015625`, and 19.9462890625 sits 0.5625 of a step above
+19.9375, so it rounds up. The same arithmetic in float32 does **not** reproduce
+it, so this mechanism requires the half-precision tensor the T4 run appears to
+have used.
+
+That makes extraction a candidate that must be tested **first**: a forward-only
+factorial holds extraction fixed at Wang's form for every arm, which would
+remove the very factor under suspicion.
+
+#### Primary: 2×2 over two independent factors
+
+| | `X0` Wang extraction | `X1` repository extraction |
+| --- | --- | --- |
+| **`F0`** literal Wang forward | `D00` — exact A1 reconstruction | `D01` — extraction changed only |
+| **`F1`** repository batch-1 forward | `D10` — forward changed only | `D11` — exact A3 reconstruction |
+
+Both extractions are pure functions of the logits, so **one forward pass per row
+serves both columns**: `D00`/`D01` share bit-identical logits, and so do
+`D10`/`D11`. The extraction comparison is exact by construction rather than by
+assumption.
+
+Four comparisons, each isolating one factor: `D00`↔`D01` and `D10`↔`D11`
+isolate extraction; `D00`↔`D10` and `D01`↔`D11` isolate the forward path.
+
+Two endpoints must be reconstructed before anything is attributed — `D00` must
+reproduce Step 1 A1 and `D11` must reproduce Step 1 A3 — otherwise the 2×2 does
+not span the observed divergence and the verdict is
+`UNDETERMINED_ENDPOINTS_NOT_RECONSTRUCTED`. Determinism controls re-run each
+forward row and gate everything.
+
+A **strong extraction result** is `D00 ≈ D10`, `D01 ≈ D11`, `D00 ≈ A1`,
+`D11 ≈ A3`, with `D00`→`D01` reproducing the pair-169 bucket flip and the
+recorded positive-histogram movement. The verdict then states that the
+extraction/scaling precision and order are sufficient to explain the Step 1
+discrepancy and that **no forward-path change is required**. Forward-path
+effects, if any, are reported separately and never conflated with the
+decision-level finding.
+
+#### Secondary: forward-path factorial
+
+The C0–C4 factorial below decomposes the forward call into its individual
+arguments. Every arm uses Wang extraction, so if the primary attributes the
+divergence to the extraction path, **no secondary arm can reconstruct A3** and
+the secondary chain will report that it did not. The report states that
+expectation explicitly so it is not misread as a failure.
 
 | Arm | Forward call | Toggles |
 | --- | --- | --- |
@@ -478,11 +542,12 @@ model call lives in its own function (`forward_once`) with `torch` injected, and
 `TestForwardControlFlow` asserts against a recording fake that the softmax never
 executes inside the context for any arm.
 
-Score extraction uses Wang's float64 form (`.tolist()` then `* 100`) for every
-arm alike, so extraction is not a variable here. The production scorer instead
-scales in float32 before widening; that is a separate, already-catalogued
-difference of order `1e-6`, which is why the reference checks below compare
-within a bound rather than demanding bit-equality.
+Score extraction is held fixed at Wang's form for every arm in this secondary
+factorial, so it cannot see an extraction effect — that is what the primary 2×2
+above is for. The reference checks below compare within a bound to absorb
+kernel- and library-level perturbation, **not** to absorb the extraction
+difference, which is a separate factor capable of moving a score by 0.0068 on a
+half-precision tensor.
 
 `C4` is the **repository-side bridge**: the only arm carrying `attention_mask`,
 `inference_mode` and `token_type_ids` together, so the only one that
@@ -602,8 +667,14 @@ required links of the causal chain are complete. Otherwise the verdict is
 | both factors move the score independently | both contribute, neither dominant |
 | nothing substantial anywhere | forward-path isolation inconclusive; another difference remains |
 
-Cost: 398 pairs x 6 arms = 2,388 forward calls at batch size 1. `--dry-run`
-loads and counts the pairs without loading the model.
+Cost: the primary 2×2 needs 4 × 398 = 1,592 forward calls (one per row plus a
+determinism repeat of each), and the secondary factorial 6 × 398 = 2,388, for
+3,980 total at batch size 1. `--dry-run` loads and counts the pairs without
+loading the model; `--skip-secondary` runs the primary alone.
+
+`model_dtype` is recorded in `environment_summary` and is the decisive field for
+the extraction hypothesis: the half-precision mechanism only operates if the
+probability tensor is float16.
 
 ### Running the formal follow-up on Colab
 

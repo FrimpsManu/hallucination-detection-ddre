@@ -1,35 +1,69 @@
-"""Gate 1 diagnostic, Step 2: which forward-path argument explains A1 vs A3?
+"""Gate 1 diagnostic, Step 2: what explains the Step 1 A1 vs A3 divergence?
 
 Step 1 established that the literal Wang scorer and this repository's scorer
 tokenize identically (589/589 input_ids matched) yet disagreed on exactly one
 BSE decision: positive NBC pair 169, bucket 1 under the literal path and bucket
-2 under ours. ``token_type_ids`` are excluded as a cause because
-``type_vocab_size`` is 0. Two candidate differences remain:
-``torch.inference_mode()`` and passing ``attention_mask``.
+2 under ours.
 
-This script runs a controlled factorial over exactly those two factors:
+The two scorers differ in TWO independent places, not one. Besides the forward
+call, they differ in how logits become a 0-100 score. Released
+``utils.py:59-65`` leaves the tensor and then scales::
+
+    probabilities = torch.softmax(output["logits"][0] / 5, -1).tolist()
+    raw = float(probabilities[0]) * 100.0          # float64 multiply
+
+while ``src/utils.py:122-124`` scales inside the tensor and then leaves it::
+
+    probs = torch.softmax(outputs.logits / 5.0, dim=-1)
+    scores = probs[:, entailment_index] * 100.0    # multiply in tensor dtype
+
+On a half-precision tensor that difference alone reproduces the observation
+exactly: for the probe pair's probability 0.199462890625, ``float(p) * 100`` is
+19.9462890625 and ``float16(p * 100)`` is 19.953125 -- the two recorded values,
+differing by exactly 0.0068359375. So the extraction path must be tested, and it
+must be tested FIRST, because a forward-only factorial holds extraction fixed at
+Wang's form for every arm and would remove the very factor under suspicion.
+
+PRIMARY -- 2x2 over two independent factors
+-------------------------------------------
+
+    F0 = model(input_ids)                          literal Wang forward
+    F1 = inference_mode: model(input_ids,          repository batch-1 forward
+         attention_mask=..., token_type_ids=...)
+
+    X0 = float(softmax(logits[0]/5,-1).tolist()[0]) * 100    Wang extraction
+    X1 = float((softmax(logits/5.,-1)[:,0] * 100).tolist()[0]) repository
+
+    D00 = F0+X0  exact A1 reconstruction    D01 = F0+X1  extraction changed only
+    D10 = F1+X0  forward changed only       D11 = F1+X1  exact A3 reconstruction
+
+Both extractions are pure functions of the logits, so one forward pass per row
+serves both columns: D00/D01 share bit-identical logits, and so do D10/D11. The
+extraction comparison is therefore exact by construction.
+
+SECONDARY -- forward-path factorial
+-----------------------------------
 
     C0  model(input_ids)                                     reference
     C1  inference_mode: model(input_ids)                     +inference_mode
     C2  model(input_ids, attention_mask=...)                 +attention_mask
     C3  inference_mode: model(input_ids, attention_mask=...) both
-    C4  inference_mode: + token_type_ids                     confirmation only
+    C4  inference_mode: + token_type_ids                     repository bridge
     C0R C0 again, last                                       determinism control
 
-Controls that make the result attributable:
+This decomposes the forward path into its individual arguments. Every arm uses
+Wang extraction, so if the primary attributes the divergence to the extraction
+path, no secondary arm can reconstruct A3 and the secondary chain will say so.
+The report states that expectation explicitly rather than leaving it to be
+misread as a failure.
+
+Controls that make either result attributable:
 
 * the tokenizer and model are loaded once;
-* every pair is tokenized ONCE and the identical tensors are reused by every
-  arm, so tokenization cannot vary;
-* the score extraction is byte-identical across arms, so only the forward call
-  differs;
-* batch size is exactly 1 everywhere, so padding is never involved;
-* C0R re-runs C0 unchanged. If C0 and C0R differ, the device is
-  nondeterministic and no attribution in the report is sound.
-
-C4 is confirmation only: ``type_vocab_size`` is 0, so no token-type embedding
-exists and the argument is expected to be inert. It is included to demonstrate
-that, not to test a live hypothesis.
+* every pair is tokenized ONCE and the identical tensors are reused everywhere;
+* batch size is exactly 1 throughout, so padding is never involved;
+* determinism controls re-run a cell unchanged. If a cell does not reproduce
+  itself, the device is nondeterministic and attribution is withheld.
 
 Reads no cache and writes no cache. Touches no formal artifact. Changes no
 baseline behaviour, tolerance, published reference value, split, or cost
@@ -46,6 +80,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.extraction_path_diagnostics import (  # noqa: E402
+    CELL_COMPARISONS,
+    CELL_SPECS,
+    EXTRACTION_SPECS,
+    FORWARD_SPECS,
+    build_primary_verdict,
+    compare_cells,
+    probe_cell_report,
+    score_pair_both_extractions,
+    secondary_expectation,
+)
 from src.forward_path_diagnostics import (  # noqa: E402
     ARM_SPECS,
     DETERMINISM_CONTROL,
@@ -78,8 +123,9 @@ COMPARISON_PAIRS = (
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Gate 1 Step 2: factorial isolation of torch.inference_mode() and "
-            "attention_mask over all 398 released NBC pairs."
+            "Gate 1 Step 2: decompose the Step 1 A1/A3 divergence into a "
+            "forward-path factor and an extraction/scaling factor over all 398 "
+            "released NBC pairs, then decompose the forward path further."
         )
     )
     parser.add_argument("--data-root", default="data/wang")
@@ -108,6 +154,14 @@ def parse_args():
         "--hash-weights",
         action="store_true",
         help="Also hash large checkpoint files when recording checkpoint identity.",
+    )
+    parser.add_argument(
+        "--skip-secondary",
+        action="store_true",
+        help=(
+            "Run only the primary 2x2 decomposition and skip the C0-C4 "
+            "forward-path factorial."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -168,6 +222,267 @@ def score_forward_arm(model, encodings, spec, torch, show_progress=True):
     return scores, elapsed
 
 
+PURPOSE = (
+    "Determine whether the Step 1 A1/A3 divergence is explained by the forward "
+    "call or by the extraction/scaling path, then decompose the forward path "
+    "into its individual arguments."
+)
+
+
+def build_protocol(pairs, n_positive, n_negative, model_block, token_type_ids_available):
+    return {
+        "nbc_pairs": len(pairs),
+        "positive_pairs": n_positive,
+        "negative_pairs": n_negative,
+        "batch_size": 1,
+        "entailment_index": ENTAILMENT_INDEX,
+        "softmax_temperature": SOFTMAX_TEMPERATURE,
+        "tokenized_once": True,
+        "tensors_shared_across_arms": True,
+        "one_forward_per_primary_row_serves_both_extractions": True,
+        "model_eval_mode": not model_block.get("training_mode", True),
+        "cache_reads": 0,
+        "cache_writes": 0,
+        "token_type_ids_available": token_type_ids_available,
+    }
+
+
+def environment_summary(args, environment, model_block):
+    return {
+        "python_version": (environment.get("python") or {}).get("version"),
+        "torch_version": (environment.get("libraries") or {}).get("torch"),
+        "transformers_version": (environment.get("libraries") or {}).get("transformers"),
+        "tokenizers_version": (environment.get("libraries") or {}).get("tokenizers"),
+        "device": (environment.get("device") or {}).get("selected_device"),
+        "gpu_name": (environment.get("device") or {}).get("gpu_name"),
+        "model_name": args.model_name,
+        # The decisive field for the extraction hypothesis: the half-precision
+        # mechanism only operates if the probability tensor is float16.
+        "model_dtype": model_block.get("dtype"),
+        "model_training_mode": model_block.get("training_mode"),
+        "attn_implementation": model_block.get("attn_implementation"),
+        "type_vocab_size": model_block.get("type_vocab_size"),
+        "resolved_hf_revision": (environment.get("checkpoint_identity") or {}).get(
+            "resolved_revision"
+        ),
+        "git_commit": (environment.get("git") or {}).get("commit"),
+    }
+
+
+def run_forward_row(model, encodings, forward_spec, torch, label):
+    """Score every pair once under one forward path, extracting both ways.
+
+    One forward pass produces both the X0 and X1 scores, so the two cells in
+    this row cannot differ in anything but the extraction.
+    """
+    from tqdm import tqdm
+
+    iterator = tqdm(encodings, desc=label, unit="pair")
+    x0, x1 = [], []
+    start = time.perf_counter()
+    for encoded in iterator:
+        scores = score_pair_both_extractions(model, encoded, forward_spec, torch)
+        x0.append(scores["X0"])
+        x1.append(scores["X1"])
+    return {"X0": x0, "X1": x1, "elapsed_seconds": time.perf_counter() - start}
+
+
+def run_primary_decomposition(model, encodings, polarities, torch, args):
+    """The 2x2, plus a determinism repeat of each forward row."""
+    rows = {}
+    for name in ("F0", "F1"):
+        spec = FORWARD_SPECS[name]
+        print(f"\nPrimary row {name} ({spec['label']}): {spec['call']}")
+        rows[name] = run_forward_row(model, encodings, spec, torch, f"row {name}")
+
+    repeats = {}
+    for name in ("F0", "F1"):
+        print(f"\nDeterminism control {name}R (re-running {name} unchanged)")
+        repeats[name] = run_forward_row(
+            model, encodings, FORWARD_SPECS[name], torch, f"row {name}R"
+        )
+
+    scores_by_cell = {
+        "D00": rows["F0"]["X0"],
+        "D01": rows["F0"]["X1"],
+        "D10": rows["F1"]["X0"],
+        "D11": rows["F1"]["X1"],
+    }
+
+    controls = {
+        "F0": compare_cells(
+            "D00", "D00", rows["F0"]["X0"], repeats["F0"]["X0"], polarities
+        ),
+        "F1": compare_cells(
+            "D10", "D10", rows["F1"]["X0"], repeats["F1"]["X0"], polarities
+        ),
+    }
+
+    matrix = {}
+    for left, right in CELL_COMPARISONS:
+        block = compare_cells(
+            left, right, scores_by_cell[left], scores_by_cell[right], polarities
+        )
+        matrix[block["comparison"]] = block
+
+    probe = probe_cell_report(
+        args.probe_polarity, args.probe_index, scores_by_cell, polarities
+    )
+    verdict = build_primary_verdict(
+        matrix, probe, scores_by_cell, polarities, controls=controls
+    )
+
+    return {
+        "decomposition": "2x2 forward path x extraction path",
+        "forward_levels": FORWARD_SPECS,
+        "extraction_levels": EXTRACTION_SPECS,
+        "cells": {
+            cell["name"]: dict(
+                cell,
+                elapsed_seconds=rows[cell["forward"]]["elapsed_seconds"],
+            )
+            for cell in CELL_SPECS
+        },
+        "histograms_by_cell": {
+            name: histograms_by_polarity(scores, polarities)
+            for name, scores in scores_by_cell.items()
+        },
+        "comparisons": matrix,
+        "determinism_controls": controls,
+        "probe": probe,
+        "verdict": verdict,
+    }
+
+
+def print_cell_comparison(block):
+    print()
+    print("-" * 100)
+    print(f"{block['comparison']}    isolates: {block['isolated_factor'] or 'nothing'}")
+    print("-" * 100)
+    print(f"  {format_deltas(block['deltas'])}")
+    print(f"  difference class:            {block['difference_class']}")
+    print(
+        f"  one-decimal disagreements:   "
+        f"{block['one_decimal_disagreements']['count']}/{block['pairs']}"
+    )
+    print(
+        f"  NBC bucket disagreements:    "
+        f"{block['nbc_bucket_disagreements']['count']}/{block['pairs']}"
+    )
+    for example in block["nbc_bucket_disagreements"]["examples"]:
+        print(
+            f"      pair {example['index']}: {example['left']!r} (bucket "
+            f"{example['left_bucket']}) -> {example['right']!r} (bucket "
+            f"{example['right_bucket']})"
+        )
+    print(f"  numerical_difference:        {block['numerical_difference']}")
+    print(f"  bse_decision_impact:         {block['bse_decision_impact']}")
+    print(f"  causal_candidate:            {block['causal_candidate']}")
+    print(f"  positive histogram (left):   {block['histograms']['left']['positive']}")
+    print(f"  positive histogram (right):  {block['histograms']['right']['positive']}")
+    print(f"  negative histogram (left):   {block['histograms']['left']['negative']}")
+    print(f"  negative histogram (right):  {block['histograms']['right']['negative']}")
+
+
+def print_primary(report):
+    verdict = report["verdict"]
+    reference = REFERENCE_OBSERVATION
+
+    print()
+    print("=" * 100)
+    print("PRIMARY DECOMPOSITION: forward path x extraction path")
+    print("=" * 100)
+    for name, block in report["determinism_controls"].items():
+        print(
+            f"  determinism control {name}: bit-identical = "
+            f"{block['numerical_difference'] == 'NO'}  "
+            f"(max |delta| {block['deltas']['max_absolute']})"
+        )
+
+    for block in report["comparisons"].values():
+        print_cell_comparison(block)
+
+    probe = report["probe"]
+    print()
+    print("-" * 100)
+    print(
+        f"PROBE: {probe['polarity']} NBC pair {probe['index']} "
+        f"(flat index {probe['flat_index']})"
+    )
+    print("-" * 100)
+    print(f"  {'cell':<10}{'raw':>24}{'rounded':>12}{'bucket':>10}")
+    print(
+        f"  {'Step1 A1':<10}{reference['literal_wang']['raw']:>24.10f}"
+        f"{reference['literal_wang']['rounded']:>12}"
+        f"{reference['literal_wang']['nbc_bucket']:>10}   (recorded)"
+    )
+    print(
+        f"  {'Step1 A3':<10}{reference['repository']['raw']:>24.10f}"
+        f"{reference['repository']['rounded']:>12}"
+        f"{reference['repository']['nbc_bucket']:>10}   (recorded)"
+    )
+    for name in sorted(probe["cells"]):
+        row = probe["cells"][name]
+        print(
+            f"  {name:<10}{row['raw']:>24.10f}{row['rounded_one_decimal']:>12}"
+            f"{row['nbc_bucket']:>10}"
+        )
+
+    print()
+    print("-" * 100)
+    print("LAPLACE-SMOOTHED NBC HISTOGRAMS BY CELL")
+    print("-" * 100)
+    print(f"  {'Step1 A1':<10} positive: {reference['positive_histogram_literal_wang']}")
+    print(f"  {'Step1 A3':<10} positive: {reference['positive_histogram_repository']}")
+    for name in sorted(report["histograms_by_cell"]):
+        print(f"  {name:<10} positive: {report['histograms_by_cell'][name]['positive']}")
+    for name in sorted(report["histograms_by_cell"]):
+        print(f"  {name:<10} negative: {report['histograms_by_cell'][name]['negative']}")
+
+    print()
+    print("-" * 100)
+    print("PRIMARY CAUSAL CHAIN")
+    print("-" * 100)
+    for link in verdict["causal_chain"]:
+        mark = "n/a " if link["passed"] is None else ("PASS" if link["passed"] else "FAIL")
+        tag = "required" if link["required"] else "informational"
+        print(f"  {mark}  link {link['link']} ({tag}): {link['requirement']}")
+    for label, check in verdict["endpoints"].items():
+        print(
+            f"    {label}: raw {check['raw']:.10f} vs {check['expected_raw']:.10f}  "
+            f"|delta| {check['raw_delta']:.3e} <= {check['bound']:.0e}: "
+            f"{check['raw_within_bound']}; rounded {check['rounded_matches']}; "
+            f"bucket {check['bucket_matches']}"
+        )
+    movement = verdict["histogram_movement"]
+    print(
+        f"    positive histogram movement reproduced: "
+        f"{movement['movement_reproduced']}"
+    )
+    print(f"    probe bucket flip reproduced: {verdict['probe_bucket_flip_reproduced']}")
+
+    print()
+    print("=" * 100)
+    print(f"PRIMARY VERDICT: {verdict['headline']}")
+    print("=" * 100)
+    print(f"  numerical_difference:  {verdict['numerical_difference']}")
+    print(f"  bse_decision_impact:   {verdict['bse_decision_impact']}")
+    print(f"  causal_candidate:      {verdict['causal_candidate']}")
+    print()
+    print(
+        f"  extraction path: moves raw score "
+        f"{verdict['extraction_path']['moves_raw_score']}, changes NBC bucket "
+        f"{verdict['extraction_path']['changes_nbc_bucket']}"
+    )
+    print(
+        f"  forward path:    moves raw score "
+        f"{verdict['forward_path']['moves_raw_score']}, changes NBC bucket "
+        f"{verdict['forward_path']['changes_nbc_bucket']}"
+    )
+    print()
+    print(f"  {verdict['reporting_note']}")
+
+
 def format_deltas(deltas):
     def show(value):
         return "n/a" if value is None else f"{value:.6e}"
@@ -216,16 +531,33 @@ def main():
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     print("=" * 100)
-    print("GATE 1 DIAGNOSTIC -- STEP 2: FORWARD-PATH FACTOR ISOLATION")
+    print("GATE 1 DIAGNOSTIC -- STEP 2: SCORING-PATH DECOMPOSITION")
     print("=" * 100)
 
     pairs, polarities, n_positive, n_negative = load_pairs(args.data_root)
     print(f"  NBC pairs: {len(pairs)} ({n_positive} positive, {n_negative} negative)")
 
     specs = [spec for spec in ARM_SPECS if not (args.skip_c4 and spec["name"] == "C4")]
-    print(f"  arms: {', '.join(spec['name'] for spec in specs)} + "
-          f"{DETERMINISM_CONTROL['name']} (determinism control)")
-    print(f"  forward calls: {len(pairs) * (len(specs) + 1)} at batch size 1")
+    primary_calls = len(pairs) * 4  # F0, F1 and one determinism repeat of each
+    secondary_calls = 0 if args.skip_secondary else len(pairs) * (len(specs) + 1)
+    print(
+        "  PRIMARY  2x2 forward path x extraction path: cells "
+        + ", ".join(cell["name"] for cell in CELL_SPECS)
+        + f" -> {primary_calls} forward calls"
+    )
+    print(
+        "           (one forward per row serves both extractions, plus a "
+        "determinism repeat of each row)"
+    )
+    if args.skip_secondary:
+        print("  SECONDARY forward-path factorial: skipped (--skip-secondary)")
+    else:
+        print(
+            "  SECONDARY forward-path factorial: arms "
+            + ", ".join(spec["name"] for spec in specs)
+            + f" + {DETERMINISM_CONTROL['name']} -> {secondary_calls} forward calls"
+        )
+    print(f"  total forward calls: {primary_calls + secondary_calls} at batch size 1")
 
     if args.dry_run:
         print("\n--dry-run: pairs loaded only. No model loaded, no scoring performed.")
@@ -259,7 +591,39 @@ def main():
     token_type_ids_available = "token_type_ids" in encodings[0]
     if not token_type_ids_available:
         specs = [spec for spec in specs if spec["name"] != "C4"]
-        print("  tokenizer emits no token_type_ids; the C4 confirmation arm is skipped")
+        print("  tokenizer emits no token_type_ids; the C4 arm is skipped")
+
+    # ---------------- PRIMARY ----------------
+    primary = run_primary_decomposition(model, encodings, polarities, torch, args)
+    print_primary(primary)
+    expectation = secondary_expectation(primary["verdict"])
+
+    if args.skip_secondary:
+        report = {
+            "step": "2-scoring-path-decomposition",
+            "purpose": PURPOSE,
+            "protocol": build_protocol(pairs, n_positive, n_negative, model_block,
+                                       token_type_ids_available),
+            "environment": environment,
+            "environment_summary": environment_summary(args, environment, model_block),
+            "reference_observation": REFERENCE_OBSERVATION,
+            "primary": primary,
+            "secondary": None,
+            "secondary_expectation": expectation,
+        }
+        with output_path.open("w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2, default=str)
+        print(f"\nSecondary factorial skipped (--skip-secondary).")
+        print(f"\nWritten to {output_path}")
+        print("This diagnostic reports only. No issue found here has been fixed.")
+        print("=" * 100)
+        return 0
+
+    print()
+    print("=" * 100)
+    print("SECONDARY DECOMPOSITION: forward-path factorial (C0-C4)")
+    print("=" * 100)
+    print(f"  {expectation}")
 
     scores_by_arm = {}
     timings = {}
@@ -300,60 +664,36 @@ def main():
     probe = probe_report(args.probe_polarity, args.probe_index, scores_by_arm, polarities)
     verdict = build_verdict(matrix, probe, control_block, c3_vs_c4=c4_block)
 
-    report = {
-        "step": "2-forward-path-isolation",
-        "purpose": (
-            "Isolate whether torch.inference_mode() or passing attention_mask "
-            "explains the single BSE decision-level disagreement Step 1 found "
-            "between the literal Wang scorer and this repository's scorer."
-        ),
-        "protocol": {
-            "nbc_pairs": len(pairs),
-            "positive_pairs": n_positive,
-            "negative_pairs": n_negative,
-            "batch_size": 1,
-            "entailment_index": ENTAILMENT_INDEX,
-            "softmax_temperature": SOFTMAX_TEMPERATURE,
-            "tokenized_once": True,
-            "tensors_shared_across_arms": True,
-            "score_extraction_identical_across_arms": True,
-            "model_eval_mode": not model_block.get("training_mode", True),
-            "cache_reads": 0,
-            "cache_writes": 0,
-            "token_type_ids_available": token_type_ids_available,
-        },
-        "environment": environment,
-        "environment_summary": {
-            "python_version": (environment.get("python") or {}).get("version"),
-            "torch_version": (environment.get("libraries") or {}).get("torch"),
-            "transformers_version": (environment.get("libraries") or {}).get("transformers"),
-            "tokenizers_version": (environment.get("libraries") or {}).get("tokenizers"),
-            "device": (environment.get("device") or {}).get("selected_device"),
-            "gpu_name": (environment.get("device") or {}).get("gpu_name"),
-            "model_name": args.model_name,
-            "model_dtype": model_block.get("dtype"),
-            "model_training_mode": model_block.get("training_mode"),
-            "attn_implementation": model_block.get("attn_implementation"),
-            "type_vocab_size": model_block.get("type_vocab_size"),
-            "resolved_hf_revision": (environment.get("checkpoint_identity") or {}).get(
-                "resolved_revision"
-            ),
-            "git_commit": (environment.get("git") or {}).get("commit"),
-        },
+    secondary = {
+        "decomposition": "forward-path factorial",
+        "expectation_given_primary": expectation,
         "arms": {
             spec["name"]: dict(spec, elapsed_seconds=timings.get(spec["name"]))
             for spec in list(specs) + [DETERMINISM_CONTROL]
         },
-        "reference_observation": REFERENCE_OBSERVATION,
-        "histograms_by_arm": {
+        "nbc_laplace_histograms_by_arm": {
             name: histograms_by_polarity(scores, polarities)
             for name, scores in scores_by_arm.items()
         },
         "comparisons": matrix,
         "determinism_control": control_block,
-        "c4_confirmation": c4_block,
+        "c3_vs_c4": c4_block,
         "probe": probe,
         "verdict": verdict,
+    }
+
+    report = {
+        "step": "2-scoring-path-decomposition",
+        "purpose": PURPOSE,
+        "protocol": build_protocol(
+            pairs, n_positive, n_negative, model_block, token_type_ids_available
+        ),
+        "environment": environment,
+        "environment_summary": environment_summary(args, environment, model_block),
+        "reference_observation": REFERENCE_OBSERVATION,
+        "primary": primary,
+        "secondary": secondary,
+        "secondary_expectation": expectation,
     }
 
     with output_path.open("w", encoding="utf-8") as handle:
@@ -461,7 +801,7 @@ def main():
 
     print()
     print("=" * 100)
-    print(f"VERDICT: {verdict['headline']}")
+    print(f"SECONDARY VERDICT: {verdict['headline']}")
     print("=" * 100)
     print(f"  numerical_difference:  {verdict['numerical_difference']}")
     print(f"  bse_decision_impact:   {verdict['bse_decision_impact']}")

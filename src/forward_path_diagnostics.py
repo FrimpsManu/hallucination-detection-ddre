@@ -7,10 +7,20 @@ in bucket 1 under the literal path and bucket 2 under ours, moving the positive
 Laplace-smoothed histogram from ``[1, 78, 19, 13, 6, 5, 28, 57, 1, 1]`` to
 ``[1, 77, 20, 13, 6, 5, 28, 57, 1, 1]``.
 
-Tokenization is therefore excluded, and ``token_type_ids`` are excluded too
-(they are emitted with values 0 and 1, but ``type_vocab_size`` is 0, so no
-token-type embedding exists to consume them). Two candidate differences remain
-between Wang's released call and ours:
+Tokenization is therefore excluded. ``token_type_ids`` are *predicted* inert
+because ``type_vocab_size`` is 0, but that prediction is measured rather than
+assumed: C4 carries the argument and the C3-vs-C4 check is a required link.
+
+This module covers the SECONDARY decomposition, which splits the forward call
+into its individual arguments. It is secondary because the two scorers also
+differ in their extraction/scaling path, and on a half-precision tensor that
+difference alone reproduces the Step 1 observation exactly -- see
+``src/extraction_path_diagnostics``, which must be run first. Every arm here
+holds extraction fixed at Wang's form, so this module cannot see an
+extraction-path effect at all.
+
+Within the forward call, two candidate differences remain between Wang's
+released call and ours:
 
 1. ``torch.inference_mode()``, which this repository wraps the forward pass in
    and the released ``utils.py:57`` does not; and
@@ -291,10 +301,12 @@ def score_one_pair(model, encoded, spec, torch_module):
     runs OUTSIDE any inference-mode context. The extraction is Wang's released
     ``utils.py:59-65`` float64 form (``.tolist()`` then ``* 100``) for all arms
     alike, so score extraction is not a variable in this experiment. Note that
-    the production scorer instead scales in float32 before widening; that is a
-    separate, already-catalogued difference of order 1e-6, not under test here,
-    and it is why the reference-reproduction checks compare within a bound
-    rather than demanding bit-equality.
+    the production scorer instead scales by 100 while still inside the tensor.
+    That is a SEPARATE FACTOR, not a rounding curiosity: on a half-precision
+    tensor it reproduces the whole Step 1 divergence on its own (0.199462890625
+    gives 19.9462890625 one way and 19.953125 the other). It is deliberately
+    held fixed here so the forward arguments can be isolated, and it is tested
+    by the primary decomposition in ``src/extraction_path_diagnostics``.
     """
     kwargs = build_forward_kwargs(encoded, spec)
     output = forward_once(
@@ -545,9 +557,11 @@ def score_matches_reference(raw, expected, bound=NEGLIGIBLE_MAX_ABS_DELTA):
     two scores several buckets' worth of noise apart can share a bucket by luck.
     The raw score must also land within ``bound`` of the recorded value.
 
-    The comparison is bounded rather than exact because the production scorer
-    scales to 0-100 in float32 while this diagnostic uses Wang's float64 form
-    for every arm. That difference is of order 1e-6, far inside the bound.
+    The comparison is bounded rather than exact to absorb kernel-level and
+    library-level perturbation, which sits far below the bound. It is NOT bounded
+    to absorb the extraction/scaling difference: that is a separate factor,
+    capable of moving a score by 0.0068 on a half-precision tensor, and it is
+    measured by the primary decomposition rather than tolerated here.
     """
     report = score_report(raw)
     raw_delta = abs(float(raw) - float(expected["raw"]))
