@@ -424,6 +424,101 @@ The verdict follows predeclared rules:
 `--dry-run` builds and writes the sample and reports its size without loading
 the model, so the sample can be checked before spending GPU time.
 
+### Step 2: which forward-path argument explains the Step 1 divergence
+
+```bash
+python scripts/diagnose_forward_path.py
+```
+
+Step 1 narrowed the question to a single observation. The literal Wang scorer
+and this repository's scorer tokenized identically -- 589/589 `input_ids`
+matched -- yet disagreed on exactly one BSE decision:
+
+| | raw | rounded | NBC bucket |
+| --- | --- | --- | --- |
+| literal Wang (A1) | 19.9462890625 | 19.9 | 1 |
+| repository (A3) | 19.953125 | 20.0 | 2 |
+
+which moved the positive Laplace-smoothed histogram from
+`[1, 78, 19, 13, 6, 5, 28, 57, 1, 1]` to `[1, 77, 20, 13, 6, 5, 28, 57, 1, 1]`.
+
+Tokenization is excluded, and so are `token_type_ids` -- they are emitted with
+values 0 and 1, but `type_vocab_size` is 0, so no token-type embedding exists to
+consume them. Two candidate differences remain between Wang's released
+`model(inputs["input_ids"])` and our `model(**inputs)`:
+`torch.inference_mode()`, and passing `attention_mask`.
+
+Step 2 is a controlled factorial over exactly those two factors, on all 398
+released NBC pairs:
+
+| Arm | Forward call | Toggles |
+| --- | --- | --- |
+| `C0` | `model(input_ids)` | reference (literal Wang) |
+| `C1` | `with torch.inference_mode(): model(input_ids)` | inference_mode |
+| `C2` | `model(input_ids, attention_mask=...)` | attention_mask |
+| `C3` | `with torch.inference_mode(): model(input_ids, attention_mask=...)` | both |
+| `C4` | `... + token_type_ids=...` | **confirmation only** |
+| `C0R` | `model(input_ids)`, run last | **determinism control** |
+
+`C4` is confirmation only: `type_vocab_size` is 0, so the argument is expected
+to be inert, and the arm exists to demonstrate that rather than to test a live
+hypothesis.
+
+**`C0R` is what makes any of this attributable.** It re-runs `C0` unchanged at
+the end. If `C0` and `C0R` are not bit-identical, the forward pass is
+nondeterministic on that device and every factor attribution in the report is
+unfounded -- so the report says exactly that and withholds a verdict.
+
+Four controls keep the forward call the only variable: the tokenizer and model
+are loaded once; every pair is tokenized **once** and the identical tensors are
+reused by every arm; the score extraction is byte-identical across arms; and
+the batch size is exactly 1 everywhere, so padding is never involved.
+
+Comparisons are computed pairwise, and each is labelled with the factor that
+genuinely differs between its two arms rather than with the right-hand arm's
+description. This matters: `C1` vs `C3` toggles `attention_mask` alone (both
+already run under inference_mode) and `C2` vs `C3` toggles
+`torch.inference_mode()` alone (both already pass a mask). Those two are what
+separate a dominant factor from an interaction.
+
+#### Reporting discipline
+
+A single word like "MATERIAL" conflates two different findings, so this
+diagnostic never emits one. Every comparison reports three separate fields:
+
+- **`numerical_difference`** -- YES when the raw scores are not bit-identical.
+  A statement about floating point and nothing else.
+- **`bse_decision_impact`** -- YES only when at least one NBC bucket changes.
+  The Bayesian update consumes the bucket, so this is the only field that
+  licenses a claim about baseline behaviour. **A raw floating-point score change
+  alone is NOT evidence that BSE behaviour changed**, and a comparison can
+  legitimately be `numerical_difference: YES, bse_decision_impact: NO`.
+- **`causal_candidate`** -- which factor the comparison toggles, and whether it
+  showed an effect.
+
+The verdict adds `explains_reference_observation`, because the goal is not to
+find *a* difference but to find the one that produced the Step 1 result. The
+report prints the raw, rounded and bucketed value of positive pair 169 for every
+arm, beside the two recorded Step 1 values, so that comparison is direct.
+
+The negligible bound is `1e-4` on a 0-100 score. It is anchored to the effect
+being explained: the Step 1 divergence was `0.0068359375`, about 68x the bound.
+A threshold used for attribution has to sit well under the effect it attributes,
+or it would classify the very difference under investigation as noise.
+
+#### Interpretation
+
+| Observation | Conclusion |
+| --- | --- |
+| C0 ~ C1 and C2 ~ C3, C0 vs C2 substantial | `attention_mask` is the primary candidate |
+| C0 ~ C2 and C1 ~ C3, C0 vs C1 substantial | `torch.inference_mode()` is the primary candidate |
+| C0 ~ C1 and C0 ~ C2, but C0 vs C3 substantial | interaction between the two |
+| both factors move the score independently | both contribute, neither dominant |
+| nothing substantial anywhere | forward-path isolation inconclusive; another difference remains |
+
+Cost: 398 pairs x 6 arms = 2,388 forward calls at batch size 1. `--dry-run`
+loads and counts the pairs without loading the model.
+
 ### Running the formal follow-up on Colab
 
 The completed Gate 1 artifacts live on Google Drive. Neither script hardcodes a
@@ -449,9 +544,18 @@ Step 1 writes both `sample.json` and `step1_scorer_ab.json` into that directory.
 Run it from a checkout whose `--data-root` points at the prepared Wang data;
 pass `--data-root` explicitly if that is also on Drive.
 
+Step 2 takes an explicit output file:
+
+```bash
+python scripts/diagnose_forward_path.py \
+  --output /content/drive/MyDrive/ddre-gate1/diagnostics/step2_forward_path.json
+```
+
 The formal cache at `/content/drive/MyDrive/ddre-gate1/wang_nli_cache.sqlite` is
-**never opened or modified** by either script, wherever the output goes. There
-is no flag that would make them read it: both repository arms are hardcoded to
+**never opened or modified** by any of these scripts, wherever the output goes.
+Step 2 does not construct an `EntailmentScorer` at all -- it calls the model
+directly -- so it has no cache code path whatsoever. In Step 1 there is no flag
+that would make it read the cache: both repository arms are hardcoded to
 `use_cache=False, write_cache=False`, and their scratch database is created in a
 local `TemporaryDirectory` that is deleted on exit. Reading that cache would
 measure the cache instead of the model, and writing to it would contaminate the
