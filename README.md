@@ -481,6 +481,57 @@ main: it makes this completion internally consistent and reproducible. It is not
 proof of identity, and the run reports `checkpoint_identity_established: false`
 with the reasons rather than implying otherwise.
 
+#### The 398-pair score-compatibility probe
+
+`checkpoint_identity_established: false` would be enough to stop here, since the
+next unchanged sensitivity run could otherwise publish
+`MISSING_EXAMPLES_CANNOT_EXPLAIN_THE_GAP` on top of a cache whose provenance was
+never closed. What cannot be repaired historically can still be **bounded
+empirically**, so before the derived cache is created the tool rescores a fixed
+sentinel set and requires it to reproduce what the cache already holds.
+
+The sentinels are all 398 released NBC pairs — 199 factual and 199 nonfactual.
+They were fixed long before this analysis, they already sit on the formal v2
+scoring path, and they are the pairs the histograms are built from, so they are
+not chosen to make the probe pass. (Two are exact duplicates of two others, so
+they collapse to 396 distinct keys; comparison is per pair, not per key.)
+
+For each pair the probe builds the exact production v2 cache key, reads the
+stored raw score from the **source cache opened read-only**, recomputes the pair
+with the already provenance-gated revision-pinned model at batch size 1 with
+**both the cache read and the cache write disabled**, and compares.
+
+**Equality is exact float equality.** The provenance guard has already required
+the same pinned model, dtype, device, library versions, batch size and v2
+extraction path, so a difference of any size is a real difference. One-decimal
+and NBC-bucket agreement are computed and reported as **diagnostics only** and
+never substitute — two scores can share a bucket and still be different numbers,
+which is exactly the failure the v1/v2 scaling bug produced.
+
+Reported: total pairs, cached rows found, exact raw matches, raw mismatches,
+maximum absolute raw delta, one-decimal matches, NBC bucket matches, and the
+first few mismatches with their stored and fresh values.
+
+The probe performs 398 forward passes — that is the cost of the evidence — and
+**zero cache writes**: the recompute runs against a scratch database that is
+deleted afterwards, and its row count is asserted to be zero and recorded. If
+any sentinel is missing or any score differs, the run aborts **before**
+`prepare_derived_cache`, so no derived cache exists, no completion inference
+runs, and no row is written.
+
+The two flags stay separate and are never merged:
+
+```
+checkpoint_identity_established:  false
+score_compatibility_established:  true
+```
+
+> The exact historical Hugging Face revision cannot be established
+> retrospectively, but the pinned scorer reproduced all 398 fixed v2 sentinel
+> scores exactly.
+
+Matching scores do **not** turn the first flag true.
+
 #### Pre-write provenance guard
 
 Scores added to an existing cache are only sound if produced under the same
@@ -493,7 +544,9 @@ bundle and loads the model *and* tokenizer with `revision=` pinned.
 The **presence** of a resolved revision is a static check. Without one the run
 aborts before `from_pretrained` — there is no fallback to Hugging Face main.
 
-Verified before the derived cache is opened for writes and before any inference:
+Verified before the derived cache is opened for writes and before any completion
+inference (the compatibility probe below is the only inference that runs before
+that point, and it writes nothing):
 
 | | |
 | --- | --- |
@@ -513,6 +566,26 @@ created **no derived cache**.
 `numpy`/`scipy`/`sklearn`/`sentencepiece` versions are reported but do not gate:
 they cannot change an NLI forward pass. The GPU check applies only when a GPU
 was used — `cpu` vs `cuda` is already gated by the device check.
+
+#### Formal run order
+
+1. load and merge the formal/checkpoint provenance bundle
+2. static provenance checks — abort here is **before any download**
+3. load model and tokenizer pinned to the recorded revision
+4. runtime provenance checks
+5. 398-pair score-compatibility probe against the source cache, read-only
+6. abort if compatibility fails — nothing has been created yet
+7. `prepare_derived_cache`
+8. require `copy_faithful`
+9. targeted completion for `(0,4)`, `(8,4)`, `(9,4)`
+10. read-only completeness verification
+11. report
+
+`run_sound` is the conjunction of every one of those gates having actually
+passed: provenance guard passed, `score_compatibility_established`,
+`copy_faithful`, source cache unchanged, accounting consistent, and all
+requested placements complete. Each clause is fail-closed — a run that cannot
+show it passed a gate has not passed it.
 
 Two loudly-named debug overrides exist and are **never used by the formal
 command**: `--unsafe-allow-in-place` permits `source == destination`, and

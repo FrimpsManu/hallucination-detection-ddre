@@ -50,6 +50,18 @@ this completion internally consistent and reproducible but does NOT prove the v2
 cache rows were produced at that revision. The run reports that limitation
 explicitly rather than claiming an identity no artifact establishes.
 
+Because that identity cannot be established, it is bounded empirically instead.
+Before the derived cache is created, a score-compatibility probe rescores all
+398 released NBC sentinel pairs with the pinned model at batch size 1, reading
+the source cache READ-ONLY and writing nothing, and requires every stored raw
+score to be reproduced by EXACT float equality. Rounded and bucketed agreement
+are reported as diagnostics and never substitute. If any sentinel is absent or
+any score differs, the run aborts with no derived cache and no completion
+inference. The result is reported separately from checkpoint identity:
+
+    checkpoint_identity_established:  false        (historical, unrepairable)
+    score_compatibility_established:  true/false   (measured, right now)
+
 Immediately after the copy and before the scorer is constructed, the derived
 cache is required to be a byte-faithful copy of the source. A copy that does not
 match the source in digest and row count is never extended.
@@ -109,6 +121,12 @@ from src.cached_document_scores import (  # noqa: E402
 )
 from src.nbc_sensitivity import combination_histograms  # noqa: E402
 from src.reproduction_gate import PUBLISHED_TABLE1  # noqa: E402
+from src.score_compatibility import (  # noqa: E402
+    PROBE_BATCH_SIZE,
+    format_compatibility,
+    run_compatibility_probe,
+    scratch_scorer,
+)
 
 OFFICIAL_MODEL = OFFICIAL_NLI_MODEL
 DEFAULT_SOURCE_CACHE = "results/wang_nli_cache_fidelity_v2_batch1.sqlite"
@@ -410,6 +428,22 @@ def main():
                        environment=observed, bundle=bundle)
         return 1
 
+    # ------------------------------------- 398-pair compatibility probe
+    # Step 5. The provenance guard has established that this environment
+    # matches what was recorded; this establishes that it reproduces what was
+    # *scored*. It runs before the derived cache exists, so a failure leaves
+    # nothing behind. It reads the source cache read-only and writes nothing.
+    compatibility = _run_compatibility_probe(
+        args, tokenizer, model, SCORE_VERSION, source_cache
+    )
+    print()
+    print(format_compatibility(compatibility))
+    if not compatibility["score_compatibility_established"]:
+        _write_compatibility_abort(
+            output_path, args, placements, compatibility, guard, bundle, observed
+        )
+        return 1
+
     # ------------------------------------------------------- derived cache
     try:
         identity = prepare_derived_cache(
@@ -497,14 +531,24 @@ def main():
     report = completion_report(
         placements, rows_before, rows_after, per_placement, verification,
         cache_identity=identity, source_check=source_check, guard=guard,
+        compatibility=compatibility,
     )
     report["environment"] = observed
     report["score_version"] = SCORE_VERSION
     report["pinned_revision"] = revision
     report["reference_bundle"] = bundle
+    # Deliberately reported side by side and never merged. The first is a
+    # historical fact that cannot be repaired; the second is a measurement made
+    # just now. Matching scores do not turn the first one true.
     report["checkpoint_identity_established"] = bundle[
         "checkpoint_identity_established"
     ]
+    report["provenance_interpretation"] = (
+        "The exact historical Hugging Face revision cannot be established "
+        "retrospectively, but the pinned scorer reproduced all "
+        f"{compatibility['exact_raw_matches']} of "
+        f"{compatibility['pairs_probed']} fixed v2 sentinel scores exactly."
+    )
     report["provenance_limitations"] = bundle["limitations"]
     report["dataset"] = {
         "sentences": len(records),
@@ -541,17 +585,21 @@ def main():
     print(f"  source unchanged:  {source_check['unchanged']}")
     print(f"  copy faithful:     {identity.get('copy_faithful')}")
 
-    if bundle["limitations"]:
-        print()
-        print("-" * 100)
-        print("PROVENANCE LIMITATIONS")
-        print("-" * 100)
-        print(
-            "  exact v2 checkpoint identity established: "
-            f"{bundle['checkpoint_identity_established']}"
-        )
-        for limitation in bundle["limitations"]:
-            print(f"  - {limitation}")
+    print()
+    print("-" * 100)
+    print("PROVENANCE")
+    print("-" * 100)
+    print(
+        "  checkpoint_identity_established:  "
+        f"{bundle['checkpoint_identity_established']}"
+    )
+    print(
+        "  score_compatibility_established:  "
+        f"{compatibility['score_compatibility_established']}"
+    )
+    print(f"  {report['provenance_interpretation']}")
+    for limitation in bundle["limitations"]:
+        print(f"  - {limitation}")
 
     print()
     print("-" * 100)
@@ -569,6 +617,94 @@ def main():
     print(f"  {report['scope_note']}")
     print("=" * 100)
     return 0 if report["run_sound"] else 1
+
+
+def _run_compatibility_probe(args, tokenizer, model, score_version, source_cache):
+    """Score the 398 fixed NBC sentinel pairs and compare against the source.
+
+    The scratch database lives in a temporary directory that is removed
+    afterwards, so the only databases this function can touch are the source
+    (read-only) and a file that no longer exists when it returns.
+    """
+    import tempfile
+
+    from src.cache_completion import sha256_file, verify_source_unchanged
+    from src.wang_data import load_nbc_pairs
+
+    positive, negative = load_nbc_pairs(args.data_root, per_class=None)
+    pairs = [(item["premise"], item["hypothesis"]) for item in positive]
+    pairs += [(item["premise"], item["hypothesis"]) for item in negative]
+    polarities = ["positive"] * len(positive) + ["negative"] * len(negative)
+
+    print()
+    print(
+        f"Score-compatibility probe: {len(pairs)} released NBC pairs "
+        f"({len(positive)} positive + {len(negative)} negative), batch size "
+        f"{PROBE_BATCH_SIZE}, cache read and cache write both disabled."
+    )
+    source_sha_before = sha256_file(source_cache)
+
+    with tempfile.TemporaryDirectory(prefix="compat-probe-") as scratch_dir:
+        scratch_path = str(Path(scratch_dir) / "scratch.sqlite")
+        scorer = scratch_scorer(
+            tokenizer, model, args.model_name, scratch_path,
+            batch_size=PROBE_BATCH_SIZE,
+        )
+        try:
+            report = run_compatibility_probe(
+                pairs=pairs,
+                polarities=polarities,
+                positive_pairs=len(positive),
+                negative_pairs=len(negative),
+                source_cache=str(source_cache),
+                model_name=args.model_name,
+                score_version=score_version,
+                scorer=scorer,
+                scratch_row_count=scorer.cache_size,
+                source_check=verify_source_unchanged(source_cache, source_sha_before),
+            )
+        finally:
+            scorer.close()
+    return report
+
+
+def _write_compatibility_abort(output_path, args, placements, compatibility, guard,
+                               bundle, environment):
+    """Record an abort on score incompatibility: nothing created, nothing written."""
+    report = {
+        "analysis": "nbc-cache-completion",
+        "aborted": True,
+        "abort_stage": "score-compatibility",
+        "abort_reason": "the pinned scorer does not reproduce the cached scores",
+        "provenance_guard": guard,
+        "reference_bundle": bundle,
+        "checkpoint_identity_established": bundle["checkpoint_identity_established"],
+        "score_compatibility": compatibility,
+        "score_compatibility_established": False,
+        "placements_requested": [list(p) for p in placements],
+        "source_cache": args.source_cache,
+        "destination_cache": args.output_cache,
+        "derived_cache_created": False,
+        "new_nli_evaluations_performed": 0,
+        "cache_rows_added": 0,
+        "run_sound": False,
+        "environment": environment,
+        "scope_note": (
+            "Aborted after the read-only compatibility probe and before the "
+            "derived cache was created. The probe's 398 forward passes are the "
+            "only inference performed; zero cache rows were written and the "
+            "source cache was not touched."
+        ),
+    }
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, default=str)
+    print()
+    print("ABORTED: score compatibility not established.")
+    print(f"  {compatibility['verdict_reason']}")
+    print("  No derived cache created. No completion inference performed. "
+          "Zero cache rows written.")
+    print(f"\nWritten to {output_path}")
+    print("=" * 100)
 
 
 def _write_aborted(output_path, args, placements, guard, stage, environment=None,

@@ -39,6 +39,13 @@ It is never opened for writing. New scores go into a **derived copy**, and the
 source's SHA-256 is recorded before the copy and recomputed afterwards to prove
 it did not change. The later sensitivity rerun uses the derived cache.
 
+``run_sound`` is the conjunction of every gate that was actually passed: the
+provenance guard, the measured 398-pair score compatibility, the verified copy,
+the intact source, the self-consistent accounting, and the read-only
+completeness replay. Each clause is fail-closed -- a run that cannot show it
+passed a gate has not passed it -- because a ``run_sound`` a reader trusts is
+what licenses the next unchanged sensitivity run to publish a headline.
+
 That copy is itself verified. ``prepare_derived_cache`` reports
 ``copy_faithful``: whether the derived file matches the source in both digest
 and row count immediately after copying, before anything is written. The caller
@@ -335,6 +342,7 @@ def completion_report(
     cache_identity=None,
     source_check=None,
     guard=None,
+    compatibility=None,
 ):
     """Assemble the accounting for one cache-completion run.
 
@@ -353,12 +361,21 @@ def completion_report(
     # copy of the source cannot be sound, and a report that carries no cache
     # identity at all has not shown it either.
     copy_faithful = bool(cache_identity) and cache_identity.get("copy_faithful") is True
+    # Same fail-closed rule for the two pre-write gates: a run that cannot show
+    # it passed them has not passed them.
+    guard_passed = bool(guard) and guard.get("passed") is True
+    compatible = (
+        bool(compatibility)
+        and compatibility.get("score_compatibility_established") is True
+    )
 
     return {
         "placements_requested": [list(p) for p in placements],
         "configuration_completed": PRIMARY_CONFIGURATION,
         "cache_identity": cache_identity,
         "derived_cache_copy_faithful": copy_faithful,
+        "score_compatibility": compatibility,
+        "score_compatibility_established": compatible,
         "source_cache_check": source_check,
         "source_cache_unchanged": source_intact,
         "provenance_guard": guard,
@@ -386,12 +403,18 @@ def completion_report(
         "all_requested_placements_complete": bool(
             verification and all(entry["complete"] for entry in verification)
         ),
+        # Every clause is a gate that was actually passed, not an assumption:
+        # the provenance guard, the measured 398-pair score compatibility, the
+        # verified copy, the intact source, the self-consistent accounting, and
+        # the read-only completeness replay.
         "run_sound": bool(
             verification
             and all(entry["complete"] for entry in verification)
             and rows_after - rows_before == evaluated
             and source_intact
             and copy_faithful
+            and guard_passed
+            and compatible
         ),
         "scope_note": (
             "Cache completion only. No metric was computed, no verdict reached, "
