@@ -334,6 +334,57 @@ to isolate. Whether the corrected scorer brings the full reproduction back
 within the predeclared Gate 1 tolerances is exactly what the Gate 1 rerun will
 test, and it has not been run.
 
+## Sensitivity analysis: the two unreleased NBC examples
+
+```bash
+python scripts/diagnose_nbc_sensitivity.py --cache-path results/wang_nli_cache.sqlite
+```
+
+Wang et al. report sampling s = 200 factual and s = 200 nonfactual NBC examples.
+The released `NBC_positive.json` and `NBC_negative.json` contain **199 each**, so
+two examples described in the paper are absent from the artifacts and from every
+histogram this repository builds.
+
+This script asks one bounded question: *could those two missing examples,
+whatever bins they fall in, plausibly account for the remaining Gate 1
+CM=14/CFA=24 gap?* It enumerates all 10 × 10 = 100 ways one extra positive and
+one extra negative example could be distributed across the ten discretized bins,
+and reports how the frozen Gate 1 verdict responds under **both** published cost
+configurations.
+
+Since the released histograms are already Laplace-smoothed, one extra *observed*
+example raises exactly one smoothed bin by exactly one — taking each class from
+199 back to the paper's 200.
+
+**No inference. No Hugging Face downloads. No model is constructed.** Document
+scores are replayed from an existing NLI cache opened **read-only** (SQLite
+`mode=ro`), so a formal cache cannot be modified even by a bug. The full grid
+takes roughly three minutes.
+
+Retrieval is adaptive, so a different histogram can require a document the
+recorded run never consumed. Rather than substituting a default, a missing score
+raises and that whole combination is marked **incomplete** and excluded from the
+tallies — a sensitivity analysis that quietly invented scores for documents it
+had not seen would be worthless. If *no* combination completes, the verdict is
+`INCONCLUSIVE_INSUFFICIENT_CACHE_COVERAGE`, not a conclusion.
+
+### What the result can and cannot mean
+
+Fixed in advance so it cannot be re-read after the fact:
+
+- **Zero combinations reproduce CM=14/CFA=24** → the missing 200th examples
+  cannot explain the remaining discrepancy under this model. The gap has another
+  source.
+- **Some combinations reproduce it** → the unreleased examples are a *plausible*
+  explanation. That is all. It does **not** identify their true bins.
+
+**This is a sensitivity analysis only.** The released NBC files are never
+modified, no combination may be adopted as the histogram, and the released
+199 + 199 data remain the experiment's NBC input whatever the outcome. The
+script changes no baseline behaviour, cost, threshold, metric, tolerance, or
+published reference value; it calls the existing `bse_official`,
+`evaluate_detector` and `evaluate_configuration` unmodified.
+
 ## Gate 1 scoring-path diagnostics
 
 Gate 1 has been run and FAILED against the predeclared tolerances. These two
