@@ -40,7 +40,8 @@ source's SHA-256 is recorded before the copy and recomputed afterwards to prove
 it did not change. The later sensitivity rerun uses the derived cache.
 
 ``run_sound`` is the conjunction of every gate that was actually passed: the
-provenance guard, the measured 398-pair score compatibility, the verified copy,
+provenance guard, the measured 398-pair score compatibility, the binding of that
+compatibility to the exact source artifact that was copied, the verified copy,
 the intact source, the self-consistent accounting, and the read-only
 completeness replay. Each clause is fail-closed -- a run that cannot show it
 passed a gate has not passed it -- because a ``run_sound`` a reader trusts is
@@ -224,6 +225,114 @@ def prepare_derived_cache(
     }
 
 
+class CompatibilitySourceMismatch(RuntimeError):
+    """The copied source is not the artifact compatibility was established on."""
+
+
+def bind_compatibility_to_source(compatibility, cache_identity):
+    """Bind the compatibility result to the exact artifact that was copied.
+
+    The 398-pair probe certifies one file, identified by the digest it read
+    *after* its last forward pass. ``prepare_derived_cache`` re-hashes the
+    source when it copies. If the formal cache changed in the gap between those
+    two reads, the derived cache would be a faithful copy of a **different**
+    artifact than the one the compatibility verdict describes, and every
+    downstream claim would be attached to the wrong file.
+
+    This closes that window by requiring the two digests to be the same string:
+
+        398-pair numerical compatibility
+                -> established on source digest A
+                -> derived cache copied from source digest A
+
+    Fail closed. A digest missing on either side means the chain was never
+    formed, which is not the same as it holding.
+    """
+    probe_digest = (compatibility or {}).get("source_sha256_after_probe")
+    copy_digest = (cache_identity or {}).get("source_sha256_before")
+    bound = (
+        probe_digest is not None
+        and copy_digest is not None
+        and probe_digest == copy_digest
+    )
+    if bound:
+        message = (
+            "The derived cache was copied from the same source artifact the "
+            "398-pair compatibility probe certified."
+        )
+    elif probe_digest is None or copy_digest is None:
+        message = (
+            "The compatibility probe digest and the copy-source digest cannot "
+            f"both be read (probe={probe_digest!r}, copy={copy_digest!r}), so "
+            "the derived cache cannot be bound to a certified source. "
+            "Unverifiable is treated as failed."
+        )
+    else:
+        message = (
+            "SOURCE CACHE CHANGED BETWEEN THE COMPATIBILITY PROBE AND THE COPY. "
+            f"Compatibility was established on {probe_digest}, but the derived "
+            f"cache was copied from {copy_digest}. The compatibility result "
+            "describes a different artifact than the one about to be extended."
+        )
+    return {
+        "compatibility_source_sha256": probe_digest,
+        "copy_source_sha256": copy_digest,
+        "bound": bound,
+        "message": message,
+    }
+
+
+def assert_compatibility_source_bound(source_binding):
+    """Refuse to go further unless the copied source is the certified one.
+
+    Called from ``build_counting_scorer``, the only place a scorer capable of
+    inference or of writing a cache row is created, so an unbound run cannot
+    perform either.
+    """
+    if not source_binding:
+        raise CompatibilitySourceMismatch(
+            "No compatibility/source binding was supplied, so the derived cache "
+            "was never bound to a certified source artifact. Refusing to score."
+        )
+    if source_binding.get("bound") is not True:
+        raise CompatibilitySourceMismatch(
+            source_binding.get("message", "compatibility source binding failed")
+            + " Refusing to construct a scorer, so zero completion inference is "
+            "performed and zero rows are written."
+        )
+
+
+def discard_invalid_derived_cache(cache_identity):
+    """Delete a derived cache that a pre-inference gate has just invalidated.
+
+    Policy: an invalidated derived copy is REMOVED rather than left on disk.
+    It carries the ``..._nbc_complete.sqlite`` name a later sensitivity rerun
+    is told to use, and a file that looks like the completed artifact but was
+    copied from an uncertified or corrupt source is exactly the thing that gets
+    picked up by mistake. Nothing of value is lost: it holds no new scores, only
+    a copy of rows the source still has.
+
+    A cache written in place (``--unsafe-allow-in-place``) is never removed:
+    the destination is the source, and the source is never destroyed.
+    """
+    if not cache_identity or not cache_identity.get("copied"):
+        return {
+            "removed": False,
+            "path": (cache_identity or {}).get("destination_cache"),
+            "reason": (
+                "No copy was made (in-place mode), so there is no derived "
+                "artifact to remove and the source is never destroyed."
+            ),
+        }
+    path = Path(cache_identity["destination_cache"])
+    try:
+        path.unlink()
+        removed, reason = True, "Invalidated derived cache removed."
+    except OSError as exc:  # noqa: BLE001 - reported, never raised over a gate
+        removed, reason = False, f"Could not remove the derived cache: {exc}"
+    return {"removed": removed, "path": str(path), "reason": reason}
+
+
 def verify_source_unchanged(source, expected_sha256):
     """Recompute the source digest and confirm the formal artifact is intact."""
     observed = sha256_file(source)
@@ -307,19 +416,23 @@ def build_counting_scorer(
     batch_size=WANG_BATCH_SIZE,
     *,
     cache_identity,
+    source_binding,
 ):
     """A production ``EntailmentScorer`` that also counts what it did.
 
-    ``cache_identity`` is the ``prepare_derived_cache`` result for the cache
-    being written, and is required: the faithfulness of the copy is checked
-    here, before torch is even imported, so an unfaithful copy cannot produce a
-    scorer and therefore cannot cause a forward pass or a cache write.
+    Both arguments are required, and both are gates rather than metadata.
+    ``cache_identity`` is the ``prepare_derived_cache`` result, so the copy's
+    faithfulness is checked here; ``source_binding`` ties that copy's source to
+    the artifact the 398-pair compatibility probe certified. Both run before
+    torch is imported, so a failure of either cannot produce a scorer and
+    therefore cannot cause a forward pass or a cache write.
 
-    ``EntailmentScorer`` is imported after that check rather than at module
+    ``EntailmentScorer`` is imported after those checks rather than at module
     scope so this module stays importable without torch. The scorer is the
     unmodified production class; the mixin only observes.
     """
     assert_copy_faithful(cache_identity)
+    assert_compatibility_source_bound(source_binding)
 
     from src.utils import EntailmentScorer
 
@@ -343,6 +456,7 @@ def completion_report(
     source_check=None,
     guard=None,
     compatibility=None,
+    source_binding=None,
 ):
     """Assemble the accounting for one cache-completion run.
 
@@ -371,6 +485,7 @@ def completion_report(
         bool(compatibility)
         and compatibility.get("score_compatibility_established") is True
     )
+    source_bound = bool(source_binding) and source_binding.get("bound") is True
 
     return {
         "placements_requested": [list(p) for p in placements],
@@ -379,6 +494,8 @@ def completion_report(
         "derived_cache_copy_faithful": copy_faithful,
         "score_compatibility": compatibility,
         "score_compatibility_established": compatible,
+        "compatibility_source_binding": source_binding,
+        "compatibility_source_bound": source_bound,
         "source_cache_check": source_check,
         "source_cache_unchanged": source_intact,
         "provenance_guard": guard,
@@ -418,6 +535,7 @@ def completion_report(
             and copy_faithful
             and guard_passed
             and compatible
+            and source_bound
         ),
         "scope_note": (
             "Cache completion only. No metric was computed, no verdict reached, "

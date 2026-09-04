@@ -582,6 +582,37 @@ created **no derived cache**.
 they cannot change an NLI forward pass. The GPU check applies only when a GPU
 was used — `cpu` vs `cuda` is already gated by the device check.
 
+#### Binding compatibility to the copied artifact
+
+The probe certifies one file, identified by the digest it read after its last
+forward pass. `prepare_derived_cache` re-hashes the source when it copies. If
+the formal cache changed in the gap between those two reads, the derived cache
+would be a faithful copy of a **different** artifact than the compatibility
+verdict describes.
+
+So immediately after the copy — and before `build_counting_scorer`, before any
+completion inference, before any new row — the two digests must be equal:
+
+```
+398-pair numerical compatibility
+      -> established on source digest A
+      -> derived cache copied from source digest A
+```
+
+The result is reported as `compatibility_source_bound`, with both digests, and
+`run_sound` requires it. The check lives in `build_counting_scorer` alongside
+the copy-faithful gate, so an unbound run cannot construct the one object
+capable of scoring or writing.
+
+**Policy on an invalidated derived cache:** it is **removed**. It carries the
+`..._nbc_complete.sqlite` name a later sensitivity rerun is told to use, and a
+file that looks like the completed artifact but was copied from an uncertified
+or corrupt source is exactly what gets picked up by mistake. Nothing is lost —
+it holds no new scores, only a copy of rows the source still has. A cache
+written in place (`--unsafe-allow-in-place`) is never removed: the destination
+is the source, and the source is never destroyed. The removal is recorded in the
+report as `derived_cache_discarded`.
+
 #### Formal run order
 
 1. load and merge the formal/checkpoint provenance bundle
@@ -592,15 +623,15 @@ was used — `cpu` vs `cuda` is already gated by the device check.
    with the source digest re-taken after the last forward pass
 6. abort if compatibility fails — nothing has been created yet
 7. `prepare_derived_cache`
-8. require `copy_faithful`
+8. require `copy_faithful`, then require `compatibility_source_bound`
 9. targeted completion for `(0,4)`, `(8,4)`, `(9,4)`
 10. read-only completeness verification
 11. report
 
 `run_sound` is the conjunction of every one of those gates having actually
 passed: provenance guard passed, `score_compatibility_established`,
-`copy_faithful`, source cache unchanged, accounting consistent, and all
-requested placements complete. Each clause is fail-closed — a run that cannot
+`compatibility_source_bound`, `copy_faithful`, source cache unchanged,
+accounting consistent, and all requested placements complete. Each clause is fail-closed — a run that cannot
 show it passed a gate has not passed it, so an absent probe, an absent guard, an
 absent cache identity or an absent source-integrity check all disqualify.
 

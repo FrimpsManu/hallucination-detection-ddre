@@ -62,9 +62,19 @@ inference. The result is reported separately from checkpoint identity:
     checkpoint_identity_established:  false        (historical, unrepairable)
     score_compatibility_established:  true/false   (measured, right now)
 
-Immediately after the copy and before the scorer is constructed, the derived
-cache is required to be a byte-faithful copy of the source. A copy that does not
-match the source in digest and row count is never extended.
+Immediately after the copy and before the scorer is constructed, two things are
+required. The derived cache must be a byte-faithful copy of the source. And the
+digest ``prepare_derived_cache`` recorded when it copied must equal the digest
+the compatibility probe certified, so the file that was copied is the file
+compatibility was established on:
+
+    398-pair numerical compatibility -> source digest A -> derived copy of A
+
+If the formal cache changed in the gap between those two reads, the copy is a
+faithful copy of a different artifact than the verdict describes. Either failure
+aborts before the scorer exists -- zero completion inference, zero rows -- and
+the invalidated derived copy is removed rather than left on disk under the name
+a sensitivity rerun is told to use. A cache written in place is never removed.
 
 The work has to be interleaved rather than precomputed: retrieval is adaptive,
 so which document comes next depends on the scores of the documents already
@@ -96,8 +106,10 @@ from src.cache_completion import (  # noqa: E402
     PRIMARY_CONFIGURATION,
     WANG_BATCH_SIZE,
     UnsafeCacheTarget,
+    bind_compatibility_to_source,
     build_counting_scorer,
     completion_report,
+    discard_invalid_derived_cache,
     parse_placement,
     placement_label,
     prepare_derived_cache,
@@ -466,7 +478,7 @@ def main():
     if identity.get("warning"):
         print(f"  *** {identity['warning']} ***")
 
-    # HARD PRE-INFERENCE GATE. A derived cache whose digest or row count does
+    # HARD PRE-INFERENCE GATE 1. A derived cache whose digest or row count does
     # not match the source immediately after copying is already wrong before a
     # single row is added, and extending it would build correct new scores on a
     # corrupt base. Refuse before the scorer exists, so zero inference runs and
@@ -476,7 +488,31 @@ def main():
         print("ABORTED: the derived cache is not a faithful copy of the source.")
         print(f"  {identity.get('copy_faithful_note')}")
         print("  Zero inference performed. Zero cache rows written.")
-        _write_copy_abort(output_path, args, placements, identity, guard, bundle)
+        discarded = discard_invalid_derived_cache(identity)
+        print(f"  {discarded['reason']}")
+        _write_copy_abort(output_path, args, placements, identity, guard, bundle,
+                          discarded)
+        return 1
+
+    # HARD PRE-INFERENCE GATE 2. prepare_derived_cache re-hashed the source when
+    # it copied. That digest must be the same artifact the 398-pair probe
+    # certified, or the compatibility verdict describes a different file than
+    # the one about to be extended.
+    binding = bind_compatibility_to_source(compatibility, identity)
+    print(f"  compatibility source bound: {binding['bound']}")
+    if not binding["bound"]:
+        print()
+        print("ABORTED: the copied source is not the artifact compatibility was "
+              "established on.")
+        print(f"  compatibility digest: {binding['compatibility_source_sha256']}")
+        print(f"  copy-source digest:   {binding['copy_source_sha256']}")
+        print(f"  {binding['message']}")
+        print("  No completion scorer constructed. Zero completion inference "
+              "performed. Zero cache rows written.")
+        discarded = discard_invalid_derived_cache(identity)
+        print(f"  {discarded['reason']}")
+        _write_binding_abort(output_path, args, placements, identity, binding,
+                             compatibility, guard, bundle, observed, discarded)
         return 1
 
     records = load_sentence_records(args.data_root, strict=True)
@@ -485,6 +521,7 @@ def main():
     scorer = build_counting_scorer(
         tokenizer, model, args.model_name, str(derived_cache),
         batch_size=WANG_BATCH_SIZE, cache_identity=identity,
+        source_binding=binding,
     )
     rows_before = scorer.cache_size()
     print(f"  derived cache rows before: {rows_before}")
@@ -531,7 +568,7 @@ def main():
     report = completion_report(
         placements, rows_before, rows_after, per_placement, verification,
         cache_identity=identity, source_check=source_check, guard=guard,
-        compatibility=compatibility,
+        compatibility=compatibility, source_binding=binding,
     )
     report["environment"] = observed
     report["score_version"] = SCORE_VERSION
@@ -752,7 +789,57 @@ def _write_aborted(output_path, args, placements, guard, stage, environment=None
     print("=" * 100)
 
 
-def _write_copy_abort(output_path, args, placements, identity, guard, bundle):
+def _write_binding_abort(output_path, args, placements, identity, binding,
+                         compatibility, guard, bundle, environment, discarded):
+    """Record an abort on an unbound source: zero completion inference, zero rows.
+
+    The 398 probe forward passes did run -- they are what established the
+    compatibility digest -- but no completion scorer was constructed, so no
+    completion inference happened and no row was written.
+    """
+    report = {
+        "analysis": "nbc-cache-completion",
+        "aborted": True,
+        "abort_stage": "compatibility-source-binding",
+        "abort_reason": (
+            "the copied source is not the artifact compatibility was "
+            "established on"
+        ),
+        "provenance_guard": guard,
+        "reference_bundle": bundle,
+        "checkpoint_identity_established": bundle["checkpoint_identity_established"],
+        "score_compatibility": compatibility,
+        "score_compatibility_established": compatibility[
+            "score_compatibility_established"
+        ],
+        "compatibility_source_binding": binding,
+        "compatibility_source_bound": False,
+        "cache_identity": identity,
+        "derived_cache_discarded": discarded,
+        "placements_requested": [list(p) for p in placements],
+        "source_cache": args.source_cache,
+        "destination_cache": args.output_cache,
+        "new_nli_evaluations_performed": 0,
+        "cache_rows_added": 0,
+        "run_sound": False,
+        "environment": environment,
+        "scope_note": (
+            "Aborted after the derived copy and before the completion scorer "
+            "was constructed. The source cache changed between the compatibility "
+            "probe and the copy, so the copy is not the certified artifact. The "
+            "derived cache is removed rather than left on disk under the name a "
+            "sensitivity rerun is told to use; it held no new scores. Zero "
+            "completion inference was performed and zero cache rows were written."
+        ),
+    }
+    with output_path.open("w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, default=str)
+    print(f"\nWritten to {output_path}")
+    print("=" * 100)
+
+
+def _write_copy_abort(output_path, args, placements, identity, guard, bundle,
+                      discarded=None):
     """Record an abort on an unfaithful copy: zero inference, zero rows."""
     report = {
         "analysis": "nbc-cache-completion",
@@ -763,6 +850,7 @@ def _write_copy_abort(output_path, args, placements, identity, guard, bundle):
         "reference_bundle": bundle,
         "cache_identity": identity,
         "derived_cache_copy_faithful": False,
+        "derived_cache_discarded": discarded,
         "placements_requested": [list(p) for p in placements],
         "source_cache": args.source_cache,
         "destination_cache": args.output_cache,
