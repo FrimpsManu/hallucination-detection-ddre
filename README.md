@@ -334,6 +334,80 @@ to isolate. Whether the corrected scorer brings the full reproduction back
 within the predeclared Gate 1 tolerances is exactly what the Gate 1 rerun will
 test, and it has not been run.
 
+## Sensitivity analysis: the two unreleased NBC examples
+
+```bash
+python scripts/diagnose_nbc_sensitivity.py \
+  --cache-path /content/drive/MyDrive/ddre-gate1/wang_nli_cache_fidelity_v2_batch1.sqlite \
+  --output /content/drive/MyDrive/ddre-gate1/diagnostics/nbc_count_sensitivity.json
+```
+
+The formal result **must** replay the corrected Wang-fidelity **v2** cache. The
+historical v1 cache was written before the host-side scaling correction, so its
+rows carry the half-precision rounding this experiment sits downstream of; using
+it would measure the old scorer.
+
+Wang et al. report sampling s = 200 factual and s = 200 nonfactual NBC examples.
+The released `NBC_positive.json` and `NBC_negative.json` contain **199 each**, so
+two examples described in the paper are absent from the artifacts and from every
+histogram this repository builds.
+
+This script asks one bounded question: *could those two missing examples,
+whatever bins they fall in, plausibly account for the remaining Gate 1
+CM=14/CFA=24 gap?* It enumerates all 10 × 10 = 100 ways one extra positive and
+one extra negative example could be distributed across the ten discretized bins,
+and reports how the frozen Gate 1 verdict responds under **both** published cost
+configurations.
+
+Since the released histograms are already Laplace-smoothed, one extra *observed*
+example raises exactly one smoothed bin by exactly one — taking each class from
+199 back to the paper's 200.
+
+**No inference. No Hugging Face downloads. No model is constructed.** Document
+scores are replayed from an existing NLI cache opened **read-only** (SQLite
+`mode=ro`), so a formal cache cannot be modified even by a bug. The full grid
+takes roughly three minutes.
+
+Retrieval is adaptive, so a different histogram can require a document the
+recorded run never consumed. Rather than substituting a default, a missing score
+raises and that configuration is marked **incomplete** — a sensitivity analysis
+that quietly invented scores for documents it had not seen would be worthless.
+
+**Completeness is tracked per configuration, not per combination.** The two cost
+settings are evaluated in separate `try` blocks, so a combination whose
+CM=14/CFA=24 evaluation succeeded counts toward the primary tallies even if
+CM=28/CFA=96 later hits a cache miss. A completed primary result is a real
+measurement and is never discarded because of the secondary. Only
+`both_configurations_pass` requires both to have completed.
+
+### What the result can and cannot mean
+
+Four branches, fixed in advance so the outcome cannot be re-read afterwards:
+
+| Primary (CM=14/CFA=24) outcome | Headline |
+| --- | --- |
+| At least one completed combination **PASS** | `MISSING_EXAMPLES_ARE_A_PLAUSIBLE_EXPLANATION` |
+| Zero PASS, but some placements unevaluated | `INCONCLUSIVE_PARTIAL_CACHE_COVERAGE` |
+| All 100 placements completed, zero PASS | `MISSING_EXAMPLES_CANNOT_EXPLAIN_THE_GAP` |
+| Zero placements completed | `INCONCLUSIVE_INSUFFICIENT_CACHE_COVERAGE` |
+
+The asymmetry is deliberate. A **positive** finding needs one reproducing
+placement and survives partial coverage — unevaluated placements cannot take it
+away. A **negative** finding needs the whole grid, because an unevaluated
+placement could still pass. Branch C additionally requires the full 100-placement
+grid to have been enumerated, so a `--limit-combinations` debugging run can never
+produce a negative conclusion from a truncated grid.
+
+A positive result establishes only that the unreleased examples are a *plausible*
+explanation. It does **not** identify their true bins.
+
+**This is a sensitivity analysis only.** The released NBC files are never
+modified, no combination may be adopted as the histogram, and the released
+199 + 199 data remain the experiment's NBC input whatever the outcome. The
+script changes no baseline behaviour, cost, threshold, metric, tolerance, or
+published reference value; it calls the existing `bse_official`,
+`evaluate_detector` and `evaluate_configuration` unmodified.
+
 ## Gate 1 scoring-path diagnostics
 
 Gate 1 has been run and FAILED against the predeclared tolerances. These two
