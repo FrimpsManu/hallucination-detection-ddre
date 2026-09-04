@@ -22,20 +22,27 @@ was not modified.
 
 ### NOT READY
 
-Two findings must be resolved before any held-out evaluation, because each one
-can by itself manufacture the paper's headline result:
+**One blocker** must be resolved before any tuning run:
 
 * **D-01** — the stopping-threshold grid contains four values that contradict
-  the CM/CFA classification rule, and the tuner's objective actively prefers
-  them.
-* **D-03** — the fitted density ratio is unbounded above and collapses toward
-  zero below, so a single out-of-support document routinely ends the sequential
-  procedure after one retrieval. The headline "retrieval reduction" is currently
-  as much a property of kernel extrapolation as of evidence sufficiency.
+  the CM/CFA classification rule, and the tuner's lexicographic objective
+  optimises average documents first, so it searches that region freely. This is
+  established by exact arithmetic on the released costs and by an end-to-end
+  reproduction, not by simulation.
 
-Three further findings (**D-02**, **D-07/D-08**, **D-09**) affect whether the
-DDRE-vs-BSE comparison is a fair one. They do not corrupt the numbers, but they
-change what the numbers are entitled to claim, and all three are cheaper to fix
+**One finding requires an empirical check before tuning** and cannot be settled
+by this audit:
+
+* **D-03** — density-ratio estimates in regions with weak numerator or
+  denominator support are poorly constrained, so a single document may carry
+  very large log-evidence. The mechanism is real and demonstrated; its
+  *prevalence on the actual formal NBC fit is unmeasured*, because this
+  repository contains no fixed raw NBC scores and measuring them needs the NLI
+  model. See §4-A for the measurement to run first.
+
+Three further findings (**D-02**, **D-07/D-08**, **D-09**) bear on what the
+DDRE-vs-BSE comparison is entitled to claim. They do not corrupt the numbers,
+but they change the boundary of the claim, and all three are cheaper to settle
 now than to caveat later.
 
 Two things are in good shape and should be stated plainly:
@@ -53,13 +60,13 @@ Two things are in good shape and should be stated plainly:
 
 | ID | Severity | Location | Scientific issue | Why it matters | Recommended action |
 | --- | --- | --- | --- | --- | --- |
-| D-01 | **BLOCKER** | `main.py::tune_ddre_thresholds`, `ddre_core.py::DDREDetector.detect_subclaim` | The lower stopping grid is `{0.05 … 0.40}`; the CM=28/CFA=96 classification threshold is `0.225806`. For `lower ∈ {0.25, 0.30, 0.35, 0.40}` the detector can stop *because it is confident of hallucination* and the cost rule then labels the claim **factual**. | The two rules disagree on the same posterior. Worse, larger `lower` stops earlier, and the tuner minimises documents, so the objective **prefers** the contradictory region. | Constrain `lower ≤ CM/(CM+CFA)` (§7 option 1, recommended). Do not silently re-grid. |
-| D-03 | **BLOCKER** | `ddre_core.py::ULSIFDensityRatio.ratio` | `r̂(s)` is a non-negative combination of Gaussians centred on factual scores, penalised by `H` only where hallucinated scores live. It is therefore unbounded above the hallucinated support and → 0 below the factual support. Clipping maps both to `log r = ±13.8`, i.e. near-certain evidence, from a single document. | On NBC-shaped scores, **48 of 101 grid points** already end the sequence after one document with the default `[0.20, 0.80]` band (measured, §4-A). A large "retrieval reduction" would then be an artifact of the fitted ratio's *scale*, not of evidence efficiency. | Bound the per-document log-evidence to a defensible range, or calibrate `r̂` on validation, and report sensitivity. Decide before tuning. |
-| D-02 | MAJOR | `ddre_core.py::detect_subclaim` vs `baseline_core.py::detect_subclaim` | BSE tests its stopping rule **before** the first fetch and can retrieve **0** documents. DDRE only tests **after** an update, so it has a floor of **1 document per subclaim**. | Retrieval counts are not measured from the same origin. The floor is 1,908 → ~2,990 documents DDRE must spend before it can win on cost, and where BSE retrieves 0, DDRE cannot win at all. | Give DDRE a pre-retrieval stop test, or report both floors explicitly and justify the asymmetry. |
+| D-01 | **BLOCKER** | `main.py::tune_ddre_thresholds`, `ddre_core.py::DDREDetector.detect_subclaim` | The lower stopping grid is `{0.05 … 0.40}`; the CM=28/CFA=96 classification threshold is `0.225806`. For `lower ∈ {0.25, 0.30, 0.35, 0.40}` the detector can stop *because it is confident of hallucination* and the cost rule then labels the claim **factual**. | The two rules disagree on the same posterior. The selector is lexicographic — average documents first, PR-AUC only on exact ties — and a larger `lower` stops earlier, so within the feasible set nothing but the document count pushes back on choosing a contradictory threshold. | Constrain `lower ≤ CM/(CM+CFA)` (§7 option 1, recommended). Do not silently re-grid. |
+| D-03 | **MAJOR / NEEDS EMPIRICAL CHECK** | `ddre_core.py::ULSIFDensityRatio.ratio` | Poorly constrained extrapolation: `r̂` is well determined only where both samples have support. `H` constrains magnitude on the hallucinated sample and the centres carry mass near the factual sample, so between and beyond them the estimate is weakly identified and can be very large or very small. | A weakly identified region can contribute large log-evidence from one document. Whether that happens often enough on the **actual** NBC fit to shorten retrieval materially is **unmeasured** — the demonstrations below use synthetic scores and establish only the mechanism. | Before tuning, measure `r̂` over the fitted score support and report the diagnostics in §4-A. Pre-register a per-document log-evidence sensitivity analysis if the measurement warrants it. **Do not choose a cap value yet.** |
+| D-02 | MAJOR | `ddre_core.py::detect_subclaim` vs `baseline_core.py::detect_subclaim` | Algorithm/protocol asymmetry. BSE's stop/continue rule is decision-theoretic (expected cost of retrieving vs stopping) and can decline the **first** fetch, retrieving **0** documents. DDRE's rule is a fixed probability band evaluated after an update, so it has a floor of **1 document per subclaim**. | Retrieval counts have different origins. The floor is ~2,990 documents DDRE must spend before it can win on cost, and where BSE retrieves 0, DDRE cannot win at all. **This currently disadvantages DDRE.** | Report BSE's zero-retrieval frequency and the retrieval-floor difference alongside the efficiency numbers. A threshold pre-check does **not** fix this (see §6); giving DDRE a Bayes-risk pre-retrieval decision would be a **stopping-rule redesign**, not a small fairness fix. |
 | D-07 | MAJOR | `main.py::tune_ddre_thresholds` | The feasibility test constrains only `factual_auc_pr` and `balanced_pr_auc`. Nonfactual AUC-PR — Wang's headline metric — is unconstrained. | Balanced PR-AUC is the mean of the two, so a large factual gain can mask a nonfactual loss and still qualify. The tuner may select a configuration that is worse at detecting hallucination. | Add an explicit nonfactual AUC-PR floor to the feasibility test. |
 | D-08 | MAJOR | `main.py::hypothesis_comparison` | `hypothesis_supported_on_test` requires `factual_delta > 0` and `balanced_delta ≥ 0`, with no nonfactual floor and **no uncertainty quantification of any kind**. | A single point estimate is written into the summary as a scientific conclusion, over three methods and several metrics, with no interval and no multiplicity control. | Require a nonfactual floor, and gate the claim on the paired passage-level bootstrap (§4-H). |
-| D-09 | MAJOR | `main.py`, `ddre_core.py` | DDRE selects its stopping band from **64** validation configurations. BSE's stopping rule is derived from fixed costs and has **no tunable counterpart** in this pipeline. | DDRE gets validation-set model selection that the baseline does not. Any win is partly a tuning-budget win. | Either tune a BSE stopping parameter (e.g. `c_retrieve`) on the same validation data as a stronger baseline, or report the asymmetry as a stated limitation. |
-| D-04 | MAJOR | `ULSIFDensityRatio._solve` / `.ratio` | Post-hoc non-negativity truncation can drive `α → 0`. Then `r̂ ≡ 0`, clipped to `1e-6`, i.e. `log r = −13.8` **per document**. Nothing in `fit()` detects or reports it. | A silently degenerate fit looks like a spectacularly confident detector. Not reachable through the current λ grid (max 1.0), but nothing prevents it. | Add a post-fit sanity check: `α` not all zero, and `r̂` finite and non-degenerate across the observed score range. |
+| D-09 | MAJOR (claim boundary / robustness) | `main.py`, `ddre_core.py` | DDRE selects its stopping band from **64** validation configurations. Published BSE has **no tunable counterpart** — its stopping rule follows from the fixed published costs. | Part of any DDRE advantage may be a model-selection advantage. This bounds what the comparison may claim; it does **not** invalidate it. | Keep **published BSE (CM=28, CFA=96, c_retrieve=1) as the primary comparator** for comparability with Wang et al. Optionally add a validation-tuned BSE variant as a clearly labelled **secondary** robustness comparator, never as the primary. |
+| D-04 | MAJOR | `ULSIFDensityRatio._solve` / `.ratio` | Post-hoc non-negativity truncation could in principle drive `α → 0`. Then `r̂ ≡ 0`, clipped to `1e-6`, i.e. `log r = −13.8` **per document**. Nothing in `fit()` detects or reports it. | A silently degenerate fit would look like a spectacularly confident detector. **Not observed in the synthetic audit fixture, and not established on the actual formal fit** — no fixed raw NBC scores exist in this repository to check it against. | Add a post-fit sanity check: `α` not all zero, and `r̂` finite and non-degenerate across the observed score range. |
 | D-06 | MAJOR | `.ratio`, `detect_subclaim` | A NaN score propagates silently: `log(NaN)` → `clip` → `sigmoid` all yield NaN; every stopping comparison is False, so the **full retrieval budget is spent**, and NaN reaches the metrics. `+inf` is clipped to a perfect score of 100. | Silent corruption of both the quality and the efficiency numbers, with no warning anywhere. | Validate the score at the detector boundary and fail loudly. |
 | D-05 | MINOR | `detect_subclaim` | The running log-odds are clipped to `±40` **after each update**, so accumulation is non-associative and evidence beyond the bound is discarded. | Harmless under any stopping band in the current grid (`sigmoid(±40)` is far outside it), but it is a silent modification of the stated update rule. | Document it, or clip only at the sigmoid. |
 | D-10 | MINOR | `evaluation.py::prediction_rows`, `detect_sentence` | Per-subclaim results are collapsed into one `DetectionResult` with summed counters. Per-subclaim stopping depth is unrecoverable, and the CSV omits the subclaim count. | §4-G asks for stopping depth; §4-H needs the subclaim count to express documents-per-subclaim on a bootstrap resample. | Add `n_subclaims` to `prediction_rows` and retain per-subclaim depths. |
@@ -119,32 +126,80 @@ inversion cannot pass silently.
 | Clipping of `r` | `[1e-6, 1e6]`, symmetric in log | see **D-03** |
 | Sign / inversion errors | none found | — |
 
-**The extrapolation problem (D-03).** The model is only constrained where data
-live. `H` penalises magnitude on the hallucinated sample; centres provide mass
-only near the factual sample. Above the hallucinated support nothing bounds
-`r̂`, and below the factual support `r̂ → 0`. Both are extrapolation, and the
-clip converts both into near-certainty.
+#### D-03: poorly constrained extrapolation — mechanism established, prevalence unmeasured
 
-Measured on synthetic Gaussian classes (μ=78 vs μ=22): `r̂(50) ≈ 2.6×10³`,
-`r̂(100) ≈ 7.6×10³` — that is `log r ≈ +8.9` from **one** document, enough to
-cross any upper threshold in the grid immediately.
+**Correction to an earlier draft of this audit.** `r̂` is **not** unbounded. It
+is a finite non-negative combination of Gaussian kernels evaluated on an input
+clipped to `[0,1]` with finite coefficients, so it is bounded above by `Σ_l α_l`
+— a finite, exactly computable quantity. Any claim of unboundedness was wrong
+and is withdrawn.
 
-Measured on scores drawn to match the released NBC histogram shape: `r̂` spans
-`[0.36, 14.9]`, and **48 of 101** points on the 0–100 grid satisfy
-`|log r̂| ≥ log(0.8/0.2) = 1.386` — one document ends the sequence. This is the
-quantitative core of D-03: for roughly half the score range the "sequential"
-detector is a one-shot detector, and the retrieval saving it reports is
-governed by the fitted ratio's scale (a function of σ and λ) rather than by
-evidence sufficiency.
+The real issue is weaker and still worth acting on: **`r̂` is well determined
+only where both samples have support.** `H` constrains magnitude on the
+hallucinated sample and the centres carry mass near the factual sample, so
+between and beyond those regions the estimate is weakly identified. Its value
+there is decided by kernel tails and the regulariser rather than by data, and
+the bound `Σ_l α_l` is itself data-dependent and can be large.
 
-*(These are illustrative runs on synthetic scores; they establish the mechanism,
-not the exact numbers the real fit will produce.)*
+Illustrative measurements on **synthetic** scores:
 
-**The degenerate fit (D-04).** At λ = 10¹² the solved `α` is ~4.7×10⁻¹³ and
-`r̂ ≈ 0` everywhere, giving `log r = −13.8` per document. The λ grid tops out at
-1.0, where all 100 coefficients remain positive, so this is not reachable today
-— but `fit()` performs no post-fit sanity check, so nothing would report it if
-it became reachable.
+| Fixture | `Σ α` (exact bound) | observed `r̂` range | reached the `[1e-6, 1e6]` clip? |
+| --- | --- | --- | --- |
+| Scores shaped to the released NBC histograms | 17.1 | `[0.37, 14.6]` | no |
+| Well-separated Gaussians (μ=78 vs μ=22) | 16 434 | up to `1.6×10⁴` | no |
+
+**Correction to a second earlier claim.** An earlier draft said the clip "maps
+both to `log r = ±13.8`". That magnitude arises **only** when the raw ratio
+reaches the `[1e-6, 1e6]` bounds, and **neither** synthetic fit came close: the
+NBC-shaped fit spans `log r ∈ [−0.98, +2.68]` and the well-separated fit peaks
+at `|log r| ≈ 9.7`. The clip is a backstop, not the operating regime observed
+here.
+
+**What the synthetic evidence does and does not establish.** On the NBC-shaped
+fixture, 48 of 101 points on the 0–100 grid satisfy
+`|log r̂| ≥ log(0.8/0.2) = 1.386`, i.e. one document at such a score would end
+the sequence under the default `[0.20, 0.80]` band. **This establishes a
+mechanism, not a rate.** Those scores were drawn uniformly inside the released
+histogram buckets; the real fit is on raw continuous NBC scores with a different
+within-bucket shape, and the observed *document* scores are a different
+distribution again. Specifically, this audit does **not** claim that DDRE is
+"routinely one-shot", that the estimator is unbounded, that this can manufacture
+the headline result, or any prevalence figure for the actual formal fit.
+
+**Why it cannot be settled here.** The repository contains no fixed raw NBC
+scores — `results/diagnostics/sample.json` records counts (199 + 199 = 398), not
+values — and the only NLI caches are the formal Gate 1 artifacts, which this
+audit must not depend on. Measuring the real fit needs the model and a GPU, both
+out of scope.
+
+**Measurement to run before final tuning** (read-only, one fit, no tuning):
+
+1. Fit `ULSIFDensityRatio` on the actual formal raw NBC scores.
+2. Evaluate `r̂` over the **fitted score support** — the observed NBC scores and
+   the observed retrieved-document scores, not a uniform grid.
+3. Report **quantiles of `log r̂`** (min, 1%, 5%, 25%, 50%, 75%, 95%, 99%, max)
+   separately for the NBC scores and the document scores.
+4. Report the **fraction of observed document scores whose `|log r̂|` alone
+   crosses a candidate stopping boundary after one document**, for each
+   `(lower, upper)` pair in the grid.
+5. Report `Σ α`, the fraction of observed scores falling outside the range of
+   each training sample, and whether the `[1e-6, 1e6]` clip is ever reached.
+6. **Only then**, if the measurement warrants it, pre-register a per-document
+   log-evidence clipping or calibration together with a sensitivity analysis
+   over it. **No cap value is selected in this audit.**
+
+#### D-04: degenerate fit — not observed, not established
+
+At λ = 10¹² the solved `α` is ~4.7×10⁻¹³ and `r̂ ≈ 0` everywhere, giving
+`log r = −13.8` per document. On the synthetic fixture at the grid maximum
+λ = 1.0 all 100 coefficients remain positive.
+
+That is the *only* evidence available, and it is a synthetic fixture, so the
+correct statement is: **not observed in the synthetic audit fixture, and not
+established on the actual formal fit.** `fit()` performs no post-fit sanity
+check, so a degenerate solution would be reported as an ordinary one. The
+recommendation stands regardless of prevalence: check that `α` is not all zero
+and that `r̂` is finite and non-degenerate across the observed score range.
 
 ### B. Hyperparameter selection — sound, no leakage
 
@@ -210,10 +265,13 @@ then higher factual PR-AUC.
   Nonfactual AUC-PR is not constrained. Because `balanced = ½(nonfactual +
   factual)`, a factual gain can offset a nonfactual loss and still qualify. For
   a hallucination-detection paper, that is the wrong metric to leave free.
-* **Retrieval-efficiency tie-break — correct in form, near-inert in practice.**
-  `avg_documents` is a float over 383 sentences, so exact ties essentially never
-  occur and the rule reduces to pure minimum-documents. That is what makes D-01
-  dangerous: nothing else pushes back on stopping early.
+* **Retrieval-efficiency tie-break — correct in form, but strictly secondary.**
+  The selector is **lexicographic**: average documents per sentence is optimised
+  first; balanced and factual PR-AUC only affect **exact retrieval-count ties**.
+  This audit did not run threshold tuning, so it makes no claim about how often
+  such ties arise. The ordering alone is enough to establish the D-01 concern:
+  within the feasible set, nothing but the document count drives the choice
+  unless two configurations retrieve exactly the same average number.
 * **Test split — never touched.** See §5.
 * **Fallback — declared in advance, but two problems.** It is predeclared and
   recorded in the summary (`selection_rule`), which is good. But (i) the
@@ -312,7 +370,7 @@ label information.
 
 ## 6. DDRE / BSE fairness
 
-### VERDICT: FAIR ON EVIDENCE, NOT YET FAIR ON PROTOCOL
+### VERDICT: FAIR ON EVIDENCE; TWO PROTOCOL ASYMMETRIES TO DISCLOSE
 
 **The evidence stream is shared.** Both detectors receive the same
 `SentenceRecord`s, the same subclaims, the same `subclaim.documents` in the same
@@ -328,21 +386,45 @@ score; BSE sees `discretize_document_score(score)`. Quantisation is part of
 BSE's algorithm, so this is allowed by the contract. **No other hidden evidence
 advantage was found.**
 
-**Two protocol asymmetries that are not about evidence:**
+**Two asymmetries that are not about evidence:**
 
-* **D-02, retrieval floor.** BSE evaluates `should_continue` *before* the first
-  fetch and can retrieve zero documents; DDRE evaluates only *after* an update
-  and always retrieves at least one. The two efficiency numbers therefore have
-  different origins. This currently **disadvantages** DDRE — it must spend
-  ≥2,990 documents before it can win — but it is still not like-for-like, and if
-  BSE retrieves nothing under some cost setting, DDRE cannot win by
-  construction.
-* **D-09, tuning budget.** DDRE selects its stopping band from 64 validation
-  configurations. BSE's stopping rule is derived from the fixed costs and has no
-  tunable parameter in this pipeline. Any DDRE advantage is therefore partly a
-  model-selection advantage. The scientifically clean options are to tune a BSE
-  stopping parameter (`c_retrieve` is the natural one) on the same validation
-  data, or to state the asymmetry as a limitation.
+**D-02 — an algorithm/protocol asymmetry in the retrieval floor.** BSE evaluates
+`should_continue` before the first fetch and can retrieve zero documents; DDRE
+evaluates only after an update and always retrieves at least one. The two
+efficiency numbers therefore have different origins, and **this currently
+disadvantages DDRE**: it must spend one document per subclaim (~2,990 in total)
+before it can win on cost, and where BSE retrieves nothing, DDRE cannot win by
+construction.
+
+*A threshold pre-check does not fix this.* With `P0 = 0.5`, every `lower` in the
+grid is ≤ 0.40 and every `upper` is ≥ 0.60, so `P0` lies strictly inside the
+band and a band evaluated before the first document **can never stop**. Adding
+one would change nothing. BSE's zero-retrieval behaviour comes from its
+decision-theoretic rule — it compares the expected cost of retrieving against
+the cost of stopping now — not from the mere fact that it checks early. Giving
+DDRE an equivalent Bayes-risk pre-retrieval decision would be a **stopping-rule
+redesign**, not a small fairness fix, and it should be treated and reviewed as
+such.
+
+Recommended for now: **report BSE's zero-retrieval frequency** (subclaims and
+sentences at which it declines the first fetch) and the retrieval-floor
+difference alongside every efficiency comparison, so a reader can see which part
+of any gap is method and which is protocol.
+
+**D-09 — a claim boundary, not an invalid comparison.** DDRE selects its
+stopping band from 64 validation configurations; published BSE has no tunable
+counterpart, because its stopping rule follows from the published costs. Part of
+any DDRE advantage may therefore be a model-selection advantage.
+
+This bounds what the comparison may claim; it does not invalidate it. **The
+primary comparator stays published BSE — official mode, CM = 28, CFA = 96,
+c_retrieve = 1** — because that is what preserves comparability with Wang et al.
+If the tuning-budget question is worth studying, the right shape is a
+**secondary robustness analysis**: published BSE remains primary, and a
+validation-tuned BSE variant is reported alongside it, clearly labelled as *not*
+the published Wang configuration. Replacing the published baseline with a tuned
+one would trade the paper's comparability for a fairness argument that a
+labelled secondary analysis already answers.
 
 ---
 
@@ -368,12 +450,13 @@ The upper side has no analogous defect: every value in `{0.60 … 0.95}` is abov
 the cost threshold, so stopping high always yields "factual", which is
 consistent.
 
-**Why this is not merely cosmetic.** The tuner's primary objective is *fewest
-documents*, and a larger `lower` stops earlier. The objective therefore actively
-prefers the contradictory region. The tie-break (higher balanced PR-AUC) is
-near-inert because exact document-count ties essentially never occur. So the
-selection procedure is biased toward the inconsistent configurations, not merely
-permitted to reach them.
+**Why this is not merely cosmetic.** The selector is lexicographic: average
+documents per sentence is optimised first, and balanced and factual PR-AUC only
+break **exact retrieval-count ties**. A larger `lower` stops earlier and so
+retrieves fewer documents. Within the feasible set, therefore, nothing but the
+document count pushes back on choosing a contradictory threshold. (This audit
+did not run tuning and makes no claim about how often exact ties occur — the
+ordering alone establishes the concern.)
 
 Note the same arithmetic for the Gate-1 primary configuration: CM=14/CFA=24 puts
 the threshold at **0.368421**, where only `lower = 0.40` is inconsistent.
@@ -421,21 +504,32 @@ tuner's own objective prefers the region the fix removes.
 **Blocking — must be resolved before any tuning run:**
 
 1. **D-01** — remove the stopping/classification contradiction (§7, option 1
-   recommended). Fix before tuning, not after.
-2. **D-03** — decide and implement a defensible bound on per-document
-   log-evidence, and report the sensitivity of retrieval savings to it. Without
-   this, the headline efficiency number is not attributable to evidence
-   sufficiency.
+   recommended). Fix before tuning, not after, because the selector optimises
+   average documents first and a larger `lower` retrieves fewer.
 
-**Required before the comparison can be claimed as fair:**
+**Measure before tuning, then decide:**
 
-3. **D-02** — equalise the retrieval floor, or measure and report both floors.
+2. **D-03** — run the six-step measurement in §4-A on the actual formal NBC fit:
+   quantiles of `log r̂` over the fitted score support, the fraction of observed
+   document scores able to cross a stopping boundary after one document, `Σ α`,
+   out-of-range fractions, and whether the clip is ever reached. **Only then**
+   decide whether a per-document log-evidence cap is warranted, and pre-register
+   it with a sensitivity analysis. **No cap value is chosen in this audit.**
+
+**Required for the comparison to state its own boundaries:**
+
+3. **D-02** — report BSE's zero-retrieval frequency and the retrieval-floor
+   difference alongside the efficiency numbers. Do **not** treat a threshold
+   pre-check as an equaliser; a Bayes-risk pre-retrieval decision for DDRE is a
+   stopping-rule redesign and needs its own review.
 4. **D-07** — add a nonfactual AUC-PR floor to the tuner's feasibility test.
 5. **D-08** — add the same floor to `hypothesis_comparison`, and gate the
    supported/not-supported claim on the bootstrap rather than on a point
    estimate.
-6. **D-09** — tune a BSE stopping parameter on the same validation data, or
-   state the tuning-budget asymmetry as a limitation.
+6. **D-09** — keep published BSE (CM = 28, CFA = 96, c_retrieve = 1) as the
+   primary comparator; optionally add a validation-tuned BSE variant as a
+   clearly labelled **secondary** robustness comparator, and state the
+   tuning-budget asymmetry as a claim boundary.
 
 **Required for defensible reporting:**
 
@@ -454,7 +548,7 @@ tuner's own objective prefers the region the fix removes.
 
 ## 9. Tests added
 
-`tests/test_ddre_audit.py` — 48 tests, numpy + stdlib only, no model, no GPU, no
+`tests/test_ddre_audit.py` — 52 tests, numpy + stdlib only, no model, no GPU, no
 test-split access. They pin current behaviour across the ratio orientation and
 normal equations, centre selection, the held-out objective, positivity and
 clipping, hyperparameter selection and determinism, log-odds accumulation and
@@ -463,12 +557,34 @@ zero-document case, sentence aggregation, the cost threshold and its strict
 boundary, evidence-stream equality between BSE and DDRE, and the reporting
 structures.
 
-Eleven of them are named `test_AUDIT_…` and assert behaviour this audit judges
-to be wrong — the D-01 contradiction, the D-02 retrieval floor, the D-03
-unbounded ratio, the D-04 degenerate fit, the D-06 NaN propagation, the
-D-07/D-08 missing nonfactual constraints, the D-09 tuning asymmetry and the
+**Centre selection is proved on disjoint supports** — factual scores in
+`[60, 95]`, hallucinated in `[5, 40]` — so every selected centre is asserted to
+be a member of the normalised factual set and absent from the hallucinated-only
+support. A centre drawn from the wrong sample would fail.
+
+**Three tests record the corrections made in this revision:**
+
+* `test_the_ratio_is_bounded_above_by_the_sum_of_the_coefficients` — the
+  estimator is bounded by `Σ α`; the earlier "unbounded" claim is withdrawn.
+* `test_neither_synthetic_fixture_reaches_the_clip_bounds` — `log r = ±13.8`
+  arises only at the `[1e-6, 1e6]` bounds, which neither synthetic fit reaches.
+* `test_a_threshold_pre_check_could_never_stop_at_the_prior` — with `P0 = 0.5`
+  no `(lower, upper)` pair in the grid can fire before the first document, so a
+  pre-check does not address D-02.
+
+`test_the_published_primary_comparator_configuration_is_unchanged` pins BSE
+official at CM = 28, CFA = 96, c_retrieve = 1, P0 = 0.5, so the published
+primary comparator cannot be swapped for a tuned one silently.
+
+Eleven tests are named `test_AUDIT_…` and assert behaviour this audit judges to be
+wrong — the D-01 contradiction, the D-02 retrieval floor, the D-03 weakly
+constrained extrapolation, the D-04 degenerate fit, the D-06 NaN propagation,
+the D-07/D-08 missing nonfactual constraints, the D-09 tuning asymmetry and the
 D-10 discarded subclaim detail. **They must be updated, not deleted, when each
 fix lands**, so that no fix can land without visibly changing the recorded
 behaviour.
+
+The D-03 and D-04 tests use **synthetic** fixtures and are labelled as such in
+the source: they establish mechanisms, not rates on the actual formal fit.
 
 No production file was modified by this audit.
