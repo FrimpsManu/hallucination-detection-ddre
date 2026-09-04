@@ -82,6 +82,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.extraction_path_diagnostics import (  # noqa: E402
     CELL_COMPARISONS,
+    interpret_shape_and_scaling,
+    summarize_shape_and_scaling,
     CELL_SPECS,
     EXTRACTION_SPECS,
     FORWARD_SPECS,
@@ -278,13 +280,19 @@ def run_forward_row(model, encodings, forward_spec, torch, label):
     from tqdm import tqdm
 
     iterator = tqdm(encodings, desc=label, unit="pair")
-    x0, x1 = [], []
+    x0, x1, probes = [], [], []
     start = time.perf_counter()
     for encoded in iterator:
         scores = score_pair_both_extractions(model, encoded, forward_spec, torch)
         x0.append(scores["X0"])
         x1.append(scores["X1"])
-    return {"X0": x0, "X1": x1, "elapsed_seconds": time.perf_counter() - start}
+        probes.append(scores["shape_scaling"])
+    return {
+        "X0": x0,
+        "X1": x1,
+        "shape_scaling": probes,
+        "elapsed_seconds": time.perf_counter() - start,
+    }
 
 
 def run_primary_decomposition(model, encodings, polarities, torch, args):
@@ -328,8 +336,28 @@ def run_primary_decomposition(model, encodings, polarities, torch, args):
     probe = probe_cell_report(
         args.probe_polarity, args.probe_index, scores_by_cell, polarities
     )
+
+    # Softmax shape vs scaling order, from the logits already computed.
+    flat = probe["flat_index"]
+    shape_scaling = {}
+    for name in ("F0", "F1"):
+        probes = rows[name]["shape_scaling"]
+        summary = summarize_shape_and_scaling(probes)
+        probe_row = probes[flat]
+        shape_scaling[name] = {
+            "forward_row": name,
+            "summary": summary,
+            "probe_pair": probe_row,
+            "interpretation": interpret_shape_and_scaling(probe_row, summary),
+        }
+
     verdict = build_primary_verdict(
-        matrix, probe, scores_by_cell, polarities, controls=controls
+        matrix,
+        probe,
+        scores_by_cell,
+        polarities,
+        controls=controls,
+        shape_scaling=shape_scaling,
     )
 
     return {
@@ -350,6 +378,7 @@ def run_primary_decomposition(model, encodings, polarities, torch, args):
         "comparisons": matrix,
         "determinism_controls": controls,
         "probe": probe,
+        "shape_and_scaling": shape_scaling,
         "verdict": verdict,
     }
 
@@ -382,6 +411,28 @@ def print_cell_comparison(block):
     print(f"  positive histogram (right):  {block['histograms']['right']['positive']}")
     print(f"  negative histogram (left):   {block['histograms']['left']['negative']}")
     print(f"  negative histogram (right):  {block['histograms']['right']['negative']}")
+
+
+def print_secondary_histograms(report):
+    """Print the secondary arms' histograms.
+
+    Reads ``report["secondary"]["nbc_laplace_histograms_by_arm"]``. Extracted
+    into a function because this exact access regressed when the report grew a
+    primary/secondary split, and a function can be unit-tested against the
+    report shape the runner actually builds.
+    """
+    reference = REFERENCE_OBSERVATION
+    histograms = report["secondary"]["nbc_laplace_histograms_by_arm"]
+    print()
+    print("-" * 100)
+    print("LAPLACE-SMOOTHED NBC HISTOGRAMS BY ARM (secondary)")
+    print("-" * 100)
+    print(f"  {'Step1 A1':<8} positive: {reference['positive_histogram_literal_wang']}")
+    print(f"  {'Step1 A3':<8} positive: {reference['positive_histogram_repository']}")
+    for name in sorted(histograms):
+        print(f"  {name:<8} positive: {histograms[name]['positive']}")
+    for name in sorted(histograms):
+        print(f"  {name:<8} negative: {histograms[name]['negative']}")
 
 
 def print_primary(report):
@@ -447,13 +498,26 @@ def print_primary(report):
         mark = "n/a " if link["passed"] is None else ("PASS" if link["passed"] else "FAIL")
         tag = "required" if link["required"] else "informational"
         print(f"  {mark}  link {link['link']} ({tag}): {link['requirement']}")
-    for label, check in verdict["endpoints"].items():
+    for label in (
+        "D00_vs_step1_a1",
+        "D11_vs_step1_a3",
+        "D01_vs_step1_a3",
+        "D10_vs_step1_a1",
+    ):
+        check = verdict["endpoints"][label]
         print(
             f"    {label}: raw {check['raw']:.10f} vs {check['expected_raw']:.10f}  "
             f"|delta| {check['raw_delta']:.3e} <= {check['bound']:.0e}: "
             f"{check['raw_within_bound']}; rounded {check['rounded_matches']}; "
             f"bucket {check['bucket_matches']}"
         )
+    forward = verdict["forward_path"]
+    print(
+        f"    forward path: bucket disagreements "
+        f"{forward['bucket_disagreements']}, bit-identical "
+        f"{forward['bit_identical']}, max |delta| "
+        f"{forward['max_absolute_delta']:.3e}"
+    )
     movement = verdict["histogram_movement"]
     print(
         f"    positive histogram movement reproduced: "
@@ -479,6 +543,36 @@ def print_primary(report):
         f"{verdict['forward_path']['moves_raw_score']}, changes NBC bucket "
         f"{verdict['forward_path']['changes_nbc_bucket']}"
     )
+
+    if report.get("shape_and_scaling"):
+        print()
+        print("-" * 100)
+        print("SUB-DIAGNOSTIC: softmax shape vs scaling order (no extra forward calls)")
+        print("-" * 100)
+        for name, entry in sorted(report["shape_and_scaling"].items()):
+            row = entry["probe_pair"]
+            summary = entry["summary"]
+            print(f"  forward row {name}, probe pair:")
+            print(f"    p_wang_shape        {row['p_wang_shape']!r}")
+            print(f"    p_repo_shape        {row['p_repo_shape']!r}")
+            print(
+                f"    probability delta   {row['probability_delta']:.6e}"
+                f"   bit-identical: {row['probabilities_bit_identical']}"
+            )
+            print(f"    scale_after         {row['scale_after']!r}")
+            print(f"    scale_inside        {row['scale_inside']!r}")
+            print(
+                f"    scaling-only delta  {row['scaling_only_delta']:.6e}"
+                f"   bit-identical: {row['scaling_order_bit_identical']}"
+            )
+            print(
+                f"    across all pairs: softmax shape bit-identical on "
+                f"{summary['softmax_shape']['bit_identical_pairs']}/"
+                f"{summary['pairs']}; scaling order bit-identical on "
+                f"{summary['scaling_order']['bit_identical_pairs']}/"
+                f"{summary['pairs']}"
+            )
+            print(f"    {entry['interpretation']['message']}")
     print()
     print(f"  {verdict['reporting_note']}")
 
@@ -752,18 +846,7 @@ def main():
             f"{row['nbc_bucket']:>10}"
         )
 
-    print()
-    print("-" * 100)
-    print("LAPLACE-SMOOTHED NBC HISTOGRAMS BY ARM")
-    print("-" * 100)
-    print(f"  {'Step1 A1':<8} positive: {reference['positive_histogram_literal_wang']}")
-    print(f"  {'Step1 A3':<8} positive: {reference['positive_histogram_repository']}")
-    for name in sorted(report["histograms_by_arm"]):
-        histogram = report["histograms_by_arm"][name]
-        print(f"  {name:<8} positive: {histogram['positive']}")
-    for name in sorted(report["histograms_by_arm"]):
-        histogram = report["histograms_by_arm"][name]
-        print(f"  {name:<8} negative: {histogram['negative']}")
+    print_secondary_histograms(report)
 
     reproduction = verdict["reference_reproduction"]
     print()

@@ -499,13 +499,49 @@ not span the observed divergence and the verdict is
 `UNDETERMINED_ENDPOINTS_NOT_RECONSTRUCTED`. Determinism controls re-run each
 forward row and gate everything.
 
-A **strong extraction result** is `D00 ≈ D10`, `D01 ≈ D11`, `D00 ≈ A1`,
-`D11 ≈ A3`, with `D00`→`D01` reproducing the pair-169 bucket flip and the
-recorded positive-histogram movement. The verdict then states that the
-extraction/scaling precision and order are sufficient to explain the Step 1
-discrepancy and that **no forward-path change is required**. Forward-path
-effects, if any, are reported separately and never conflated with the
-decision-level finding.
+The **strongest verdict**, `EXTRACTION_PATH_EXPLAINS`, requires the whole
+conjunction — not merely that the forward raw delta looks small:
+
+- `D01` reproduces Step 1 A3 — changing extraction alone reaches the repository
+  endpoint;
+- `D10` reproduces Step 1 A1 — changing the forward alone stays at the Wang
+  endpoint;
+- `D00`→`D01` reproduces the pair-169 bucket flip (and preferably the recorded
+  positive-histogram movement);
+- **neither forward comparison changes any NBC bucket.**
+
+That last condition is checked directly rather than inferred from the raw
+delta. A forward perturbation *below* the `1e-4` bound can still cross a bucket
+edge, and the BSE update consumes the bucket — so a sub-threshold forward delta
+that moves a bucket counts as an effect and blocks the strong verdict. If both
+paths change buckets, the verdict is `BOTH_PATHS_CONTRIBUTE`. A forward raw
+perturbation with zero bucket impact is permitted and reported, but the causal
+text then says exactly that instead of claiming the forward path is
+bit-identical.
+
+Endpoint checks are reported directly as `D00_vs_step1_a1`, `D11_vs_step1_a3`,
+`D01_vs_step1_a3` and `D10_vs_step1_a1`.
+
+#### Sub-diagnostic: softmax shape vs scaling order
+
+`X0` and `X1` differ in **two** ways at once — the softmax is applied to a 1-D
+row in one and the 2-D batch in the other, *and* the `* 100` happens outside
+versus inside the tensor. So the 2×2 alone can establish that the *extraction
+path* explains the discrepancy, but not that the *scaling order specifically*
+does.
+
+A sub-diagnostic separates them using the **same logits**, so it adds no forward
+calls. It reports, before any scaling, the entailment probability from both
+softmax shapes and their delta; then, holding one shared probability tensor
+fixed, `scale_after` (`float(p[0, i].tolist()) * 100`) against `scale_inside`
+(`float((p[:, i] * 100).tolist()[0])`).
+
+- If the shape probability is identical/negligible **and** the scaling-only
+  comparison spans `19.9462890625 → 19.953125`, the scaling **order** is
+  specifically sufficient.
+- If the softmax shape also differs materially, the report says the *combined*
+  extraction path is implicated and does **not** attribute everything to
+  scaling order alone.
 
 #### Secondary: forward-path factorial
 

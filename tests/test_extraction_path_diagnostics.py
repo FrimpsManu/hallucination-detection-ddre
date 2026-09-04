@@ -26,6 +26,7 @@ from src.extraction_path_diagnostics import (
     GUARD_NONDETERMINISTIC,
     HEADLINE_BOTH_CONTRIBUTE,
     HEADLINE_EXTRACTION_EXPLAINS,
+    HEADLINE_EXTRACTION_IMPLICATED,
     HEADLINE_FORWARD_EXPLAINS,
     HEADLINE_NEITHER,
     HEADLINE_UNDETERMINED_ENDPOINTS,
@@ -34,14 +35,22 @@ from src.extraction_path_diagnostics import (
     cell_isolated_factor,
     compare_cells,
     histogram_movement_matches_step1,
+    interpret_shape_and_scaling,
     probe_bucket_flip_reproduced,
     probe_cell_report,
     repository_extraction,
     score_pair_both_extractions,
     secondary_expectation,
+    shape_and_scaling_probe,
+    summarize_shape_and_scaling,
     wang_extraction,
 )
-from src.forward_path_diagnostics import NO, REFERENCE_OBSERVATION, YES
+from src.forward_path_diagnostics import (
+    NO,
+    REFERENCE_OBSERVATION,
+    YES,
+    histograms_by_polarity,
+)
 from src.scoring_diagnostics import nbc_bucket
 
 N_POSITIVE = 199
@@ -127,7 +136,8 @@ class HalfTensor:
         return self
 
     def tolist(self):
-        return [float(v) for v in np.atleast_1d(self.values)]
+        # Mirrors torch: a 0-dim tensor yields a scalar, not a list.
+        return self.values.tolist()
 
 
 class HalfTorch:
@@ -304,6 +314,10 @@ def step1_positive_vectors():
     a3 = list(a1)
     a3[169] = REPO_169
     return a1, a3
+
+
+def perturb(scores, amount):
+    return [v + amount for v in scores]
 
 
 def build_matrix(d00, d01, d10, d11):
@@ -506,6 +520,321 @@ class TestSecondaryExpectation(unittest.TestCase):
     def test_neither_result_leaves_the_secondary_informative(self):
         message = secondary_expectation({"headline": HEADLINE_NEITHER})
         self.assertIn("carries information", message)
+
+
+# --------------------------------------------------------------------------
+# Sub-diagnostic: softmax shape vs scaling order.
+#
+# X0 and X1 differ in two ways at once -- the softmax shape and where the * 100
+# happens. These tests pin that the two are separated, so the 2x2 result cannot
+# be over-claimed as "scaling order" when the shape might also matter.
+# --------------------------------------------------------------------------
+
+class TestShapeAndScalingProbe(unittest.TestCase):
+    def setUp(self):
+        self.torch = HalfTorch(PROBE_PROBABILITIES)
+        self.logits = HalfTensor([PROBE_PROBABILITIES])
+        self.probe = shape_and_scaling_probe(self.logits, self.torch)
+
+    def test_softmax_shape_does_not_change_the_probability(self):
+        self.assertEqual(self.probe["p_wang_shape"], self.probe["p_repo_shape"])
+        self.assertTrue(self.probe["probabilities_bit_identical"])
+        self.assertEqual(self.probe["probability_delta"], 0.0)
+
+    def test_probability_is_reported_before_any_scaling(self):
+        self.assertEqual(self.probe["p_wang_shape"], PROBE_PROBABILITY)
+
+    def test_scaling_order_alone_spans_the_two_recorded_endpoints(self):
+        # One shared probability tensor; the only difference is where * 100 goes.
+        self.assertEqual(self.probe["scale_after"], WANG_169)
+        self.assertEqual(self.probe["scale_inside"], REPO_169)
+        self.assertEqual(
+            self.probe["scaling_only_delta"], REFERENCE_OBSERVATION["raw_delta"]
+        )
+        self.assertFalse(self.probe["scaling_order_bit_identical"])
+
+    def test_summary_aggregates_across_pairs(self):
+        summary = summarize_shape_and_scaling([self.probe] * 5)
+        self.assertEqual(summary["pairs"], 5)
+        self.assertTrue(summary["softmax_shape"]["all_bit_identical"])
+        self.assertEqual(summary["softmax_shape"]["max_absolute_probability_delta"], 0.0)
+        self.assertFalse(summary["scaling_order"]["all_bit_identical"])
+        self.assertEqual(summary["scaling_order"]["bit_identical_pairs"], 0)
+
+    def test_interpretation_when_scaling_order_is_specifically_sufficient(self):
+        summary = summarize_shape_and_scaling([self.probe])
+        result = interpret_shape_and_scaling(self.probe, summary)
+        self.assertTrue(result["scaling_order_specifically_sufficient"])
+        self.assertFalse(result["softmax_shape_material"])
+        self.assertIn("scaling ORDER is specifically sufficient", result["message"])
+
+    def test_interpretation_when_the_softmax_shape_also_differs(self):
+        # A material shape difference must block attribution to scaling alone.
+        probe = dict(self.probe, probability_delta=0.5, probabilities_bit_identical=False)
+        summary = summarize_shape_and_scaling([probe])
+        result = interpret_shape_and_scaling(probe, summary)
+        self.assertFalse(result["scaling_order_specifically_sufficient"])
+        self.assertTrue(result["softmax_shape_material"])
+        self.assertIn("combined extraction path", result["message"])
+
+    def test_interpretation_when_scaling_does_not_span_the_endpoints(self):
+        probe = dict(self.probe, scale_after=33.0, scale_inside=33.0000004)
+        summary = summarize_shape_and_scaling([probe])
+        result = interpret_shape_and_scaling(probe, summary)
+        self.assertFalse(result["scaling_order_specifically_sufficient"])
+        self.assertFalse(result["softmax_shape_material"])
+        self.assertIn("not established as sufficient", result["message"])
+
+    def test_the_probe_costs_no_forward_call(self):
+        calls = []
+
+        class Model:
+            def __call__(self, input_ids, **kwargs):
+                calls.append(1)
+                return {"logits": HalfTensor([PROBE_PROBABILITIES])}
+
+        result = score_pair_both_extractions(
+            Model(), {"input_ids": "IDS"}, FORWARD_SPECS["F0"], self.torch
+        )
+        self.assertEqual(len(calls), 1)
+        self.assertIn("shape_scaling", result)
+        self.assertEqual(result["shape_scaling"]["scale_after"], WANG_169)
+
+
+# --------------------------------------------------------------------------
+# The tightened strong verdict.
+# --------------------------------------------------------------------------
+
+class TestTightenedExtractionVerdict(unittest.TestCase):
+    def test_off_diagonal_endpoint_fields_are_reported(self):
+        wang = vector(WANG_169)
+        repo = vector(REPO_169)
+        verdict = build(wang, repo, wang, repo, controls=clean_controls(wang, wang))
+        self.assertIn("D01_vs_step1_a3", verdict["endpoints"])
+        self.assertIn("D10_vs_step1_a1", verdict["endpoints"])
+        self.assertTrue(verdict["endpoints"]["D01_vs_step1_a3"]["reproduces"])
+        self.assertTrue(verdict["endpoints"]["D10_vs_step1_a1"]["reproduces"])
+
+    def test_strong_verdict_requires_d01_to_reach_the_repository_endpoint(self):
+        # D01 changes extraction but lands somewhere other than A3.
+        wang = vector(WANG_169)
+        repo = vector(REPO_169)
+        elsewhere = vector(25.0)
+        verdict = build(wang, elsewhere, wang, repo, controls=clean_controls(wang, wang))
+        self.assertFalse(verdict["endpoints"]["D01_vs_step1_a3"]["reproduces"])
+        self.assertNotEqual(verdict["headline"], HEADLINE_EXTRACTION_EXPLAINS)
+
+    def test_strong_verdict_requires_d10_to_stay_at_the_wang_endpoint(self):
+        wang = vector(WANG_169)
+        repo = vector(REPO_169)
+        drifted = vector(25.0)
+        verdict = build(wang, repo, drifted, repo, controls=clean_controls(wang, drifted))
+        self.assertFalse(verdict["endpoints"]["D10_vs_step1_a1"]["reproduces"])
+        self.assertNotEqual(verdict["headline"], HEADLINE_EXTRACTION_EXPLAINS)
+
+    def test_a_sub_threshold_forward_delta_that_crosses_a_bucket_is_an_effect(self):
+        # The failure mode the review named: a forward raw delta below 1e-4 that
+        # still moves an NBC bucket must not be treated as "no forward effect".
+        wang = vector(WANG_169)
+        repo = vector(REPO_169)
+        # 9.94999 -> 9.9 (bucket 0); 9.95001 -> 10.0 (bucket 1). Delta 2e-5.
+        d00 = list(wang)
+        d10 = list(wang)
+        d00[0] = 9.94999
+        d10[0] = 9.95001
+        d01 = list(repo)
+        d11 = list(repo)
+        d01[0] = 9.94999
+        d11[0] = 9.95001
+        verdict = build(d00, d01, d10, d11, controls=clean_controls(d00, d10))
+
+        forward = verdict["forward_path"]
+        self.assertLess(forward["max_absolute_delta"], 1e-4)
+        self.assertEqual(forward["moves_raw_score"], NO)
+        self.assertEqual(forward["changes_nbc_bucket"], YES)
+        self.assertEqual(forward["has_effect"], YES)
+        self.assertGreater(forward["bucket_disagreements"], 0)
+        self.assertNotEqual(verdict["headline"], HEADLINE_EXTRACTION_EXPLAINS)
+
+    def test_both_paths_changing_buckets_gives_both_contribute(self):
+        wang = vector(WANG_169)
+        repo = vector(REPO_169)
+        d00, d01, d10, d11 = list(wang), list(repo), list(wang), list(repo)
+        d00[0] = d01[0] = 9.94999
+        d10[0] = d11[0] = 9.95001
+        verdict = build(d00, d01, d10, d11, controls=clean_controls(d00, d10))
+        self.assertEqual(verdict["forward_path"]["changes_nbc_bucket"], YES)
+        self.assertEqual(verdict["extraction_path"]["changes_nbc_bucket"], YES)
+        self.assertEqual(verdict["headline"], HEADLINE_BOTH_CONTRIBUTE)
+
+    def test_strong_verdict_requires_the_probe_bucket_flip(self):
+        # Endpoints reconstruct, but no pair actually flips bucket.
+        wang = vector(WANG_169)
+        verdict = build(wang, wang, wang, wang, controls=clean_controls(wang, wang))
+        self.assertFalse(verdict["probe_bucket_flip_reproduced"])
+        self.assertNotEqual(verdict["headline"], HEADLINE_EXTRACTION_EXPLAINS)
+
+    def test_extraction_implicated_is_a_defensive_branch(self):
+        """Extraction has an effect, the forward has none, yet a strong link fails.
+
+        Through a real 2x2 this is unreachable: if both endpoints reconstruct
+        and the forward has no effect, then D01 ~ D11 ~ A3 and D10 ~ D00 ~ A1
+        follow arithmetically, so links 4, 5 and 7 cannot fail. The branch is
+        kept as a defensive fallback in case the endpoint bound and the
+        difference bound ever diverge, and is exercised here by doctoring the
+        probe directly rather than by contriving impossible score vectors.
+        """
+        wang = vector(WANG_169)
+        repo = vector(REPO_169)
+        matrix, scores = build_matrix(wang, repo, wang, repo)
+        probe = probe_cell_report("positive", 169, scores, POLARITIES)
+        probe["cells"]["D01"] = {
+            "raw": 25.0,
+            "rounded_one_decimal": 25.0,
+            "nbc_bucket": 2,
+        }
+        verdict = build_primary_verdict(
+            matrix, probe, scores, POLARITIES, controls=clean_controls(wang, wang)
+        )
+        self.assertEqual(verdict["headline"], HEADLINE_EXTRACTION_IMPLICATED)
+        self.assertFalse(verdict["endpoints"]["D01_vs_step1_a3"]["reproduces"])
+        self.assertIn("not established because", verdict["causal_candidate"])
+        self.assertFalse(verdict["strong_verdict_links_passed"])
+
+    def test_causal_text_does_not_claim_bit_identity_unless_true(self):
+        wang = vector(WANG_169)
+        repo = vector(REPO_169)
+        nudged_wang = perturb(wang, 5e-5)
+        nudged_repo = perturb(repo, 5e-5)
+        verdict = build(
+            wang, repo, nudged_wang, nudged_repo, controls=clean_controls(wang, nudged_wang)
+        )
+        self.assertEqual(verdict["headline"], HEADLINE_EXTRACTION_EXPLAINS)
+        self.assertFalse(verdict["forward_path"]["bit_identical"])
+        self.assertNotIn("bit-identical", verdict["causal_candidate"])
+        self.assertIn("perturbs the raw score", verdict["causal_candidate"])
+
+    def test_causal_text_claims_bit_identity_when_it_holds(self):
+        wang = vector(WANG_169)
+        repo = vector(REPO_169)
+        verdict = build(wang, repo, wang, repo, controls=clean_controls(wang, wang))
+        self.assertEqual(verdict["headline"], HEADLINE_EXTRACTION_EXPLAINS)
+        self.assertTrue(verdict["forward_path"]["bit_identical"])
+        self.assertIn("bit-identical", verdict["causal_candidate"])
+
+    def test_strong_verdict_links_are_tracked_separately_from_guards(self):
+        wang = vector(WANG_169)
+        repo = vector(REPO_169)
+        verdict = build(wang, repo, wang, repo, controls=clean_controls(wang, wang))
+        self.assertTrue(verdict["required_links_passed"])
+        self.assertTrue(verdict["strong_verdict_links_passed"])
+        guards = [l["link"] for l in verdict["causal_chain"] if l["required"]]
+        strong = [l["link"] for l in verdict["causal_chain"] if l["strong_verdict"]]
+        self.assertEqual(guards, [1, 2, 3])
+        self.assertEqual(strong, [1, 2, 3, 4, 5, 6, 7])
+
+    def test_shape_scaling_is_carried_into_the_verdict(self):
+        wang = vector(WANG_169)
+        repo = vector(REPO_169)
+        matrix, scores = build_matrix(wang, repo, wang, repo)
+        probe = probe_cell_report("positive", 169, scores, POLARITIES)
+        verdict = build_primary_verdict(
+            matrix, probe, scores, POLARITIES,
+            controls=clean_controls(wang, wang),
+            shape_scaling={"F0": {"marker": True}},
+        )
+        self.assertEqual(verdict["shape_and_scaling"], {"F0": {"marker": True}})
+
+
+# --------------------------------------------------------------------------
+# Report / printing structure.
+#
+# The secondary histogram printer read a top-level key that no longer existed
+# after the report grew a primary/secondary split, which crashed a full run
+# with KeyError. These tests exercise the printers against the report shape the
+# runner actually builds.
+# --------------------------------------------------------------------------
+
+def load_runner():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "diagnose_forward_path_under_test", "scripts/diagnose_forward_path.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestRunnerReportStructure(unittest.TestCase):
+    def setUp(self):
+        self.runner = load_runner()
+
+    def silent(self, fn, *args):
+        import contextlib
+        import io
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            fn(*args)
+        return buffer.getvalue()
+
+    def primary_report(self):
+        wang = vector(WANG_169)
+        repo = vector(REPO_169)
+        matrix, scores = build_matrix(wang, repo, wang, repo)
+        probe = probe_cell_report("positive", 169, scores, POLARITIES)
+        controls = clean_controls(wang, wang)
+        verdict = build_primary_verdict(
+            matrix, probe, scores, POLARITIES, controls=controls
+        )
+        return {
+            "comparisons": matrix,
+            "determinism_controls": controls,
+            "probe": probe,
+            "histograms_by_cell": {
+                name: histograms_by_polarity(s, POLARITIES)
+                for name, s in scores.items()
+            },
+            "shape_and_scaling": None,
+            "verdict": verdict,
+        }
+
+    def test_print_primary_runs_against_the_runner_report_shape(self):
+        output = self.silent(self.runner.print_primary, self.primary_report())
+        self.assertIn("PRIMARY VERDICT", output)
+        self.assertIn("D01_vs_step1_a3", output)
+        self.assertIn("D10_vs_step1_a1", output)
+
+    def test_print_secondary_histograms_reads_the_nested_key(self):
+        # The exact regression: this must read report["secondary"][...], not a
+        # top-level key.
+        report = {
+            "secondary": {
+                "nbc_laplace_histograms_by_arm": {
+                    "C0": {"positive": [1] * 10, "negative": [1] * 10},
+                    "C4": {"positive": [2] * 10, "negative": [2] * 10},
+                }
+            }
+        }
+        output = self.silent(self.runner.print_secondary_histograms, report)
+        self.assertIn("C0", output)
+        self.assertIn("C4", output)
+
+    def test_print_secondary_histograms_fails_loudly_on_the_old_shape(self):
+        # A report carrying only the pre-restructure top-level key must not
+        # silently print nothing; it must raise.
+        with self.assertRaises(KeyError):
+            self.silent(
+                self.runner.print_secondary_histograms,
+                {"histograms_by_arm": {"C0": {"positive": [], "negative": []}}},
+            )
+
+    def test_runner_imports_without_torch(self):
+        # The printers must stay importable in a CI environment with numpy only.
+        self.assertTrue(hasattr(self.runner, "print_primary"))
+        self.assertTrue(hasattr(self.runner, "print_secondary_histograms"))
+        self.assertTrue(hasattr(self.runner, "run_primary_decomposition"))
 
 
 if __name__ == "__main__":
