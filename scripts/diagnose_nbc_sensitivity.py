@@ -72,10 +72,13 @@ def parse_args():
     parser.add_argument("--data-root", default="data/wang")
     parser.add_argument(
         "--cache-path",
-        default="results/wang_nli_cache.sqlite",
+        default="results/wang_nli_cache_fidelity_v2_batch1.sqlite",
         help=(
             "Existing NLI cache to replay. Opened READ-ONLY; never written to. "
-            "Point this at the formal Gate 1 cache."
+            "For the formal result this MUST be the corrected Wang-fidelity v2 "
+            "cache, not the historical v1 cache: v1 rows were scaled inside the "
+            "tensor and carry the half-precision rounding this experiment is "
+            "downstream of."
         ),
     )
     parser.add_argument("--model-name", default=OFFICIAL_MODEL)
@@ -148,28 +151,39 @@ def evaluate_one_configuration(records, scorer, pos_hist, neg_hist, config_name)
 
 
 def evaluate_combination(records, scorer, positive_bin, negative_bin):
+    """Evaluate one placement under both cost configurations, independently.
+
+    The two configurations are evaluated in separate try blocks on purpose. A
+    completed CM_14_CFA_24 result is a real measurement, and a cache miss that
+    only occurs while evaluating CM_28_CFA_96 must not discard it. Completeness
+    is therefore recorded per configuration, never once for the whole row.
+    """
     pos_hist, neg_hist = combination_histograms(positive_bin, negative_bin)
     row = {
         "positive_bin": positive_bin,
         "negative_bin": negative_bin,
         "positive_histogram": pos_hist,
         "negative_histogram": neg_hist,
-        "incomplete": False,
-        "incomplete_reason": None,
         "configurations": {},
     }
     for config_name in (PRIMARY, SECONDARY):
         try:
-            row["configurations"][config_name] = evaluate_one_configuration(
+            block = evaluate_one_configuration(
                 records, scorer, pos_hist, neg_hist, config_name
             )
+            block["complete"] = True
+            block["incomplete_reason"] = None
         except MissingDocumentScore as exc:
-            row["incomplete"] = True
-            row["incomplete_reason"] = (
-                f"{config_name}: required document score absent from the cache "
-                f"({exc})"
-            )
-            break
+            block = {
+                "configuration": config_name,
+                "complete": False,
+                "incomplete_reason": (
+                    f"required document score absent from the cache ({exc})"
+                ),
+                "verdict": None,
+                "metrics": [],
+            }
+        row["configurations"][config_name] = block
     return row
 
 
@@ -229,9 +243,12 @@ def main():
         for index, (positive_bin, negative_bin) in enumerate(combinations, start=1):
             row = evaluate_combination(records, scorer, positive_bin, negative_bin)
             rows.append(row)
-            primary = row["configurations"].get(PRIMARY, {}).get("verdict", "n/a")
-            secondary = row["configurations"].get(SECONDARY, {}).get("verdict", "n/a")
-            marker = "INCOMPLETE" if row["incomplete"] else f"{primary}/{secondary}"
+            marker = "/".join(
+                row["configurations"][name]["verdict"]
+                if row["configurations"][name]["complete"]
+                else "INCOMPLETE"
+                for name in (PRIMARY, SECONDARY)
+            )
             print(
                 f"  [{index:3d}/{len(combinations)}] pos_bin={positive_bin} "
                 f"neg_bin={negative_bin}  {marker}",
@@ -240,7 +257,12 @@ def main():
     finally:
         scorer.close()
 
-    summary = summarize(rows, primary=PRIMARY, secondary=SECONDARY)
+    summary = summarize(
+        rows,
+        primary=PRIMARY,
+        secondary=SECONDARY,
+        expected_combinations=len(enumerate_combinations()),
+    )
     reading = interpretation(summary, primary=PRIMARY)
     closest = closest_combinations(rows, configuration=PRIMARY, limit=5)
 
@@ -282,14 +304,32 @@ def main():
     print("-" * 100)
     print("SUMMARY")
     print("-" * 100)
-    print(f"  combinations evaluated:            {summary['combinations_evaluated']}")
-    print(f"  complete:                          {summary['combinations_complete']}")
-    print(f"  incomplete (missing cached score): {summary['combinations_incomplete']}")
-    print(f"  {PRIMARY} PASS:                  {summary[f'{PRIMARY}_pass']}")
-    print(f"  {PRIMARY} WARN (not FAIL):       {summary[f'{PRIMARY}_warn_not_fail']}")
-    print(f"  {PRIMARY} FAIL:                  {summary[f'{PRIMARY}_fail']}")
-    print(f"  {SECONDARY} PASS:                 {summary[f'{SECONDARY}_pass']}")
-    print(f"  BOTH configurations PASS:          {summary['both_configurations_pass']}")
+    print(
+        f"  combinations evaluated:      {summary['combinations_evaluated']}"
+        f" of {summary['expected_combinations']}"
+        f"   (full grid: {summary['grid_fully_enumerated']})"
+    )
+    print()
+    print(f"  {PRIMARY} (primary)")
+    print(
+        f"    complete / incomplete:     {summary[f'{PRIMARY}_complete']}"
+        f" / {summary[f'{PRIMARY}_incomplete']}"
+    )
+    print(f"    PASS:                      {summary[f'{PRIMARY}_pass']}")
+    print(f"    WARN (not FAIL):           {summary[f'{PRIMARY}_warn_not_fail']}")
+    print(f"    FAIL:                      {summary[f'{PRIMARY}_fail']}")
+    print()
+    print(f"  {SECONDARY} (secondary)")
+    print(
+        f"    complete / incomplete:     {summary[f'{SECONDARY}_complete']}"
+        f" / {summary[f'{SECONDARY}_incomplete']}"
+    )
+    print(f"    PASS:                      {summary[f'{SECONDARY}_pass']}")
+    print()
+    print(
+        f"  both complete:               {summary['both_configurations_complete']}"
+    )
+    print(f"  BOTH configurations PASS:    {summary['both_configurations_pass']}")
 
     if closest:
         print()
