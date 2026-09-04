@@ -419,9 +419,57 @@ missing spans have to be filled before the grid can settle the question.
 
 ```bash
 python scripts/complete_nbc_cache.py \
-  --cache-path /content/drive/MyDrive/ddre-gate1/wang_nli_cache_fidelity_v2_batch1.sqlite \
+  --source-cache /content/drive/MyDrive/ddre-gate1/wang_nli_cache_fidelity_v2_batch1.sqlite \
+  --output-cache /content/drive/MyDrive/ddre-gate1/wang_nli_cache_fidelity_v2_batch1_nbc_complete.sqlite \
+  --reference-provenance /content/drive/MyDrive/ddre-gate1/diagnostics/step2_forward_path.json \
   --output /content/drive/MyDrive/ddre-gate1/diagnostics/nbc_cache_completion.json
 ```
+
+**The source cache is never written to.** It is an immutable completed Gate 1
+artifact: read, hashed, and copied. New scores go only into the derived cache,
+and the sensitivity rerun must use the derived file. The source SHA-256 is
+recorded before the copy and recomputed after the run to prove it is
+byte-identical; if it is not, the run reports that and exits non-zero.
+`source == destination` is refused outright.
+
+Recorded in the report: source and destination paths, source SHA-256 before,
+destination SHA-256 after completion, and both row counts.
+
+#### Pre-write provenance guard
+
+Scores added to an existing cache are only sound if produced under the same
+semantics as the scores already in it — a cache mixing two checkpoints is worse
+than an incomplete one, because the incompleteness is visible and the mixture is
+not. `from_pretrained(model_name)` resolves against Hugging Face main, which
+moves, so the tool compares this environment against the **previously recorded
+formal provenance** and loads the model *and* tokenizer with `revision=` pinned
+to the revision that run recorded.
+
+Verified before the derived cache is opened for writes and before any inference:
+
+| | |
+| --- | --- |
+| exact official model name | `SCORE_VERSION` = `…-hostscale-v2` |
+| Wang source commit = `3e8fc4d…` | batch size = 1 |
+| truncation equivalence | resolved checkpoint revision |
+| model/tokenizer commit hashes | model dtype, device, GPU |
+| `torch` / `transformers` / `tokenizers` versions | model in eval mode |
+
+**Unverifiable is treated as failed.** A reference that does not record a field
+cannot establish that the field matches, and silently accepting the current
+value is the exact failure mode the guard exists to prevent. On any mismatch the
+run aborts having performed **zero inference**, written **zero cache rows**, and
+created **no derived cache**.
+
+`numpy`/`scipy`/`sklearn`/`sentencepiece` versions are reported but do not gate:
+they cannot change an NLI forward pass. The GPU check applies only when a GPU
+was used — `cpu` vs `cuda` is already gated by the device check.
+
+Two loudly-named debug overrides exist and are **never used by the formal
+command**: `--unsafe-allow-in-place` permits `source == destination`, and
+`--unsafe-allow-local-checkpoint` downgrades the checkpoint-identity checks for
+exercising the tool against a local checkpoint. Neither relaxes score version,
+batch size, Wang commit, truncation, dtype, device or library versions.
 
 This replays `bse_official` for exactly those three placements under
 **CM=14/CFA=24 only**, using the ordinary production `EntailmentScorer` at
@@ -445,7 +493,7 @@ success.
 
 The tool is **cache completion only**. It computes no metric, reaches no
 verdict, and reinterprets nothing. Rerun `scripts/diagnose_nbc_sensitivity.py`
-unchanged against the expanded cache. Running the completion tool twice is a
+unchanged against the **derived** cache. Running the completion tool twice is a
 no-op: the second pass evaluates zero spans.
 
 ## Gate 1 scoring-path diagnostics

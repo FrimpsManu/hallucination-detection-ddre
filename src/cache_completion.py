@@ -34,9 +34,19 @@ Only CM=14/CFA=24 is evaluated. CM=28/CFA=96 retrieves different documents from
 the same placement, and scoring for it here would compute spans this step was
 not asked to compute.
 
+The original formal cache is treated as an immutable completed Gate 1 artifact.
+It is never opened for writing. New scores go into a **derived copy**, and the
+source's SHA-256 is recorded before the copy and recomputed afterwards to prove
+it did not change. The later sensitivity rerun uses the derived cache.
+
 Standard library only at module scope, so the accounting and reporting logic is
 testable without torch or a model.
 """
+
+import hashlib
+import shutil
+import sqlite3
+from pathlib import Path
 
 # The three CM=14/CFA=24 placements the formal v2 run could not evaluate,
 # recorded as (positive_bin, negative_bin). Overridable on the command line so
@@ -51,6 +61,126 @@ PRIMARY_CONFIGURATION = "CM_14_CFA_24"
 # step's semantics identical to the released implementation and makes the
 # accounting exact: one _infer_batch call is one span evaluation.
 WANG_BATCH_SIZE = 1
+
+
+def sha256_file(path, chunk_size=1024 * 1024):
+    """SHA-256 of a file, streamed so a multi-gigabyte cache is affordable."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def cache_row_count(path):
+    """Row count of an NLI cache, read-only."""
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        row = connection.execute("SELECT COUNT(*) FROM nli_scores").fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        connection.close()
+
+
+class UnsafeCacheTarget(RuntimeError):
+    """The requested source/destination pair would modify a formal artifact."""
+
+
+def prepare_derived_cache(
+    source, destination, *, allow_in_place=False, overwrite=False
+):
+    """Copy the formal cache to a derived path, and record both identities.
+
+    The source is an immutable completed Gate 1 artifact. Writing into it would
+    make the recorded sensitivity result unreproducible, so the formal path
+    always writes to a copy.
+
+    ``allow_in_place`` exists for local debugging only and is never used by the
+    documented formal command. Without it, source == destination is refused.
+    """
+    source_path = Path(source)
+    destination_path = Path(destination)
+
+    if not source_path.exists():
+        raise FileNotFoundError(f"source cache not found: {source_path}")
+
+    same_file = (
+        destination_path.exists()
+        and source_path.samefile(destination_path)
+    ) or source_path.resolve() == destination_path.resolve()
+
+    if same_file and not allow_in_place:
+        raise UnsafeCacheTarget(
+            f"source and destination are the same file ({source_path}). The "
+            "formal cache is an immutable artifact; write to a derived copy "
+            "instead. --unsafe-allow-in-place exists for local debugging and is "
+            "not used by the documented formal command."
+        )
+
+    source_sha_before = sha256_file(source_path)
+    source_rows = cache_row_count(source_path)
+
+    if same_file:
+        return {
+            "in_place": True,
+            "source_cache": str(source_path),
+            "destination_cache": str(destination_path),
+            "source_sha256_before": source_sha_before,
+            "source_rows": source_rows,
+            "destination_sha256_after_copy": source_sha_before,
+            "destination_rows_after_copy": source_rows,
+            "copied": False,
+            "warning": (
+                "UNSAFE: writing in place into the source cache. This modifies a "
+                "formal artifact and must never be used for a formal result."
+            ),
+        }
+
+    if destination_path.exists() and not overwrite:
+        raise UnsafeCacheTarget(
+            f"destination cache already exists: {destination_path}. Refusing to "
+            "overwrite an existing derived cache; pass --overwrite-output only "
+            "if you intend to discard it."
+        )
+
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_path, destination_path)
+
+    destination_sha = sha256_file(destination_path)
+    destination_rows = cache_row_count(destination_path)
+
+    return {
+        "in_place": False,
+        "source_cache": str(source_path),
+        "destination_cache": str(destination_path),
+        "source_sha256_before": source_sha_before,
+        "source_rows": source_rows,
+        "destination_sha256_after_copy": destination_sha,
+        "destination_rows_after_copy": destination_rows,
+        "copied": True,
+        "copy_faithful": destination_sha == source_sha_before
+        and destination_rows == source_rows,
+        "warning": None,
+    }
+
+
+def verify_source_unchanged(source, expected_sha256):
+    """Recompute the source digest and confirm the formal artifact is intact."""
+    observed = sha256_file(source)
+    return {
+        "source_cache": str(source),
+        "expected_sha256": expected_sha256,
+        "observed_sha256": observed,
+        "unchanged": observed == expected_sha256,
+        "message": (
+            "The source cache is byte-identical to before the run."
+            if observed == expected_sha256
+            else (
+                "SOURCE CACHE CHANGED. A formal Gate 1 artifact was modified. "
+                "Do not use either cache until this is understood."
+            )
+        ),
+    }
 
 
 def placement_label(positive_bin, negative_bin):
@@ -130,7 +260,16 @@ def build_counting_scorer(
     return scorer
 
 
-def completion_report(placements, rows_before, rows_after, per_placement, verification):
+def completion_report(
+    placements,
+    rows_before,
+    rows_after,
+    per_placement,
+    verification,
+    cache_identity=None,
+    source_check=None,
+    guard=None,
+):
     """Assemble the accounting for one cache-completion run.
 
     ``rows_after - rows_before`` and the summed evaluation count are two
@@ -143,9 +282,15 @@ def completion_report(placements, rows_before, rows_after, per_placement, verifi
     requested = sum(entry["spans_requested"] for entry in per_placement)
     rows_added = rows_after - rows_before
 
+    source_intact = source_check is None or bool(source_check.get("unchanged"))
+
     return {
         "placements_requested": [list(p) for p in placements],
         "configuration_completed": PRIMARY_CONFIGURATION,
+        "cache_identity": cache_identity,
+        "source_cache_check": source_check,
+        "source_cache_unchanged": source_intact,
+        "provenance_guard": guard,
         "previously_missing_span_scores": evaluated,
         "new_nli_evaluations_performed": evaluated,
         "span_requests_total": requested,
@@ -170,11 +315,17 @@ def completion_report(placements, rows_before, rows_after, per_placement, verifi
         "all_requested_placements_complete": bool(
             verification and all(entry["complete"] for entry in verification)
         ),
+        "run_sound": bool(
+            verification
+            and all(entry["complete"] for entry in verification)
+            and rows_after - rows_before == evaluated
+            and source_intact
+        ),
         "scope_note": (
             "Cache completion only. No metric was computed, no verdict reached, "
             "and the sensitivity result is not reinterpreted here. Rerun "
-            "scripts/diagnose_nbc_sensitivity.py unchanged against the expanded "
-            "cache."
+            "scripts/diagnose_nbc_sensitivity.py unchanged against the DERIVED "
+            "cache; the source cache is unmodified."
         ),
     }
 
