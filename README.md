@@ -297,6 +297,43 @@ By default, a successful full run automatically commits and pushes **only these 
 python main.py --no-push-results
 ```
 
+## Gate 1 Step 2 outcome: score scaling order
+
+The Step 2 decomposition was run on the real T4 environment and isolated a
+single cause of the A1/A3 **scorer-path** discrepancy: the order in which the
+entailment probability is scaled to 0-100.
+
+Released `utils.py:59-62` takes the probabilities out of the tensor and only
+then multiplies by 100, in Python float64. This repository multiplied while
+still inside the tensor, so the product was rounded to the tensor dtype. On the
+half-precision T4 run that rounding is coarse enough to move a score across an
+NBC bucket edge.
+
+What the run measured, over all 398 released NBC pairs:
+
+| Observation | |
+| --- | --- |
+| `D00` = `D10` = 19.9462890625 (bucket 1) | forward path made no difference |
+| `D01` = `D11` = 19.953125 (bucket 2) | extraction path did |
+| forward path | bit-identical on all 398 pairs |
+| softmax 1-D vs 2-D shape | bit-identical on all 398 pairs |
+| scaling order alone | reproduced the exact pair-169 discrepancy |
+| extraction path | reproduced the exact Step 1 positive NBC histogram movement |
+
+`src/utils.py` now matches the released extraction order, and `SCORE_VERSION` is
+bumped to `...-hostscale-v2` so cache rows written under the previous convention
+cannot be silently reused. No rounding is introduced in the scorer: scores stay
+continuous for DDRE, and BSE's one-decimal rounding and bucketing remain in
+`src/baseline_core.py` where the released implementation puts them. Historical
+caches and result artifacts are left in place; they simply no longer match a v2
+key.
+
+**This is not a claim that scaling order explains every difference from Wang's
+Table 1.** It explains the A1/A3 scorer-path discrepancy that Step 2 was built
+to isolate. Whether the corrected scorer brings the full reproduction back
+within the predeclared Gate 1 tolerances is exactly what the Gate 1 rerun will
+test, and it has not been run.
+
 ## Gate 1 scoring-path diagnostics
 
 Gate 1 has been run and FAILED against the predeclared tolerances. These two
