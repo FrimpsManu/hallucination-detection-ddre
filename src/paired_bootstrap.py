@@ -59,6 +59,15 @@ CONFIRMATORY_CI_LEVEL = 0.95
 CONFIRMATORY_BOOTSTRAP_UNIT = "passage"
 CONFIRMATORY_CI_METHOD = "percentile"
 
+# The estimand itself. A bootstrap can carry every other frozen setting --
+# 10,000 resamples, seed 42, a 95% percentile interval over passages -- and
+# still be measuring something else entirely, because the metric is injectable.
+# So the implementation is pinned by a single canonical identifier that only the
+# default production path may record.
+CONFIRMATORY_PR_AUC_DEFINITION = (
+    "src.evaluation.wang_pr_auc:precision_recall_curve+auc(recall,precision)"
+)
+
 # The frozen primary comparator and split. The CLI can still change any of
 # these -- alternative configurations remain valid for exploratory work -- but a
 # run that differs from these values is NOT the run this protocol pre-registered
@@ -122,6 +131,31 @@ def _wang_pr_auc():
     from src.evaluation import wang_pr_auc
 
     return wang_pr_auc
+
+
+def _pr_auc_identity(injected):
+    """What metric was ACTUALLY used, recorded honestly.
+
+    Only ``pr_auc=None`` -- the default production path, which resolves to
+    ``src.evaluation.wang_pr_auc`` -- may record the canonical identifier.
+    Anything injected is labelled ``custom:<module>.<qualname>`` and can never
+    be confirmatory, whatever it computes.
+
+    No attempt is made to decide whether an injected function is *equivalent*
+    to Wang PR-AUC. Equivalence cannot be read off a name, and a wrong guess
+    here would let a different estimand inherit the frozen protocol's
+    authority. A custom metric makes the run exploratory, which is not a
+    negative result.
+    """
+    if injected is None:
+        return CONFIRMATORY_PR_AUC_DEFINITION
+    module = getattr(injected, "__module__", None) or "<unknown>"
+    qualname = (
+        getattr(injected, "__qualname__", None)
+        or getattr(injected, "__name__", None)
+        or repr(injected)
+    )
+    return f"custom:{module}.{qualname}"
 
 
 def validate_paired_inputs(ddre_observations, baseline_observations):
@@ -312,6 +346,9 @@ def paired_passage_bootstrap(
 ):
     """Paired cluster bootstrap over passages. Returns observed values and CIs."""
     shape = validate_paired_inputs(ddre_observations, baseline_observations)
+    # Resolved before substitution, so the record describes the function the
+    # replicates were actually computed with.
+    pr_auc_definition = _pr_auc_identity(pr_auc)
     pr_auc = _wang_pr_auc() if pr_auc is None else pr_auc
 
     ddre_arrays = _method_arrays(ddre_observations)
@@ -369,10 +406,7 @@ def paired_passage_bootstrap(
         "sentences": shape["sentences"],
         "factual_sentences": shape["factual_sentences"],
         "nonfactual_sentences": shape["nonfactual_sentences"],
-        "pr_auc_definition": (
-            "src.evaluation.wang_pr_auc -- precision_recall_curve followed by "
-            "auc(recall, precision), identical to the normal evaluation path"
-        ),
+        "pr_auc_definition": pr_auc_definition,
         "endpoints": endpoints,
     }
 
@@ -398,6 +432,10 @@ def validate_bootstrap_provenance(bootstrap):
         ("seed", CONFIRMATORY_BOOTSTRAP_SEED),
         ("ci_level", CONFIRMATORY_CI_LEVEL),
         ("ci_method", CONFIRMATORY_CI_METHOD),
+        # The estimand. Every other setting can be right while the metric is
+        # something else, and then the frozen protocol is measuring the wrong
+        # thing at high precision.
+        ("pr_auc_definition", CONFIRMATORY_PR_AUC_DEFINITION),
     ):
         actual = bootstrap.get(field)
         if actual != expected:
@@ -432,8 +470,48 @@ def validate_bootstrap_provenance(bootstrap):
                 f"{endpoint.get('sign_convention')!r}, frozen protocol requires "
                 f"{expected_sign!r}"
             )
-        if endpoint.get("ci_lower") is None or endpoint.get("ci_upper") is None:
-            mismatches.append(f"endpoint {name!r} has no confidence interval")
+        mismatches.extend(_interval_mismatches(name, endpoint))
+    return mismatches
+
+
+def _interval_mismatches(name, endpoint):
+    """A confidence interval must be present, numeric, finite and ordered.
+
+    NaN matters more than it looks. ``float("nan") >= -0.005`` is False, so a
+    corrupted endpoint would quietly fail its non-inferiority gate and be
+    reported as ``NOT_SUPPORTED`` -- a negative scientific result manufactured
+    out of a broken computation. An interval that cannot be trusted makes the
+    analysis unavailable, not negative.
+
+    Nothing is repaired: a reversed interval is reported, never reordered, and
+    a non-finite bound is reported, never clipped.
+    """
+    mismatches = []
+    bounds = {}
+    for field in ("ci_lower", "ci_upper"):
+        value = endpoint.get(field)
+        if value is None:
+            mismatches.append(f"endpoint {name!r} has no {field}")
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float, np.floating,
+                                                            np.integer)):
+            mismatches.append(
+                f"endpoint {name!r} has a non-numeric {field} ({value!r})"
+            )
+            continue
+        if not math.isfinite(float(value)):
+            mismatches.append(
+                f"endpoint {name!r} has a non-finite {field} ({value!r}); the "
+                "analysis is unavailable, not negative"
+            )
+            continue
+        bounds[field] = float(value)
+    if len(bounds) == 2 and bounds["ci_lower"] > bounds["ci_upper"]:
+        mismatches.append(
+            f"endpoint {name!r} has ci_lower {bounds['ci_lower']!r} above "
+            f"ci_upper {bounds['ci_upper']!r}; the bounds are not reordered, "
+            "the analysis is unavailable"
+        )
     return mismatches
 
 
@@ -542,7 +620,20 @@ def confirmatory_protocol():
         "ci_level": CONFIRMATORY_CI_LEVEL,
         "ci_percentiles": [2.5, 97.5],
         "pr_auc_noninferiority_margin": CONFIRMATORY_PR_AUC_MARGIN,
-        "pr_auc_definition": "src.evaluation.wang_pr_auc (Wang-compatible)",
+        "pr_auc_definition": CONFIRMATORY_PR_AUC_DEFINITION,
+        "pr_auc_definition_requirement": (
+            "A confirmatory run must use the canonical Wang PR-AUC "
+            "implementation. The bootstrap accepts an injected metric for unit "
+            "tests and exploratory analyses; such a run records "
+            "'custom:<module>.<qualname>' and is NOT_CONFIRMATORY. No attempt "
+            "is made to judge an injected function equivalent from its name."
+        ),
+        "interval_validity_requirement": (
+            "Every required endpoint must carry a present, numeric, finite and "
+            "correctly ordered interval. A NaN, infinite or reversed bound "
+            "makes the analysis unavailable (NOT_CONFIRMATORY), never a "
+            "negative result, and bounds are never repaired or reordered."
+        ),
         "sign_conventions": {
             "performance": "DDRE - BSE; positive favours DDRE",
             "efficiency": "BSE - DDRE; positive favours DDRE",
@@ -560,10 +651,13 @@ def confirmatory_protocol():
             "set."
         ),
         "bootstrap_provenance_requirement": (
-            "The bootstrap record and every endpoint must carry the frozen "
-            "bootstrap_unit, n_resamples, seed, ci_level, ci_method and sign "
-            "conventions. Exploratory bootstraps with other settings are "
-            "allowed but can never produce a confirmatory claim."
+            "The bootstrap record must carry the frozen bootstrap_unit, "
+            "n_resamples, seed, ci_level, ci_method and pr_auc_definition, and "
+            "every endpoint must carry the same provenance, the correct sign "
+            "convention and a present, numeric, finite, correctly ordered "
+            "interval. Exploratory bootstraps with other settings -- including "
+            "an injected metric -- are allowed but can never produce a "
+            "confirmatory claim."
         ),
         "primary_claim_rule": (
             "CONJUNCTIVE (intersection-union). The primary claim is supported "
@@ -660,11 +754,27 @@ def assess_claim(
     confirmatory_eligible = not disqualifiers
 
     def lower_bound(name):
-        """None when absent: a missing endpoint fails its gate, it never raises."""
+        """The recorded lower bound, whatever it is. Reported verbatim."""
         if not bootstrap_available:
             return None
         endpoint = (bootstrap.get("endpoints") or {}).get(name)
         return None if endpoint is None else endpoint.get("ci_lower")
+
+    def usable_bound(name):
+        """The bound as a number, or None if it cannot be compared.
+
+        A missing, non-numeric or non-finite bound fails its gate rather than
+        raising or comparing. It is already a provenance disqualifier, so the
+        run is NOT_CONFIRMATORY; this only stops a corrupted value from being
+        silently treated as a passing or failing measurement.
+        """
+        value = lower_bound(name)
+        if value is None or isinstance(value, bool):
+            return None
+        if not isinstance(value, (int, float, np.floating, np.integer)):
+            return None
+        value = float(value)
+        return value if math.isfinite(value) else None
 
     performance = {}
     for name, key in (
@@ -672,9 +782,9 @@ def assess_claim(
         ("factual_pass", "factual_auc_pr_delta"),
         ("balanced_pass", "balanced_pr_auc_delta"),
     ):
-        bound = lower_bound(key)
+        bound = usable_bound(key)
         performance[name] = bound is not None and bound >= -margin
-        performance[f"{name}_ci_lower"] = bound
+        performance[f"{name}_ci_lower"] = lower_bound(key)
     performance["all_pass"] = bool(
         performance["nonfactual_pass"]
         and performance["factual_pass"]
@@ -683,9 +793,9 @@ def assess_claim(
     performance["margin"] = margin
     performance["rule"] = f"lower 95% CI of (DDRE - BSE) >= -{margin}"
 
-    retrieval_bound = lower_bound(PRIMARY_EFFICIENCY_ENDPOINT)
+    retrieval_bound = usable_bound(PRIMARY_EFFICIENCY_ENDPOINT)
     retrieval_pass = retrieval_bound is not None and retrieval_bound > 0.0
-    nli_bound = lower_bound(SECONDARY_EFFICIENCY_ENDPOINT)
+    nli_bound = usable_bound(SECONDARY_EFFICIENCY_ENDPOINT)
     nli_pass = nli_bound is not None and nli_bound > 0.0
 
     primary_claim_supported = bool(
@@ -741,9 +851,9 @@ def assess_claim(
         "split_mismatches": split_mismatches,
         "performance_noninferiority": performance,
         "retrieval_efficiency_superiority_pass": retrieval_pass,
-        "retrieval_efficiency_ci_lower": retrieval_bound,
+        "retrieval_efficiency_ci_lower": lower_bound(PRIMARY_EFFICIENCY_ENDPOINT),
         "nli_efficiency_superiority_pass": nli_pass,
-        "nli_efficiency_ci_lower": nli_bound,
+        "nli_efficiency_ci_lower": lower_bound(SECONDARY_EFFICIENCY_ENDPOINT),
         "primary_claim_supported": primary_claim_supported,
         "claim_status": claim_status,
         "interpretation": interpretation,
