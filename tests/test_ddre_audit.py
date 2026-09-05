@@ -752,6 +752,7 @@ class TestNoTestSetAccessDuringTuning(unittest.TestCase):
                 "accuracy": 0.5, "macro_f1": 0.5,
                 "efficiency": {
                     "avg_retrieved_documents_per_sentence": 1.0,
+                    "avg_retrieved_documents_per_subclaim": 1.0,
                     "avg_nli_span_calls_per_sentence": 3.0,
                 },
             },
