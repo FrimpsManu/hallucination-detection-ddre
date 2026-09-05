@@ -19,7 +19,26 @@ from src.ddre_core import (
     ULSIFDensityRatio,
     cost_consistent_thresholds,
 )
-from src.evaluation import evaluate_detector, prediction_rows, summarize_method
+from src.evaluation import (
+    evaluate_detector,
+    evaluate_detector_with_identity,
+    prediction_rows,
+    summarize_method,
+)
+from src.threshold_selection import (
+    SAFEGUARD_NOTE,
+    candidate_record,
+    select_threshold_configuration,
+)
+from src.paired_bootstrap import (
+    CONFIRMATORY_SPLIT_SEED,
+    CONFIRMATORY_VALIDATION_FRACTION,
+    BootstrapUnavailable,
+    PairedInputMismatch,
+    assess_claim,
+    confirmatory_protocol,
+    paired_passage_bootstrap,
+)
 from src.utils import EntailmentScorer
 from src.wang_data import (
     group_split_records,
@@ -135,11 +154,12 @@ def tune_ddre_thresholds(
     is evaluated: a stopping threshold that contradicts the final cost rule is
     never scored, so it cannot be selected. See ``cost_consistent_thresholds``.
 
-    Primary rule: among configurations that preserve the BSE official baseline's
-    factual AUC-PR and balanced PR-AUC within a small tolerance, choose the one
-    using the fewest documents. If none qualifies, use a predeclared penalized
-    quality/cost objective and explicitly record that the dominance condition was
-    not achieved on validation data.
+    Primary rule: among configurations that preserve the BSE-official baseline's
+    nonfactual, factual AND balanced PR-AUC within the validation tolerance,
+    choose the one using the fewest documents. If none qualifies, use the
+    predeclared penalized quality/cost objective and record that the selection
+    is NOT confirmatory. The safeguards and the selection live in
+    ``src/threshold_selection.py`` so the decision rule is reviewable on its own.
     """
     search_space = cost_consistent_thresholds(
         c_miss, c_false_alarm, CANDIDATE_LOWER_GRID, CANDIDATE_UPPER_GRID
@@ -147,9 +167,6 @@ def tune_ddre_thresholds(
     lower_grid = search_space["effective_lower_grid"]
     upper_grid = search_space["effective_upper_grid"]
     candidates = []
-
-    baseline_factual = baseline_metrics["factual"]["auc_pr"]
-    baseline_balanced = baseline_metrics["balanced_pr_auc"]
 
     for lower in lower_grid:
         for upper in upper_grid:
@@ -165,60 +182,26 @@ def tune_ddre_thresholds(
                 max_docs=max_docs,
             )
             metrics, _ = evaluate_quiet(detector, validation_records, scorer)
-            avg_docs = metrics["efficiency"]["avg_retrieved_documents_per_sentence"]
-            normalized_docs = avg_docs / max(1.0, float(max_docs))
-            qualifies = (
-                metrics["factual"]["auc_pr"]
-                >= baseline_factual - quality_tolerance
-                and metrics["balanced_pr_auc"]
-                >= baseline_balanced - quality_tolerance
+            candidates.append(
+                candidate_record(
+                    lower, upper, metrics, baseline_metrics,
+                    quality_tolerance=quality_tolerance,
+                    retrieval_penalty=retrieval_penalty,
+                    max_docs=max_docs,
+                )
             )
-            candidate = {
-                "lower": float(lower),
-                "upper": float(upper),
-                "factual_auc_pr": metrics["factual"]["auc_pr"],
-                "nonfactual_auc_pr": metrics["nonfactual"]["auc_pr"],
-                "balanced_pr_auc": metrics["balanced_pr_auc"],
-                "accuracy": metrics["accuracy"],
-                "macro_f1": metrics["macro_f1"],
-                "avg_documents": avg_docs,
-                "avg_nli_span_calls": metrics["efficiency"]["avg_nli_span_calls_per_sentence"],
-                "preserves_baseline_quality": bool(qualifies),
-                "fallback_objective": float(
-                    metrics["balanced_pr_auc"] - retrieval_penalty * normalized_docs
-                ),
-            }
-            candidates.append(candidate)
 
+    selected, selection_rule, confirmatory_selection = (
+        select_threshold_configuration(candidates)
+    )
     feasible = [c for c in candidates if c["preserves_baseline_quality"]]
-    if feasible:
-        selected = min(
-            feasible,
-            key=lambda c: (
-                c["avg_documents"],
-                -c["balanced_pr_auc"],
-                -c["factual_auc_pr"],
-            ),
-        )
-        selection_rule = (
-            "minimum retrieval cost among validation configurations preserving "
-            "BSE-official factual and balanced PR-AUC within tolerance"
-        )
-    else:
-        selected = max(
-            candidates,
-            key=lambda c: (
-                c["fallback_objective"],
-                c["balanced_pr_auc"],
-                -c["avg_documents"],
-            ),
-        )
-        selection_rule = (
-            "fallback penalized balanced-PR-AUC/retrieval objective; no DDRE "
-            "threshold pair preserved BSE-official validation quality"
-        )
 
+    selected["confirmatory_validation_selection"] = confirmatory_selection
     search_space["threshold_pairs_scored"] = len(candidates)
+    search_space["feasible_pairs"] = len(feasible)
+    search_space["quality_tolerance"] = float(quality_tolerance)
+    search_space["safeguards"] = SAFEGUARD_NOTE
+    search_space["confirmatory_validation_selection"] = confirmatory_selection
     return selected, candidates, selection_rule, search_space
 
 
@@ -238,24 +221,28 @@ def hypothesis_comparison(ddre, baseline):
     )
     balanced_delta = ddre["balanced_pr_auc"] - baseline["balanced_pr_auc"]
 
-    supported = (
-        retrieval_reduction is not None
-        and retrieval_reduction > 0
-        and factual_delta > 0
-        and balanced_delta >= 0
-    )
-
+    # D-08. These are DESCRIPTIVE point estimates only. They carry no
+    # uncertainty, so they cannot and do not decide whether the scientific
+    # claim holds; that is settled by the frozen paired bootstrap in
+    # src/paired_bootstrap.py. The old point-estimate "supported" boolean,
+    # computed from these numbers alone, is deliberately gone.
     return {
         "primary_baseline": "bse_official",
+        "estimate_kind": "descriptive point estimates; NOT a scientific claim",
         "factual_auc_pr_delta": factual_delta,
         "nonfactual_auc_pr_delta": nonfactual_delta,
         "balanced_pr_auc_delta": balanced_delta,
         "retrieved_documents_reduction_fraction": retrieval_reduction,
         "nli_span_calls_reduction_fraction": nli_reduction,
-        "hypothesis_supported_on_test": bool(supported),
-        "support_rule": (
-            "DDRE must use fewer retrieved documents, improve factual AUC-PR, "
-            "and not reduce balanced PR-AUC versus BSE official."
+        "sign_conventions": {
+            "performance_delta": "DDRE - BSE; positive favours DDRE",
+            "reduction_fraction": "1 - DDRE/BSE; positive favours DDRE",
+        },
+        "note": (
+            "Effect sizes for description only. The confirmatory decision lives "
+            "in claim_assessment, which is driven by the pre-registered paired "
+            "passage-level bootstrap. A point estimate can never set "
+            "primary_claim_supported."
         ),
     }
 
@@ -450,12 +437,14 @@ def main():
 
         use_cache_for_test = not args.live_inference
         print("\nFinal held-out test evaluation: BSE official...")
-        bse_official_metrics, bse_official_results = evaluate_detector(
-            bse_official,
-            test_records,
-            scorer,
-            description="BSE official test",
-            use_cache=use_cache_for_test,
+        bse_official_metrics, bse_official_results, bse_official_observations = (
+            evaluate_detector_with_identity(
+                bse_official,
+                test_records,
+                scorer,
+                description="BSE official test",
+                use_cache=use_cache_for_test,
+            )
         )
         print("\nFinal held-out test evaluation: BSE Equation 8...")
         bse_eq8_metrics, bse_eq8_results = evaluate_detector(
@@ -466,15 +455,66 @@ def main():
             use_cache=use_cache_for_test,
         )
         print("\nFinal held-out test evaluation: DDRE/uLSIF...")
-        ddre_metrics, ddre_results = evaluate_detector(
-            ddre,
-            test_records,
-            scorer,
-            description="DDRE uLSIF test",
-            use_cache=use_cache_for_test,
+        ddre_metrics, ddre_results, ddre_observations = (
+            evaluate_detector_with_identity(
+                ddre,
+                test_records,
+                scorer,
+                description="DDRE uLSIF test",
+                use_cache=use_cache_for_test,
+            )
         )
 
         comparison = hypothesis_comparison(ddre_metrics, bse_official_metrics)
+
+        # Confirmatory analysis, under the protocol frozen before any held-out
+        # DDRE result was inspected. A failure here makes the claim
+        # NOT_CONFIRMATORY -- never NOT_SUPPORTED, which would misreport an
+        # unavailable analysis as a negative result.
+        print("\nRunning the pre-registered paired passage-level bootstrap...")
+        bootstrap = None
+        bootstrap_error = None
+        try:
+            # Identity-bearing observations, built inside the evaluation loop,
+            # so "paired" is verified rather than assumed.
+            bootstrap = paired_passage_bootstrap(
+                ddre_observations, bse_official_observations
+            )
+        except (BootstrapUnavailable, PairedInputMismatch) as exc:
+            bootstrap_error = f"{type(exc).__name__}: {exc}"
+            print(f"  CONFIRMATORY BOOTSTRAP UNAVAILABLE: {bootstrap_error}")
+
+        # Re-derive the canonical split from the released records with the
+        # FROZEN fraction and seed, and compare passage IDs. "190 passages" is
+        # not the frozen test set; a different 190 would be a different
+        # experiment. No held-out result is inspected to do this.
+        _, _, frozen_split = group_split_records(
+            records,
+            validation_fraction=CONFIRMATORY_VALIDATION_FRACTION,
+            random_state=CONFIRMATORY_SPLIT_SEED,
+        )
+
+        claim_assessment = assess_claim(
+            bootstrap,
+            validation_selection_confirmatory=selected[
+                "confirmatory_validation_selection"
+            ],
+            quality_tolerance=args.quality_tolerance,
+            smoke_test=args.smoke_test,
+            bootstrap_error=bootstrap_error,
+            run_configuration={
+                "c_miss": args.c_miss,
+                "c_false_alarm": args.c_false_alarm,
+                "c_retrieve": args.c_retrieve,
+                "p0": args.p0,
+                "max_docs": args.max_docs,
+                "validation_fraction": args.validation_fraction,
+                "split_seed": RANDOM_STATE,
+            },
+            split_metadata=split_metadata,
+            expected_validation_passage_ids=frozen_split["validation_passage_ids"],
+            expected_test_passage_ids=frozen_split["test_passage_ids"],
+        )
         run_timestamp = datetime.now(timezone.utc).isoformat()
 
         summary = {
@@ -518,6 +558,7 @@ def main():
                 ),
             },
             "split": split_metadata,
+            "confirmatory_split_identity": claim_assessment["split_identity"],
             "execution_sentences": {
                 "validation": len(validation_records),
                 "test": len(test_records),
@@ -533,6 +574,9 @@ def main():
                 "selected_lower_threshold": selected["lower"],
                 "selected_upper_threshold": selected["upper"],
                 "threshold_selection_rule": selection_rule,
+                "confirmatory_validation_selection": selected[
+                    "confirmatory_validation_selection"
+                ],
                 "threshold_search_space": threshold_search_space,
                 "threshold_validation_table": threshold_table,
             },
@@ -541,7 +585,11 @@ def main():
                 "bse_equation8": bse_eq8_metrics,
                 "ddre_ulsif": ddre_metrics,
             },
-            "hypothesis_test": comparison,
+            "descriptive_point_estimates": comparison,
+            "confirmatory_statistical_protocol": confirmatory_protocol(),
+            "confirmatory_bootstrap": bootstrap,
+            "confirmatory_bootstrap_error": bootstrap_error,
+            "claim_assessment": claim_assessment,
         }
 
         if args.smoke_test:
@@ -598,19 +646,56 @@ def main():
                 f"{metrics['efficiency']['avg_nli_span_calls_per_sentence']:.3f}"
             )
         print("-" * 88)
-        print(
-            "Hypothesis supported on held-out test: "
-            f"{comparison['hypothesis_supported_on_test']}"
-        )
+        print("DESCRIPTIVE POINT ESTIMATES (no uncertainty; not the claim)")
         if comparison["retrieved_documents_reduction_fraction"] is not None:
             print(
-                "DDRE document-cost reduction vs BSE official: "
+                "  DDRE document-cost reduction vs BSE official: "
                 f"{100 * comparison['retrieved_documents_reduction_fraction']:.2f}%"
             )
-        print(
-            "DDRE factual AUC-PR delta vs BSE official: "
-            f"{comparison['factual_auc_pr_delta']:+.4f}"
-        )
+        for label, key in (
+            ("nonfactual", "nonfactual_auc_pr_delta"),
+            ("factual", "factual_auc_pr_delta"),
+            ("balanced", "balanced_pr_auc_delta"),
+        ):
+            print(f"  DDRE {label} PR-AUC delta vs BSE official: "
+                  f"{comparison[key]:+.4f}")
+
+        print("-" * 88)
+        print("CONFIRMATORY ASSESSMENT (pre-registered paired passage bootstrap)")
+        if bootstrap is not None:
+            print(
+                f"  {bootstrap['n_resamples']} resamples over "
+                f"{bootstrap['unique_passages']} passages, seed "
+                f"{bootstrap['seed']}, {int(100 * bootstrap['ci_level'])}% "
+                f"{bootstrap['ci_method']} intervals"
+            )
+            for name, endpoint in bootstrap["endpoints"].items():
+                print(
+                    f"  {name:<48}{endpoint['observed']:+.4f}  "
+                    f"[{endpoint['ci_lower']:+.4f}, {endpoint['ci_upper']:+.4f}]"
+                )
+        performance = claim_assessment["performance_noninferiority"]
+        print(f"  performance non-inferiority (margin "
+              f"{performance['margin']}): nonfactual="
+              f"{performance['nonfactual_pass']} factual="
+              f"{performance['factual_pass']} balanced="
+              f"{performance['balanced_pass']}")
+        print("  retrieval-efficiency superiority: "
+              f"{claim_assessment['retrieval_efficiency_superiority_pass']}")
+        print("  NLI-efficiency superiority (secondary): "
+              f"{claim_assessment['nli_efficiency_superiority_pass']}")
+        print("  validation selection confirmatory: "
+              f"{claim_assessment['validation_selection_confirmatory']}")
+        print("  bootstrap provenance matches frozen protocol: "
+              f"{claim_assessment['bootstrap_provenance_matches_frozen_protocol']}")
+        print("  run configuration matches frozen: "
+              f"{claim_assessment['run_configuration_matches_frozen']}")
+        print("  held-out split matches frozen: "
+              f"{claim_assessment['split_matches_frozen']}")
+        for disqualifier in claim_assessment["confirmatory_disqualifiers"]:
+            print(f"    ! {disqualifier}")
+        print(f"  CLAIM STATUS: {claim_assessment['claim_status']}")
+        print(f"  {claim_assessment['interpretation']}")
         print("=" * 88)
         print(f"Summary: {summary_path}")
         print(f"Predictions: {predictions_path}")

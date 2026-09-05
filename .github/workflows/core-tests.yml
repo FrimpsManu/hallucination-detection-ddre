@@ -21,8 +21,20 @@ jobs:
       - name: Syntax check
         run: python -m py_compile main.py src/*.py scripts/*.py tests/*.py
 
-      - name: Install core math dependency
-        run: python -m pip install "numpy>=2.0,<3.0"
+      # The confirmatory statistics (src/paired_bootstrap.py) use the
+      # repository's single Wang PR-AUC helper in src/evaluation.py, which
+      # imports scikit-learn, scipy and tqdm at module scope. All three are
+      # already declared in requirements.txt; installing them here means the
+      # pre-registered protocol is actually covered by CI rather than skipped.
+      # torch/transformers stay out: nothing under test needs a model, and the
+      # torch-dependent tests skip themselves.
+      - name: Install core math dependencies
+        run: >-
+          python -m pip install
+          "numpy>=2.0,<3.0"
+          "scipy>=1.13,<2.0"
+          "scikit-learn>=1.5,<2.0"
+          "tqdm>=4.66,<5.0"
 
       - name: Run core math tests
         run: python -m unittest discover -s tests -v
