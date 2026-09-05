@@ -768,16 +768,61 @@ class TestNoNaNPosteriorIsReachable(unittest.TestCase):
 
 
 class TestProtectedBehaviourUnchanged(unittest.TestCase):
-    def test_baseline_core_is_untouched_by_this_change(self):
+    def test_bse_decision_logic_is_untouched_by_this_change(self):
+        # Originally a whole-file byte diff against origin/main. PR #12 added
+        # BSEDetector.detect_sentence_with_trace and made detect_sentence
+        # delegate to it (audit finding D-10), which is instrumentation, not a
+        # decision change -- so the guard is TIGHTENED rather than dropped:
+        # every other top-level and method definition in the file must still be
+        # byte-identical to origin/main, and only those two names may differ.
+        import ast
         import subprocess
 
-        diff = subprocess.run(
-            ["git", "diff", "--quiet", "origin/main", "--", "src/baseline_core.py"],
-            capture_output=True,
+        show = subprocess.run(
+            ["git", "show", "origin/main:src/baseline_core.py"],
+            capture_output=True, text=True,
         )
-        if diff.returncode == 128:
+        if show.returncode != 0:
             self.skipTest("origin/main not available")
-        self.assertEqual(diff.returncode, 0, "src/baseline_core.py must not change")
+
+        def definitions(source):
+            tree = ast.parse(source)
+            found = {}
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    found[node.name] = ast.get_source_segment(source, node)
+            return found
+
+        baseline = definitions(show.stdout)
+        current = definitions(
+            (Path(__file__).resolve().parents[1] / "src" / "baseline_core.py")
+            .read_text(encoding="utf-8")
+        )
+        permitted_to_differ = {"detect_sentence", "detect_sentence_with_trace"}
+
+        self.assertEqual(
+            set(baseline) - set(current), set(),
+            "no BSE definition may be removed",
+        )
+        self.assertEqual(
+            set(current) - set(baseline), {"detect_sentence_with_trace"},
+            "only the trace accessor may be added",
+        )
+        for name, source in baseline.items():
+            if name in permitted_to_differ:
+                continue
+            with self.subTest(definition=name):
+                self.assertEqual(
+                    current[name], source,
+                    f"src/baseline_core.py::{name} must not change",
+                )
+        # The decision rules by name, so the list above cannot quietly shrink.
+        for decision in (
+            "should_continue", "detect_subclaim", "bayes_update",
+            "cost_based_prediction", "_official_expected_next_posterior",
+        ):
+            self.assertIn(decision, baseline)
+            self.assertEqual(current[decision], baseline[decision])
 
     def bse(self):
         from src.baseline_core import BSEDetector
