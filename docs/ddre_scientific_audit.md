@@ -68,14 +68,14 @@ Two things are in good shape and should be stated plainly:
 | --- | --- | --- | --- | --- | --- |
 | D-01 | **BLOCKER — RESOLVED by PR #8** | `main.py::tune_ddre_thresholds`, `ddre_core.py::DDREDetector.detect_subclaim` | The lower stopping grid is `{0.05 … 0.40}`; the CM=28/CFA=96 classification threshold is `0.225806`. For `lower ∈ {0.25, 0.30, 0.35, 0.40}` the detector can stop *because it is confident of hallucination* and the cost rule then labels the claim **factual**. | The two rules disagree on the same posterior. The selector is lexicographic — average documents first, PR-AUC only on exact ties — and a larger `lower` stops earlier, so within the feasible set nothing but the document count pushes back on choosing a contradictory threshold. | **Done (PR #8):** §7 option 1 — `cost_decision_threshold` is the single source of the arithmetic, `DDREDetector` refuses `lower > t` or `upper ≤ t` at construction, and `cost_consistent_thresholds` filters the tuner's grid from the *configured* costs. See §10. |
 | D-03 | **MAJOR / NEEDS EMPIRICAL CHECK** | `ddre_core.py::ULSIFDensityRatio.ratio` | The estimate is most empirically constrained where the training data provide local support. Sparse and tail regions are more sensitive to bandwidth, regularisation and kernel extrapolation, so the ratio there can be large or small for reasons that are not evidential. | A large ratio is **not** by itself a defect — where factual support is strong and hallucinated support is weak, a large ratio is exactly what the estimator should report. The question is whether large values come from stable local support or from weak-support instability, and that is **unmeasured** on the actual NBC fit; the demonstrations below use synthetic scores and establish only the mechanism. | Before tuning, run the measurement in §4-A over the fitted score support, **distinguishing large-but-stable ratios from weak-support instability**. Pre-register a per-document log-evidence sensitivity analysis only if the measurement warrants it. **Do not choose a cap value yet.** |
-| D-02 | MAJOR | `ddre_core.py::detect_subclaim` vs `baseline_core.py::detect_subclaim` | Algorithm/protocol asymmetry. BSE's stop/continue rule is decision-theoretic (expected cost of retrieving vs stopping) and can decline the **first** fetch, retrieving **0** documents. DDRE's rule is a fixed probability band evaluated after an update, so it has a floor of **one retrieval per non-empty evaluated subclaim**. | Retrieval counts have different origins. On the 190-passage held-out split that floor is **2,387 documents** (all test subclaims are non-empty); DDRE must spend that before it can win on cost, and where BSE retrieves 0, DDRE cannot win at all. **This currently disadvantages DDRE.** | Report BSE's zero-retrieval frequency and the retrieval-floor difference alongside the efficiency numbers. A threshold pre-check does **not** fix this (see §6); giving DDRE a Bayes-risk pre-retrieval decision would be a **stopping-rule redesign**, not a small fairness fix. |
+| D-02 | MAJOR — **REPORTED by PR #12** (not corrected) | `ddre_core.py::detect_subclaim` vs `baseline_core.py::detect_subclaim` | Algorithm/protocol asymmetry. BSE's stop/continue rule is decision-theoretic (expected cost of retrieving vs stopping) and can decline the **first** fetch, retrieving **0** documents. DDRE's rule is a fixed probability band evaluated after an update, so it has a floor of **one retrieval per non-empty evaluated subclaim**. | Retrieval counts have different origins. On the 190-passage held-out split that floor is **2,387 documents** (all test subclaims are non-empty); DDRE must spend that before it can win on cost, and where BSE retrieves 0, DDRE cannot win at all. **This currently disadvantages DDRE.** | Report BSE's zero-retrieval frequency and the retrieval-floor difference alongside the efficiency numbers. A threshold pre-check does **not** fix this (see §6); giving DDRE a Bayes-risk pre-retrieval decision would be a **stopping-rule redesign**, not a small fairness fix. **Done (PR #12), as reporting:** the summary now carries `retrieval_protocol_asymmetry` with BSE's observed zero-retrieval frequency, DDRE's structural floor and the documents above it. Both stopping protocols are unchanged, and no floor adjustment enters the confirmatory endpoint. See §14. |
 | D-07 | MAJOR — **RESOLVED by PR #10** | `main.py::tune_ddre_thresholds` → `src/threshold_selection.py` | The feasibility test constrains only `factual_auc_pr` and `balanced_pr_auc`. Nonfactual AUC-PR — Wang's headline metric — is unconstrained. | Balanced PR-AUC is the mean of the two, so a large factual gain can mask a nonfactual loss and still qualify. The tuner may select a configuration that is worse at detecting hallucination. | **Done (PR #10):** feasibility now requires nonfactual AND factual AND balanced PR-AUC, each within the validation tolerance; all three booleans and all three deltas are recorded per candidate. The rule moved into `src/threshold_selection.py` so it is reviewable on its own. See §12. |
 | D-08 | MAJOR — **RESOLVED by PR #10** | `main.py::hypothesis_comparison` → `src/paired_bootstrap.py` | `hypothesis_supported_on_test` requires `factual_delta > 0` and `balanced_delta ≥ 0`, with no nonfactual floor and **no uncertainty quantification of any kind**. | A single point estimate is written into the summary as a scientific conclusion, over three methods and several metrics, with no interval and no multiplicity control. | **Done (PR #10):** the point-estimate boolean is gone. The claim now comes from a pre-registered paired passage-level cluster bootstrap with a conjunctive rule and three claim statuses, and the pre-registration is **enforced**: bootstrap provenance, the actual run configuration and the split's passage IDs are each verified before a claim can be confirmatory, and the pairing is checked by per-sentence identity attached at evaluation time. See §12 and `docs/confirmatory_statistical_protocol.md`. |
 | D-09 | MAJOR (claim boundary / robustness) | `main.py`, `ddre_core.py` | DDRE selects its stopping band from **64** validation configurations. Published BSE has **no tunable counterpart** — its stopping rule follows from the fixed published costs. | Part of any DDRE advantage may be a model-selection advantage. This bounds what the comparison may claim; it does **not** invalidate it. | Keep **published BSE (CM=28, CFA=96, c_retrieve=1) as the primary comparator** for comparability with Wang et al. Optionally add a validation-tuned BSE variant as a clearly labelled **secondary** robustness comparator, never as the primary. |
 | D-04 | MAJOR — **RESOLVED by PR #9** | `ULSIFDensityRatio._solve` / `.ratio` | Post-hoc non-negativity truncation could in principle drive `α → 0`. Then `r̂ ≡ 0`, clipped to `1e-6`, i.e. `log r = −13.8` **per document**. Nothing in `fit()` detects or reports it. | A silently degenerate fit would look like a spectacularly confident detector. **Not observed in the synthetic audit fixture, and not established on the actual formal fit** — no fixed raw NBC scores exist in this repository to check it against. | **Done (PR #9):** `_validate_final_fit` rejects non-finite parameters, an all-zero `α`, and fitted ratios that are non-finite or identically zero on the training support — before the estimator is usable. Rejection clears the fitted state. See §11. |
 | D-06 | MAJOR — **RESOLVED by PR #9** | `.ratio`, `detect_subclaim` | A NaN score propagates silently: `log(NaN)` → `clip` → `sigmoid` all yield NaN; every stopping comparison is False, so the **full retrieval budget is spent**, and NaN reaches the metrics. `+inf` is clipped to a perfect score of 100. | Silent corruption of both the quality and the efficiency numbers, with no warning anywhere. | **Done (PR #9):** `ratio()` rejects a non-finite score before normalization and a non-finite raw ratio before clipping; `detect_subclaim` validates the score, then the ratio (finite and strictly positive), then the posterior. See §11. |
 | D-05 | MINOR | `detect_subclaim` | The running log-odds are clipped to `±40` **after each update**, so accumulation is non-associative and evidence beyond the bound is discarded. | Harmless under any stopping band in the current grid (`sigmoid(±40)` is far outside it), but it is a silent modification of the stated update rule. | Document it, or clip only at the sigmoid. |
-| D-10 | MINOR | `evaluation.py::prediction_rows`, `detect_sentence` | Per-subclaim results are collapsed into one `DetectionResult` with summed counters. Per-subclaim stopping depth is unrecoverable, and the CSV omits the subclaim count. | §4-G asks for stopping depth; §4-H needs the subclaim count to express documents-per-subclaim on a bootstrap resample. | Add `n_subclaims` to `prediction_rows` and retain per-subclaim depths. |
+| D-10 | MINOR — **RESOLVED by PR #12** | `evaluation.py::prediction_rows`, `detect_sentence` | Per-subclaim results are collapsed into one `DetectionResult` with summed counters. Per-subclaim stopping depth is unrecoverable, and the CSV omits the subclaim count. | §4-G asks for stopping depth; §4-H needs the subclaim count to express documents-per-subclaim on a bootstrap resample. | **Done (PR #12):** `detect_sentence_with_trace` returns the exact subclaim results from the same pass, `EvaluatedSentence` carries `n_subclaims` and `subclaim_traces`, sentence totals are checked against trace totals, and the CSV exports the per-subclaim depth, availability and NLI-call vectors as JSON. See §14. |
 | D-11 | MINOR — **RESOLVED by PR #11** | `main.py::tune_ddre_thresholds` | `normalized_docs = avg_docs / max_docs` divides a **per-sentence** document count by a **per-subclaim** budget. With ~1.57 subclaims/sentence it can exceed 1.0. | The fallback penalty's exchange rate against balanced PR-AUC is therefore not the declared one. | **Done (PR #11):** the fallback cost is now `avg_retrieved_documents_per_subclaim / max_documents_per_subclaim`, so numerator and denominator share a unit and the value is a genuine fraction in `[0, 1]`. A value outside that range raises rather than being clamped. Feasible selection is unchanged and still minimises documents *per sentence*. See §13. |
 | D-12 | MINOR — **RESOLVED by PR #11** | `main.py::auto_push_results` | Result artifacts are committed and pushed automatically at the end of a full run unless `--no-push-results`. | A crashed or partial run can publish artifacts; the default direction is toward publishing, not toward review. | **Done (PR #11):** publication is opt-in behind `--push-results` (default off); `auto_push_results` refuses `main`, `master` and a detached HEAD **before staging anything**; the summary records the intent. See §13. |
 | D-13 | NOTE | `main.py`, `ddre_core.py` | uLSIF is fit on the **NBC sentence-pair** scores but applied to **document** scores (max over 400-word spans). | A real distribution shift — but BSE's histograms inherit exactly the same one, so the comparison is fair. Worth one sentence in the paper. | Disclose. |
@@ -1091,3 +1091,92 @@ accepted the push; the already-written summary is never rewritten to insert a
 push result.
 
 **Not resolved by PR #11:** D-02, D-03, D-09 and D-10 remain open.
+
+---
+
+## 14. Resolution log — PR #12
+
+### D-10 — RESOLVED by PR #12, *research: retain subclaim retrieval traces and report stopping asymmetry*
+
+The defect, unchanged from the table above: `detect_sentence` collapsed the
+per-subclaim results into one `DetectionResult` with summed counters and
+discarded them, so the distribution of stopping depths could not be recovered,
+and the predictions CSV omitted the subclaim count needed to express
+documents-per-subclaim on a resample.
+
+**Exact per-subclaim retrieval depths are now retained.** Both detectors gained
+`detect_sentence_with_trace(record, scorer, *, use_cache=True)` returning
+`(sentence_result, subclaim_results)`, where the subclaim results are an
+immutable tuple in `record.subclaims` order. `detect_sentence` **delegates** to
+it, so there is exactly one aggregation implementation per detector — two copies
+would be free to drift, and a traced run could then disagree with an untraced
+one on the same input.
+
+The trace comes from the **same pass** that produced the result. It is
+deliberately not obtainable by re-running `detect_subclaim` afterwards: that
+would duplicate NLI work, distort the wall-clock accounting, touch the cache a
+second time, and produce a trace of a *different* computation from the one that
+produced the sentence result. A source-level test asserts each held-out method is
+evaluated exactly once and that every held-out pass is the trace-bearing one.
+
+**`n_subclaims` is exported.** `EvaluatedSentence` carries `n_subclaims` and
+`subclaim_traces`; both are `None` — not empty — when an evaluation did not
+record them, so a trace-less observation can never be mistaken for a sentence
+that genuinely had no subclaims. The pairing identity stays
+`(passage_index, sentence_index, gold_label)`, so PR #10's paired-bootstrap check
+is unaffected. The predictions CSV gains `n_subclaims` plus
+`subclaim_documents_used`, `subclaim_documents_available` and
+`subclaim_nli_calls` as compact JSON arrays whose lengths equal `n_subclaims`.
+
+**Sentence totals are checked against trace totals.** Before an observation is
+kept, the retrieval depths must sum to the sentence's `documents_used`, the NLI
+calls to its `nli_calls`, and the minimum subclaim posterior must equal the
+sentence `p_factual` exactly. This is an integrity check, never a
+recomputation — the detector's result is what is kept — and a mismatch raises
+`SubclaimTraceMismatch`, because a trace that does not account for its result
+would make every subclaim-level number wrong in a way nothing downstream could
+see. `documents_available` is `min(len(subclaim.documents), max_docs)`: the raw
+corpus length would overstate what the protocol could ever have used and make a
+full-budget run look like early stopping.
+
+`summarize_subclaim_efficiency` reports the depth distribution — histogram,
+median, 95th percentile, zero- and one-retrieval counts — from the individual
+traces. None of it is inferred by dividing sentence totals by a subclaim count,
+which would reconstruct a mean and invent the distribution around it.
+
+### D-02 — REPORTED AS A PROTOCOL ASYMMETRY by PR #12 (not corrected)
+
+The defect description above is unchanged and still stands. What PR #12 adds is
+**measurement, not a fix**, and the distinction matters:
+
+* **No algorithmic fairness redesign was made.** Giving DDRE a Bayes-risk
+  pre-retrieval decision would be a new stopping algorithm, not a small fairness
+  adjustment, and §6 already shows a threshold pre-check cannot substitute for
+  one (at P0 = 0.5 the prior lies strictly inside every candidate band).
+* **BSE's pre-first-fetch stop is preserved.** `should_continue` is evaluated
+  before document 1 exactly as before, and BSE may still retrieve zero documents
+  for a non-empty subclaim.
+* **DDRE's one-document floor on non-empty subclaims is preserved.** Its band is
+  still evaluated only after an evidence update.
+* **Raw retrieval counts remain the confirmatory efficiency quantity.** The
+  frozen primary endpoint is still BSE minus DDRE retrieved documents *per
+  sentence*, with no floor adjustment. `BOOTSTRAP_ENDPOINTS`, the resample count,
+  seed, interval and margin are untouched.
+* **The summary now reports the asymmetry alongside those counts:**
+  `retrieval_protocol_asymmetry` gives BSE's observed zero-retrieval non-empty
+  subclaim count and fraction, DDRE's structural floor, and
+  `ddre_documents_above_first_retrieval_floor` — the last **descriptively only**,
+  never as an adjusted metric.
+
+The floor is defined **prospectively from the protocol**: the number of evaluated
+subclaims with `documents_available > 0`, because the current DDRE protocol
+consumes at least one document for each. Deriving it from observed depths would
+make it a description of the data rather than a property of the protocol, and it
+could then never be violated. Accordingly, a DDRE trace with
+`documents_available > 0` and `documents_used == 0` **fails loudly**: the
+implementation would no longer match the protocol whose floor the report states.
+The identical pattern is *accepted and counted* for BSE, where it is precisely
+the pre-first-fetch stop being measured.
+
+**Not resolved by PR #12:** D-03 and D-09 remain open. D-03 — the density-ratio
+support and stability question — is the next major pre-tuning empirical task.
