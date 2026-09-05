@@ -836,10 +836,20 @@ class TestEvidenceStreamFairness(unittest.TestCase):
         )
 
     def test_both_detectors_use_the_same_cost_rule_and_aggregation(self):
+        # The aggregation moved into detect_sentence_with_trace when D-10 added
+        # per-subclaim traces (PR #12); detect_sentence delegates to it, so
+        # there is still exactly ONE aggregation per detector. The property
+        # under test is unchanged: both detectors use the same cost rule and
+        # the same min-over-subclaims aggregation.
         for detector_class in (BSEDetector, DDREDetector):
-            source_names = detector_class.detect_sentence.__code__.co_names
-            self.assertIn("cost_based_prediction", source_names)
-            self.assertIn("min", source_names)
+            with self.subTest(detector=detector_class.__name__):
+                aggregating = detector_class.detect_sentence_with_trace.__code__
+                self.assertIn("cost_based_prediction", aggregating.co_names)
+                self.assertIn("min", aggregating.co_names)
+                # And the plain entry point does not aggregate independently.
+                delegating = detector_class.detect_sentence.__code__.co_names
+                self.assertIn("detect_sentence_with_trace", delegating)
+                self.assertNotIn("cost_based_prediction", delegating)
 
     def test_a_threshold_pre_check_could_never_stop_at_the_prior(self):
         # Why a pre-retrieval threshold check does NOT fix D-02. With P0 = 0.5,
@@ -929,25 +939,43 @@ class TestReportingReadiness(unittest.TestCase):
         for name in ("p_factual", "prediction", "documents_used", "nli_calls"):
             self.assertIn(name, fields)
 
-    def test_AUDIT_per_subclaim_detail_is_discarded_at_the_sentence_level(self):
-        # AUDIT finding D-10. detect_sentence returns one DetectionResult with
-        # summed counters, so per-subclaim stopping depth cannot be recovered
-        # from the returned object or from the predictions CSV.
+    def test_RESOLVED_per_subclaim_detail_is_now_retained_alongside_the_result(self):
+        # WAS test_AUDIT_per_subclaim_detail_is_discarded_at_the_sentence_level.
+        # D-10, resolved by PR #12. DetectionResult still carries only summed
+        # counters -- that is unchanged -- but the exact per-subclaim results
+        # are now returned from the SAME pass, so the stopping depths are no
+        # longer lost.
         detector = DDREDetector(
             ConstantRatio(1.0), lower_threshold=0.2, upper_threshold=0.8,
             p0=0.5, c_miss=C_MISS, c_false_alarm=C_FALSE_ALARM, max_docs=4,
         )
-        result = detector.detect_sentence(Rec([Sub(4), Sub(1)]), FixedScorer(50.0))
+        record = Rec([Sub(4), Sub(1)])
+        result = detector.detect_sentence(record, FixedScorer(50.0))
         self.assertEqual(result.documents_used, 5)
         self.assertFalse(hasattr(result, "per_subclaim"))
 
-    def test_prediction_rows_do_not_record_the_subclaim_count(self):
-        # Needed to express documents-per-subclaim on a bootstrap resample.
+        traced, subclaim_results = detector.detect_sentence_with_trace(
+            record, FixedScorer(50.0)
+        )
+        self.assertEqual(traced.documents_used, result.documents_used)
+        self.assertEqual(traced.p_factual, result.p_factual)
+        self.assertEqual(len(subclaim_results), 2)
+        self.assertEqual(
+            [r.documents_used for r in subclaim_results], [4, 1]
+        )
+
+    def test_RESOLVED_prediction_rows_record_the_subclaim_count(self):
+        # WAS test_prediction_rows_do_not_record_the_subclaim_count. Needed to
+        # express documents-per-subclaim on a bootstrap resample; D-10 resolved
+        # by PR #12.
         source = (PROJECT_ROOT / "src" / "evaluation.py").read_text(encoding="utf-8")
         rows = source[source.index("def prediction_rows"):]
         self.assertIn("passage_index", rows)
         self.assertIn("retrieved_documents", rows)
-        self.assertNotIn("subclaims", rows)
+        self.assertIn('"n_subclaims"', rows)
+        self.assertIn('"subclaim_documents_used"', rows)
+        self.assertIn('"subclaim_documents_available"', rows)
+        self.assertIn('"subclaim_nli_calls"', rows)
 
 
 if __name__ == "__main__":

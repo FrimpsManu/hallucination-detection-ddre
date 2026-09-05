@@ -21,9 +21,11 @@ from src.ddre_core import (
 )
 from src.evaluation import (
     evaluate_detector,
-    evaluate_detector_with_identity,
+    evaluate_detector_with_traces,
     prediction_rows,
+    retrieval_protocol_asymmetry,
     summarize_method,
+    summarize_subclaim_efficiency,
 )
 from src.threshold_selection import (
     SAFEGUARD_NOTE,
@@ -521,8 +523,13 @@ def main():
 
         use_cache_for_test = not args.live_inference
         print("\nFinal held-out test evaluation: BSE official...")
+        # ONE detector pass per method. evaluate_detector_with_traces returns
+        # the metrics, the sentence results AND the per-subclaim traces from
+        # that same pass (D-10). Nothing is re-evaluated to obtain a trace:
+        # that would duplicate NLI work and produce a trace of a different
+        # computation from the one that produced the metrics.
         bse_official_metrics, bse_official_results, bse_official_observations = (
-            evaluate_detector_with_identity(
+            evaluate_detector_with_traces(
                 bse_official,
                 test_records,
                 scorer,
@@ -531,22 +538,37 @@ def main():
             )
         )
         print("\nFinal held-out test evaluation: BSE Equation 8...")
-        bse_eq8_metrics, bse_eq8_results = evaluate_detector(
-            bse_eq8,
-            test_records,
-            scorer,
-            description="BSE Eq8 test",
-            use_cache=use_cache_for_test,
+        bse_eq8_metrics, bse_eq8_results, bse_eq8_observations = (
+            evaluate_detector_with_traces(
+                bse_eq8,
+                test_records,
+                scorer,
+                description="BSE Eq8 test",
+                use_cache=use_cache_for_test,
+            )
         )
         print("\nFinal held-out test evaluation: DDRE/uLSIF...")
         ddre_metrics, ddre_results, ddre_observations = (
-            evaluate_detector_with_identity(
+            evaluate_detector_with_traces(
                 ddre,
                 test_records,
                 scorer,
                 description="DDRE uLSIF test",
                 use_cache=use_cache_for_test,
             )
+        )
+
+        # D-10 / D-02 accounting. Descriptive: neither the frozen confirmatory
+        # endpoints nor any claim rule reads these.
+        subclaim_efficiency = {
+            "bse_official": summarize_subclaim_efficiency(bse_official_observations),
+            "bse_equation8": summarize_subclaim_efficiency(bse_eq8_observations),
+            "ddre_ulsif": summarize_subclaim_efficiency(ddre_observations),
+        }
+        protocol_asymmetry = retrieval_protocol_asymmetry(
+            bse_official_observations,
+            ddre_observations,
+            max_docs=args.max_docs,
         )
 
         comparison = hypothesis_comparison(ddre_metrics, bse_official_metrics)
@@ -649,6 +671,8 @@ def main():
                     "whether a push was later accepted by the remote."
                 ),
             },
+            "subclaim_efficiency": subclaim_efficiency,
+            "retrieval_protocol_asymmetry": protocol_asymmetry,
             "split": split_metadata,
             "confirmatory_split_identity": claim_assessment["split_identity"],
             "execution_sentences": {
@@ -694,9 +718,16 @@ def main():
             model_path = Path("results/latest_ddre_model.json")
 
         all_rows = []
-        all_rows.extend(prediction_rows("bse_official", test_records, bse_official_results))
-        all_rows.extend(prediction_rows("bse_equation8", test_records, bse_eq8_results))
-        all_rows.extend(prediction_rows("ddre_ulsif", test_records, ddre_results))
+        all_rows.extend(prediction_rows(
+            "bse_official", test_records, bse_official_results,
+            bse_official_observations,
+        ))
+        all_rows.extend(prediction_rows(
+            "bse_equation8", test_records, bse_eq8_results, bse_eq8_observations,
+        ))
+        all_rows.extend(prediction_rows(
+            "ddre_ulsif", test_records, ddre_results, ddre_observations,
+        ))
 
         with summary_path.open("w", encoding="utf-8") as f:
             json.dump(summary, f, indent=2)
@@ -787,6 +818,23 @@ def main():
         for disqualifier in claim_assessment["confirmatory_disqualifiers"]:
             print(f"    ! {disqualifier}")
         print(f"  CLAIM STATUS: {claim_assessment['claim_status']}")
+        # D-02, reported alongside the claim so the asymmetry is visible where
+        # the efficiency numbers are read. Descriptive; no floor adjustment is
+        # applied to the confirmatory endpoint.
+        bse_side = protocol_asymmetry["bse_official"]
+        ddre_side = protocol_asymmetry["ddre_ulsif"]
+        print("\nRetrieval protocol asymmetry (D-02, descriptive):")
+        print("  BSE zero-retrieval non-empty subclaims: "
+              f"{bse_side['zero_retrieval_nonempty_subclaims']}"
+              f" / {bse_side['nonempty_subclaims']}"
+              f" ({bse_side['zero_retrieval_nonempty_fraction']})")
+        print("  DDRE current first-retrieval floor: "
+              f"{protocol_asymmetry['ddre_first_retrieval_floor_documents']}"
+              " documents")
+        print("  DDRE documents above floor: "
+              f"{protocol_asymmetry['ddre_documents_above_first_retrieval_floor']}"
+              f" (observed total {ddre_side['observed_total_documents']})")
+        print(f"  {protocol_asymmetry['note']}")
         print(f"  {claim_assessment['interpretation']}")
         print("=" * 88)
         print(f"Summary: {summary_path}")

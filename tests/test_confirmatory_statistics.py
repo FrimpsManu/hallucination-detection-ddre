@@ -1500,7 +1500,12 @@ class TestSummaryWiring(unittest.TestCase):
             "bse_official_metrics, bse_official_results, bse_official_observations",
             self.source,
         )
-        self.assertIn("evaluate_detector_with_identity", self.source)
+        # PR #12 (D-10) upgraded the formal path to the trace-bearing
+        # evaluator. The property this test defends is unchanged: identities
+        # are attached inside the evaluation loop, by whichever of the two
+        # identity-bearing evaluators the formal path uses.
+        self.assertIn("evaluate_detector_with_traces", self.source)
+        self.assertNotIn("evaluate_detector_with_identity", self.source)
 
     def test_the_claim_receives_the_actual_run_configuration(self):
         # Not the frozen constants echoed back: the values the run used.
