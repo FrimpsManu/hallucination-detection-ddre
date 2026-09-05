@@ -1,5 +1,6 @@
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 
 import numpy as np
 from scipy.stats import pearsonr, spearmanr
@@ -25,8 +26,14 @@ def _safe_corr(fn, x, y):
     return float(fn(x, y)[0])
 
 
-def _wang_pr_auc(y_binary, score):
-    """Match Wang released code: precision_recall_curve followed by auc(recall, precision)."""
+def wang_pr_auc(y_binary, score):
+    """Match Wang released code: precision_recall_curve followed by auc(recall, precision).
+
+    Public because the confirmatory bootstrap must use exactly this definition.
+    A second, subtly different PR-AUC would make the interval describe a
+    different estimand from the point estimate it is meant to bracket, so both
+    paths call this one function.
+    """
     precision, recall, _ = precision_recall_curve(y_binary, score)
     return float(auc(recall, precision))
 
@@ -72,14 +79,14 @@ def summarize_method(records, results, elapsed_seconds=None):
             "precision": float(precision_score(y_true, y_pred, pos_label=0, zero_division=0)),
             "recall": float(recall_score(y_true, y_pred, pos_label=0, zero_division=0)),
             "f1": float(f1_score(y_true, y_pred, pos_label=0, zero_division=0)),
-            "auc_pr": _wang_pr_auc(nonfact_true, p_nonfact),
+            "auc_pr": wang_pr_auc(nonfact_true, p_nonfact),
             "average_precision": float(average_precision_score(nonfact_true, p_nonfact)),
         },
         "factual": {
             "precision": float(precision_score(y_true, y_pred, pos_label=1, zero_division=0)),
             "recall": float(recall_score(y_true, y_pred, pos_label=1, zero_division=0)),
             "f1": float(f1_score(y_true, y_pred, pos_label=1, zero_division=0)),
-            "auc_pr": _wang_pr_auc(factual_true, p_factual),
+            "auc_pr": wang_pr_auc(factual_true, p_factual),
             "average_precision": float(average_precision_score(factual_true, p_factual)),
         },
     }
@@ -133,12 +140,82 @@ def summarize_method(records, results, elapsed_seconds=None):
     return metrics
 
 
-def evaluate_detector(detector, records, scorer, *, description, use_cache=True):
+@dataclass(frozen=True)
+class EvaluatedSentence:
+    """One detector result with the identity of the sentence that produced it.
+
+    ``DetectionResult`` carries no identity, so two result lists of equal length
+    look "paired" even when one has been permuted. Attaching the identity **at
+    evaluation time** -- inside the loop that pairs a record with its result --
+    is what makes a later paired analysis genuinely paired. Reconstructing it
+    afterwards from a possibly-permuted list would assume exactly the property
+    that needs checking.
+
+    Frozen so an observation cannot be edited after the fact.
+    """
+
+    passage_index: int
+    sentence_index: int
+    gold_label: int
+    result: object
+
+    @property
+    def identity(self):
+        return (self.passage_index, self.sentence_index, self.gold_label)
+
+
+def _run_detector(detector, records, scorer, description, use_cache):
+    """The single evaluation loop. Builds results and identities together.
+
+    The observation is constructed from the *same* ``record`` that produced the
+    result, in the same iteration, so the identity cannot be attached to the
+    wrong result. Zipping a record list against a returned result list
+    afterwards would assume the ordering that the paired analysis exists to
+    verify.
+
+    The elapsed clock now spans the dataclass construction as well. That cost is
+    microseconds against an NLI forward pass, and every method pays it equally,
+    so no wall-clock comparison between methods is biased by it.
+    """
     results = []
+    observations = []
     start = time.perf_counter()
     for record in tqdm(records, desc=description, unit="sentence"):
-        results.append(detector.detect_sentence(record, scorer, use_cache=use_cache))
+        result = detector.detect_sentence(record, scorer, use_cache=use_cache)
+        results.append(result)
+        observations.append(
+            EvaluatedSentence(
+                passage_index=record.passage_index,
+                sentence_index=record.sentence_index,
+                gold_label=int(record.label),
+                result=result,
+            )
+        )
     elapsed = time.perf_counter() - start
+    return results, observations, elapsed
+
+
+def evaluate_detector_with_identity(
+    detector, records, scorer, *, description, use_cache=True
+):
+    """``evaluate_detector`` plus identity-bearing observations.
+
+    A narrow addition rather than a change to ``evaluate_detector``'s return
+    signature, which several diagnostic scripts and the Gate 1 reproduction
+    already depend on. Returns ``(metrics, results, observations)``; the first
+    two are exactly what ``evaluate_detector`` returns.
+    """
+    results, observations, elapsed = _run_detector(
+        detector, records, scorer, description, use_cache
+    )
+    metrics = summarize_method(records, results, elapsed_seconds=elapsed)
+    return metrics, results, observations
+
+
+def evaluate_detector(detector, records, scorer, *, description, use_cache=True):
+    results, _, elapsed = _run_detector(
+        detector, records, scorer, description, use_cache
+    )
     metrics = summarize_method(records, results, elapsed_seconds=elapsed)
     return metrics, results
 
