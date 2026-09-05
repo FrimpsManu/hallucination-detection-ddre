@@ -76,8 +76,8 @@ Two things are in good shape and should be stated plainly:
 | D-06 | MAJOR — **RESOLVED by PR #9** | `.ratio`, `detect_subclaim` | A NaN score propagates silently: `log(NaN)` → `clip` → `sigmoid` all yield NaN; every stopping comparison is False, so the **full retrieval budget is spent**, and NaN reaches the metrics. `+inf` is clipped to a perfect score of 100. | Silent corruption of both the quality and the efficiency numbers, with no warning anywhere. | **Done (PR #9):** `ratio()` rejects a non-finite score before normalization and a non-finite raw ratio before clipping; `detect_subclaim` validates the score, then the ratio (finite and strictly positive), then the posterior. See §11. |
 | D-05 | MINOR | `detect_subclaim` | The running log-odds are clipped to `±40` **after each update**, so accumulation is non-associative and evidence beyond the bound is discarded. | Harmless under any stopping band in the current grid (`sigmoid(±40)` is far outside it), but it is a silent modification of the stated update rule. | Document it, or clip only at the sigmoid. |
 | D-10 | MINOR | `evaluation.py::prediction_rows`, `detect_sentence` | Per-subclaim results are collapsed into one `DetectionResult` with summed counters. Per-subclaim stopping depth is unrecoverable, and the CSV omits the subclaim count. | §4-G asks for stopping depth; §4-H needs the subclaim count to express documents-per-subclaim on a bootstrap resample. | Add `n_subclaims` to `prediction_rows` and retain per-subclaim depths. |
-| D-11 | MINOR | `main.py::tune_ddre_thresholds` | `normalized_docs = avg_docs / max_docs` divides a **per-sentence** document count by a **per-subclaim** budget. With ~1.57 subclaims/sentence it can exceed 1.0. | The fallback penalty's exchange rate against balanced PR-AUC is therefore not the declared one. | Normalise by `max_docs × subclaims_per_sentence`, or state the scale explicitly. |
-| D-12 | MINOR | `main.py::auto_push_results` | Result artifacts are committed and pushed automatically at the end of a full run unless `--no-push-results`. | A crashed or partial run can publish artifacts; the default direction is toward publishing, not toward review. | Invert the default. |
+| D-11 | MINOR — **RESOLVED by PR #11** | `main.py::tune_ddre_thresholds` | `normalized_docs = avg_docs / max_docs` divides a **per-sentence** document count by a **per-subclaim** budget. With ~1.57 subclaims/sentence it can exceed 1.0. | The fallback penalty's exchange rate against balanced PR-AUC is therefore not the declared one. | **Done (PR #11):** the fallback cost is now `avg_retrieved_documents_per_subclaim / max_documents_per_subclaim`, so numerator and denominator share a unit and the value is a genuine fraction in `[0, 1]`. A value outside that range raises rather than being clamped. Feasible selection is unchanged and still minimises documents *per sentence*. See §13. |
+| D-12 | MINOR — **RESOLVED by PR #11** | `main.py::auto_push_results` | Result artifacts are committed and pushed automatically at the end of a full run unless `--no-push-results`. | A crashed or partial run can publish artifacts; the default direction is toward publishing, not toward review. | **Done (PR #11):** publication is opt-in behind `--push-results` (default off); `auto_push_results` refuses `main`, `master` and a detached HEAD **before staging anything**; the summary records the intent. See §13. |
 | D-13 | NOTE | `main.py`, `ddre_core.py` | uLSIF is fit on the **NBC sentence-pair** scores but applied to **document** scores (max over 400-word spans). | A real distribution shift — but BSE's histograms inherit exactly the same one, so the comparison is fair. Worth one sentence in the paper. | Disclose. |
 | D-14 | NOTE | `detect_subclaim` | A subclaim with no documents returns `P = P0 = 0.5`, which is above `0.225806`, so it is classified **factual** by default. | Not reachable in the released data (0 of 2,990 subclaims), so it is a latent rather than an active issue. | Assert non-empty at load, or document the default. |
 | D-15 | NOTE | `ULSIFDensityRatio.fit` | CV folds choose centres from each fold's training half; the final model chooses centres from all factual scores. The selected `(σ, λ)` is therefore optimal for a centre set the final model does not use. | Standard practice, small effect, but it means the CV objective is not exactly the final model's objective. | Disclose. |
@@ -325,7 +325,8 @@ then higher factual PR-AUC.
 * **Test split — never touched.** See §5.
 * **Fallback — declared in advance, but two problems.** It is predeclared and
   recorded in the summary (`selection_rule`), which is good. But (i) the
-  normalisation is dimensionally wrong (D-11), and (ii) the fallback maximises
+  normalisation is dimensionally wrong (D-11 — **fixed in PR #11**; see §13),
+  and (ii) the fallback maximises
   `balanced_pr_auc − 0.05·normalized_docs` with no quality floor at all, so it
   can select a configuration far below baseline quality. It is defensible only
   because it is explicitly recorded as "no threshold pair preserved BSE-official
@@ -374,8 +375,9 @@ other 48 are the validation split.
    documents-per-subclaim cannot be formed on a resample.
 2. Retain per-subclaim depths if subclaim-level efficiency claims are wanted
    (D-10); passage-level sentence metrics do not require this.
-3. Write the predictions CSV before the auto-push (D-12), so a failed push
-   cannot leave the bootstrap input unwritten.
+3. Write the predictions CSV before the auto-push (D-12). ~~Largely moot as of
+   PR #11: a normal run no longer pushes at all unless `--push-results` is
+   given, so nothing is published behind the bootstrap input.~~
 4. Decide and predeclare the bootstrap protocol — number of resamples, interval
    type, which metrics, and the multiplicity correction across methods and
    metrics — **before** the test split is evaluated.
@@ -603,8 +605,9 @@ tuner's own objective prefers the region the fix removes.
    non-finite scores.~~ **DONE — PR #9.** See §11.
 8. **D-10** — add `n_subclaims` to `prediction_rows`; retain per-subclaim
    stopping depth.
-9. **D-11** — fix the fallback's cost normalisation, or state its scale.
-10. **D-12** — make result auto-push opt-in.
+9. ~~**D-11** — fix the fallback's cost normalisation, or state its scale.~~
+   **DONE — PR #11.** See §13.
+10. ~~**D-12** — make result auto-push opt-in.~~ **DONE — PR #11.** See §13.
 11. Pre-register the bootstrap protocol (resamples, interval, metrics,
     multiplicity) **before** the test split is evaluated.
 
@@ -969,3 +972,78 @@ one row per `(passage, sentence)`, so a duplicate means the evaluated set was
 built wrongly.
 
 **Not resolved by PR #10:** D-02, D-03, D-09, D-10, D-11, D-12 remain open.
+
+---
+
+## 13. Resolution log — PR #11
+
+### D-11 — RESOLVED by PR #11, *research: correct fallback cost scale and make result pushes opt-in*
+
+The defect, unchanged from the table above: the fallback objective computed
+`normalized_docs = avg_retrieved_documents_per_sentence / max_docs`, dividing a
+**per-sentence** document count by a **per-subclaim** budget. That is not a
+fraction of anything. With roughly 1.57 subclaims per sentence in this dataset it
+can exceed 1.0, and — worse than the range problem — the same retrieval *policy*
+scored differently purely because the sentences it happened to see carried more
+subclaims, which is a property of the data rather than of the method.
+
+The corrected cost is
+
+```
+normalized_document_cost = avg_retrieved_documents_per_subclaim
+                         / max_documents_per_subclaim
+```
+
+equivalently `total_documents / (total_subclaims × max_docs)`. Both quantities
+are documents per subclaim, so the ratio is dimensionless and lies in `[0, 1]`:
+5 documents per subclaim against a budget of 10 scores 0.5 however many subclaims
+each sentence carries. The repository already computed
+`avg_retrieved_documents_per_subclaim`; it simply was not the quantity being used.
+
+Nothing is clamped. `max_docs ≤ 0` raises, and so does a normalized cost below 0
+or above 1 — a subclaim cannot consume more than the budget, so such a value is
+either a unit inconsistency or a corrupted count, and pulling it silently back
+into range would hide exactly the error this check exists to catch. The
+`retrieval_penalty` value itself is unchanged and is recorded, not rescaled.
+
+Each candidate now records `avg_documents` (per sentence),
+`avg_documents_per_subclaim`, `normalized_document_cost`,
+`max_documents_per_subclaim`, `fallback_retrieval_penalty`, `fallback_objective`,
+and the normalization in words, so a reviewer never has to infer the units.
+
+**Scope.** This corrects the **fallback objective only**. Selection among
+confirmatorily feasible configurations is untouched: minimum documents *per
+sentence*, then balanced, nonfactual and factual PR-AUC tie-breaks, then a
+deterministic threshold ordering. The corrected fallback may choose a different
+*exploratory* configuration when nothing preserves baseline quality — that is
+what the fix is for — and a fallback selection remains
+`confirmatory_validation_selection = false`, unable to support the confirmatory
+claim however large the held-out effect.
+
+### D-12 — RESOLVED by PR #11
+
+The defect, unchanged: a full run committed and pushed result artifacts unless
+the user remembered `--no-push-results`, so the default direction was toward
+publishing rather than toward review.
+
+Publication is now **opt-in**. `--push-results` (default `False`) is required;
+without it a run writes its artifacts to disk and nothing is staged, committed or
+pushed. `--no-push-results` is retained as a hidden no-op so existing invocations
+keep working. The two are mutually exclusive, and neither may default to a value
+that resolves to pushing — asserted against `main.py`'s own argparse call rather
+than a copy of it. A smoke test never auto-pushes even when the flag is given:
+its outputs are debugging-only. Declining to push is reported as an ordinary
+outcome, not an error.
+
+`auto_push_results` itself now refuses `main`, `master` and a detached or
+ambiguous HEAD, **before `git add`** — staging first and refusing afterwards
+would still leave the index dirty on a protected branch. This repository's
+workflow is branch → PR → review → merge, and an experiment helper must not
+bypass it. There is no override flag.
+
+The summary records `result_publication.automatic_push_requested` and the policy.
+That is the **intent** expressed on the command line, not whether a remote later
+accepted the push; the already-written summary is never rewritten to insert a
+push result.
+
+**Not resolved by PR #11:** D-02, D-03, D-09 and D-10 remain open.

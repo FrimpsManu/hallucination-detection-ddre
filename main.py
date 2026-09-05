@@ -91,10 +91,28 @@ def parse_args():
         default=0.05,
         help="Fallback DDRE validation penalty on normalized document cost when no dominating threshold pair exists.",
     )
-    parser.add_argument(
+    # D-12. Publishing is OPT-IN. A normal full run writes its artifacts to
+    # disk and stops there; committing and pushing them is a separate,
+    # explicit request. --no-push-results is kept only so existing invocations
+    # keep working -- it is now a no-op, because not pushing is the default.
+    publication = parser.add_mutually_exclusive_group()
+    publication.add_argument(
+        "--push-results",
+        action="store_true",
+        default=False,
+        help=(
+            "Explicitly allow committing and pushing generated full-run result "
+            "artifacts to the current branch. Off by default: without this flag "
+            "results are written locally and nothing is staged, committed or "
+            "pushed. Protected branches (main/master) are never auto-pushed, "
+            "with or without this flag."
+        ),
+    )
+    publication.add_argument(
         "--no-push-results",
         action="store_true",
-        help="Do not automatically commit/push full-run result artifacts to the current GitHub branch.",
+        default=False,
+        help=argparse.SUPPRESS,  # deprecated no-op; not pushing is the default
     )
     return parser.parse_args()
 
@@ -256,12 +274,39 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
+PROTECTED_BRANCHES = frozenset({"main", "master"})
+
+
 def auto_push_results(paths):
-    """Commit/push only generated result artifacts; never raw data or NLI cache."""
+    """Commit/push only generated result artifacts; never raw data or NLI cache.
+
+    The branch is resolved and checked BEFORE anything is staged. This
+    repository's workflow is branch -> PR -> review -> merge, and an experiment
+    helper must never bypass that by committing generated results straight to
+    the default branch. Staging first and refusing afterwards would still leave
+    the index dirty on a protected branch, so the check comes first.
+
+    A detached or otherwise ambiguous HEAD is refused for the same reason: there
+    is no branch to push to, and guessing one is exactly the kind of helpfulness
+    that produces a commit nobody asked for.
+    """
     try:
         branch = subprocess.check_output(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True
         ).strip()
+        if branch in PROTECTED_BRANCHES:
+            print(
+                f"Refusing to auto-push: '{branch}' is a protected branch. "
+                "Results are on disk; open a branch and a pull request to "
+                "publish them."
+            )
+            return {"pushed": False, "reason": "protected branch", "branch": branch}
+        if not branch or branch == "HEAD":
+            print(
+                "Refusing to auto-push: HEAD is detached, so there is no branch "
+                "to push to. Results are on disk."
+            )
+            return {"pushed": False, "reason": "detached HEAD", "branch": branch}
         subprocess.run(["git", "add", *[str(path) for path in paths]], check=True)
         staged = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],
@@ -557,6 +602,14 @@ def main():
                     else "live uncached NLI inference"
                 ),
             },
+            "result_publication": {
+                "automatic_push_requested": bool(args.push_results),
+                "policy": "opt-in; protected branches are never auto-pushed",
+                "note": (
+                    "Records the intent expressed on the command line, not "
+                    "whether a push was later accepted by the remote."
+                ),
+            },
             "split": split_metadata,
             "confirmatory_split_identity": claim_assessment["split_identity"],
             "execution_sentences": {
@@ -701,11 +754,22 @@ def main():
         print(f"Predictions: {predictions_path}")
         print(f"DDRE model: {model_path}")
 
-        if not args.smoke_test and not args.no_push_results:
+        # D-12. Opt-in. A smoke test never auto-pushes, even when the flag is
+        # given: its outputs are debugging-only and are not paper results.
+        if not args.smoke_test and args.push_results:
             push_status = auto_push_results(
                 [summary_path, predictions_path, model_path]
             )
             print(f"Result push status: {push_status}")
+        elif args.smoke_test and args.push_results:
+            print(
+                "Result artifacts written locally; smoke-test outputs are "
+                "debugging-only and are never auto-pushed."
+            )
+        else:
+            print(
+                "Result artifacts written locally; automatic push not requested."
+            )
 
     finally:
         scorer.close()
