@@ -5,6 +5,57 @@ import numpy as np
 from src.baseline_core import DetectionResult, cost_based_prediction
 
 
+# Failure taxonomy. Both subclass ValueError so existing callers that catch
+# ValueError keep working, while the distinct names let a caller -- and a test
+# -- say which invalid state was hit.
+
+
+class DDRENumericalError(ValueError):
+    """An invalid numerical state reached DDRE. Never converted into evidence."""
+
+
+class NonFiniteScoreError(DDRENumericalError):
+    """A NaN or infinite score or density ratio reached DDRE."""
+
+
+class DegenerateULSIFFit(DDRENumericalError):
+    """The fitted uLSIF estimator is numerically invalid, not merely unhelpful."""
+
+
+MAX_REPORTED_OFFENDERS = 5
+
+
+def _describe_non_finite(name, values):
+    """A short, bounded description of which entries are not finite."""
+    array = np.asarray(values, dtype=float).ravel()
+    bad = np.flatnonzero(~np.isfinite(array))
+    shown = [(int(i), float(array[i])) for i in bad[:MAX_REPORTED_OFFENDERS]]
+    more = len(bad) - len(shown)
+    detail = ", ".join(f"index {i}: {v!r}" for i, v in shown)
+    if more > 0:
+        detail += f", and {more} more"
+    return (
+        f"{name} contains {len(bad)} non-finite value(s) out of {array.size}. "
+        f"First offenders: {detail}."
+    )
+
+
+def _require_finite_scores(name, scores):
+    """Reject NaN/+inf/-inf training scores loudly, before any normalization.
+
+    Normalization clips to [0, 1] after dividing by 100, which would silently
+    turn +inf into a perfect score and -inf into a zero one. A score that is not
+    a number is not evidence, so it must not be given a value.
+    """
+    try:
+        array = np.asarray(scores, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise NonFiniteScoreError(f"{name} is not numeric: {exc}") from None
+    if array.size and not np.all(np.isfinite(array)):
+        raise NonFiniteScoreError(_describe_non_finite(name, array))
+    return array
+
+
 class ULSIFDensityRatio:
     """Direct density-ratio estimator using unconstrained LSIF (uLSIF).
 
@@ -22,6 +73,40 @@ class ULSIFDensityRatio:
         self.sigma = None
         self.lam = None
         self.cv_table = []
+        self._fit_diagnostics = None
+
+    def _clear_fit_state(self):
+        """Discard every trace of a previous fit.
+
+        Called at the START of each fit attempt and on any failure, so the
+        object always represents *this* attempt or no usable fit at all. Without
+        it a second fit that fails early -- non-finite training input, a
+        non-finite CV objective -- would leave the previous successful model in
+        place, and ``ratio()`` would go on serving evidence from a fit the
+        caller believes was replaced. ``fit_diagnostics`` would describe that
+        older fit too, so provenance would be ambiguous exactly when something
+        has gone wrong.
+
+        ``cv_table`` is reset here as well: it is provenance for the current
+        attempt, and a stale table masquerading as current is the same failure
+        in a quieter form.
+        """
+        self.centers = None
+        self.alpha = None
+        self.sigma = None
+        self.lam = None
+        self._fit_diagnostics = None
+        self.cv_table = []
+
+    @property
+    def fit_diagnostics(self):
+        """Read-only provenance for the successful final fit, or None.
+
+        Diagnostic only. Nothing here selects or tunes the model; the fail-closed
+        validity checks in ``_validate_final_fit`` are the only thing that acts
+        on the fitted state.
+        """
+        return None if self._fit_diagnostics is None else dict(self._fit_diagnostics)
 
     @staticmethod
     def _as_column(scores):
@@ -51,12 +136,21 @@ class ULSIFDensityRatio:
             alpha = np.linalg.pinv(regularized) @ h_vector
         return np.maximum(alpha, 0.0)
 
+    def _raw_ratios(self, x):
+        """The fitted ratio BEFORE the [1e-6, 1e6] clip, for validation."""
+        return self._kernel(x, self.centers, self.sigma) @ self.alpha
+
     def _objective(self, factual_x, hallucinated_x, centers, alpha, sigma):
         ratio_h = self._kernel(hallucinated_x, centers, sigma) @ alpha
         ratio_f = self._kernel(factual_x, centers, sigma) @ alpha
         return float(0.5 * np.mean(ratio_h ** 2) - np.mean(ratio_f))
 
     def fit(self, factual_scores, hallucinated_scores, folds=5):
+        # Before input validation, before model selection, before anything: a
+        # fit attempt invalidates whatever came before it.
+        self._clear_fit_state()
+        _require_finite_scores("factual_scores", factual_scores)
+        _require_finite_scores("hallucinated_scores", hallucinated_scores)
         factual_x = self._as_column(factual_scores)
         hallucinated_x = self._as_column(hallucinated_scores)
         if len(factual_x) < 2 or len(hallucinated_x) < 2:
@@ -113,9 +207,20 @@ class ULSIFDensityRatio:
             )
 
         best = None
-        self.cv_table = []
         for sigma in sigma_grid:
+            # A non-finite or non-positive bandwidth would make every kernel
+            # value meaningless, and NaN loses every comparison, so a NaN
+            # objective could win selection by never being greater than best.
+            if not math.isfinite(sigma) or sigma <= 0.0:
+                raise DegenerateULSIFFit(
+                    f"uLSIF candidate sigma must be finite and positive, got {sigma!r}"
+                )
             for lam in lambda_grid:
+                if not math.isfinite(lam) or lam < 0.0:
+                    raise DegenerateULSIFFit(
+                        "uLSIF candidate lambda must be finite and non-negative, "
+                        f"got {lam!r}"
+                    )
                 fold_scores = []
                 for f_train, h_train, f_val, h_val, centers in fold_data:
                     alpha = self._solve(f_train, h_train, centers, sigma, lam)
@@ -123,10 +228,26 @@ class ULSIFDensityRatio:
                         self._objective(f_val, h_val, centers, alpha, sigma)
                     )
                 cv_score = float(np.mean(fold_scores))
+                if not math.isfinite(cv_score):
+                    # Deliberately NOT skipped: silently dropping a candidate
+                    # would change the effective model-selection search space,
+                    # which is a scientific behaviour change, not a safety fix.
+                    raise DegenerateULSIFFit(
+                        "uLSIF cross-validation produced a non-finite objective "
+                        f"for sigma={sigma!r}, lambda={lam!r}: {cv_score!r}. "
+                        "Refusing to select a configuration from an invalid "
+                        "comparison."
+                    )
                 row = {"sigma": sigma, "lambda": lam, "cv_objective": cv_score}
                 self.cv_table.append(row)
                 if best is None or cv_score < best["cv_objective"]:
                     best = row
+
+        if best is None or not math.isfinite(best["cv_objective"]):
+            raise DegenerateULSIFFit(
+                "uLSIF model selection did not produce a finite objective; "
+                f"best={best!r}"
+            )
 
         self.sigma = float(best["sigma"])
         self.lam = float(best["lambda"])
@@ -138,13 +259,140 @@ class ULSIFDensityRatio:
             self.sigma,
             self.lam,
         )
+
+        # D-04. The estimator is not usable until the final fitted state is
+        # shown to be numerically valid. On failure the fitted state is cleared,
+        # so ratio() reports "not fit" rather than serving an invalid model.
+        try:
+            self._fit_diagnostics = self._validate_final_fit(
+                factual_x, hallucinated_x, float(best["cv_objective"])
+            )
+        except DegenerateULSIFFit:
+            # The whole fitted state, not a subset: leaving sigma and lambda
+            # behind would describe a model that no longer exists.
+            self._clear_fit_state()
+            raise
         return self
+
+    def _validate_final_fit(self, factual_x, hallucinated_x, cv_objective):
+        """Reject a numerically invalid final fit, and record what it looks like.
+
+        "Degenerate" here means mathematically invalid, not merely unhelpful. A
+        fit is rejected only for non-finite parameters, an all-zero coefficient
+        vector, or fitted ratios that are non-finite or identically zero across
+        the observed training support.
+
+        It is deliberately NOT rejected for large ratios, small-but-positive
+        ratios, a narrow ratio range, or heavy class overlap. Those are
+        questions about how well the estimate is supported, which belong to
+        D-03 and the later empirical stability analysis; treating them as
+        validity failures here would smuggle in an arbitrary "good fit"
+        threshold.
+        """
+        if self.centers is None or np.size(self.centers) == 0:
+            raise DegenerateULSIFFit("uLSIF fit produced no kernel centers.")
+        if not np.all(np.isfinite(self.centers)):
+            raise DegenerateULSIFFit(
+                _describe_non_finite("uLSIF kernel centers", self.centers)
+            )
+        if self.sigma is None or not math.isfinite(self.sigma) or self.sigma <= 0.0:
+            raise DegenerateULSIFFit(
+                f"uLSIF fit produced an invalid sigma: {self.sigma!r} "
+                "(must be finite and positive)."
+            )
+        if self.lam is None or not math.isfinite(self.lam) or self.lam < 0.0:
+            raise DegenerateULSIFFit(
+                f"uLSIF fit produced an invalid lambda: {self.lam!r} "
+                "(must be finite and non-negative)."
+            )
+        if self.alpha is None or np.size(self.alpha) == 0:
+            raise DegenerateULSIFFit("uLSIF fit produced no coefficients.")
+        if not np.all(np.isfinite(self.alpha)):
+            raise DegenerateULSIFFit(
+                _describe_non_finite("uLSIF coefficients (alpha)", self.alpha)
+            )
+        if np.any(self.alpha < 0.0):
+            raise DegenerateULSIFFit(
+                "uLSIF coefficients must remain non-negative after truncation; "
+                f"minimum is {float(np.min(self.alpha))!r}."
+            )
+        n_positive = int(np.count_nonzero(self.alpha > 0.0))
+        if n_positive == 0:
+            raise DegenerateULSIFFit(
+                "uLSIF fit is degenerate: no coefficient is strictly positive, so "
+                "the fitted ratio is identically zero. Clipping that to the 1e-6 "
+                "floor would read as log r = -13.82 per document, i.e. "
+                "overwhelming evidence of hallucination, when in fact the "
+                "estimator is invalid. Refusing to return a usable estimator."
+            )
+
+        factual_raw = self._raw_ratios(factual_x)
+        hallucinated_raw = self._raw_ratios(hallucinated_x)
+        all_raw = np.concatenate([factual_raw, hallucinated_raw])
+        if not np.all(np.isfinite(all_raw)):
+            raise DegenerateULSIFFit(
+                _describe_non_finite(
+                    "uLSIF fitted ratios on the training support", all_raw
+                )
+            )
+        if np.any(all_raw < 0.0):
+            raise DegenerateULSIFFit(
+                "uLSIF fitted ratios must be non-negative; minimum on the "
+                f"training support is {float(np.min(all_raw))!r}."
+            )
+        if not np.any(all_raw > 0.0):
+            raise DegenerateULSIFFit(
+                "uLSIF fit is degenerate: the fitted ratio is identically zero "
+                "across the observed training support. Refusing to return a "
+                "usable estimator."
+            )
+
+        return {
+            "n_factual": int(np.size(factual_x)),
+            "n_hallucinated": int(np.size(hallucinated_x)),
+            "sigma": float(self.sigma),
+            "lambda": float(self.lam),
+            "cv_objective": float(cv_objective),
+            "n_centers": int(np.size(self.centers)),
+            "n_alpha": int(np.size(self.alpha)),
+            "n_positive_alpha": n_positive,
+            "alpha_sum": float(np.sum(self.alpha)),
+            "alpha_min": float(np.min(self.alpha)),
+            "alpha_max": float(np.max(self.alpha)),
+            "raw_ratio_min_on_factual_train": float(np.min(factual_raw)),
+            "raw_ratio_max_on_factual_train": float(np.max(factual_raw)),
+            "raw_ratio_min_on_hallucinated_train": float(np.min(hallucinated_raw)),
+            "raw_ratio_max_on_hallucinated_train": float(np.max(hallucinated_raw)),
+            "raw_ratio_min_on_all_train": float(np.min(all_raw)),
+            "raw_ratio_max_on_all_train": float(np.max(all_raw)),
+            "sanity_check_passed": True,
+            "note": (
+                "Diagnostic and provenance only. These values do not tune or "
+                "select the model. The fit is rejected only for numerically "
+                "invalid states -- non-finite parameters or ratios, or an "
+                "identically zero fitted ratio -- never for the SCALE or SPREAD "
+                "of the ratios, which is a D-03 question."
+            ),
+        }
 
     def ratio(self, score):
         if self.alpha is None:
             raise RuntimeError("ULSIFDensityRatio must be fit before use")
+        # Before normalization and before any clip: _as_column would otherwise
+        # turn +inf into a perfect score of 100 and -inf into 0, and NaN would
+        # pass straight through.
+        if not math.isfinite(score):
+            raise NonFiniteScoreError(
+                f"ULSIFDensityRatio.ratio received a non-finite score: {score!r}. "
+                "A score that is not a number is not evidence."
+            )
         x = self._as_column([score])
-        value = float((self._kernel(x, self.centers, self.sigma) @ self.alpha)[0])
+        value = float(self._raw_ratios(x)[0])
+        if not math.isfinite(value):
+            raise NonFiniteScoreError(
+                f"ULSIFDensityRatio produced a non-finite ratio {value!r} for "
+                f"score {score!r}. Refusing to clip an invalid value into range."
+            )
         return float(np.clip(value, 1e-6, 1e6))
 
 
@@ -426,10 +674,44 @@ class DDREDetector:
             documents_used += 1
             nli_calls += segment_calls
 
+            # D-06. Validate the score BEFORE it reaches the ratio estimator.
+            # This duplicates ULSIFDensityRatio's own guard on purpose: the
+            # detector accepts any ratio-estimator implementation, and the
+            # sequential accumulator must not depend on one of them being
+            # careful. NaN defeats every comparison below, so an unchecked NaN
+            # would spend the whole retrieval budget and return a NaN posterior
+            # that reaches the metrics silently.
+            if not math.isfinite(score):
+                raise NonFiniteScoreError(
+                    "DDRE document-score numerical failure: the scorer returned "
+                    f"a non-finite score {score!r} for document "
+                    f"{documents_used} of {len(subclaim.documents[: self.max_docs])} "
+                    f"(document url={getattr(document, 'url', None)!r}) on subclaim "
+                    f"{subclaim.text[:80]!r}. Refusing to convert an invalid "
+                    "score into evidence; retrieval stops here."
+                )
+
             ratio = self.ratio_estimator.ratio(score)
+            if not math.isfinite(ratio) or ratio <= 0.0:
+                raise NonFiniteScoreError(
+                    "DDRE density-ratio numerical failure: the ratio estimator "
+                    f"returned {ratio!r} for score {score!r} on document "
+                    f"{documents_used} of subclaim {subclaim.text[:80]!r}. A "
+                    "density ratio must be finite and strictly positive; log() "
+                    "of anything else is not evidence. Not repaired with an "
+                    "epsilon here -- the estimator state is what is wrong."
+                )
+
             log_odds += math.log(ratio)
             log_odds = float(np.clip(log_odds, -40.0, 40.0))
             p_factual = self._sigmoid(log_odds)
+            if not math.isfinite(p_factual):
+                raise NonFiniteScoreError(
+                    "DDRE posterior numerical failure: the log-odds update "
+                    f"produced a non-finite posterior {p_factual!r} from "
+                    f"log_odds={log_odds!r} on document {documents_used} of "
+                    f"subclaim {subclaim.text[:80]!r}."
+                )
 
             if (
                 p_factual <= self.lower_threshold
