@@ -70,7 +70,7 @@ Two things are in good shape and should be stated plainly:
 | D-03 | **MAJOR / NEEDS EMPIRICAL CHECK** | `ddre_core.py::ULSIFDensityRatio.ratio` | The estimate is most empirically constrained where the training data provide local support. Sparse and tail regions are more sensitive to bandwidth, regularisation and kernel extrapolation, so the ratio there can be large or small for reasons that are not evidential. | A large ratio is **not** by itself a defect — where factual support is strong and hallucinated support is weak, a large ratio is exactly what the estimator should report. The question is whether large values come from stable local support or from weak-support instability, and that is **unmeasured** on the actual NBC fit; the demonstrations below use synthetic scores and establish only the mechanism. | Before tuning, run the measurement in §4-A over the fitted score support, **distinguishing large-but-stable ratios from weak-support instability**. Pre-register a per-document log-evidence sensitivity analysis only if the measurement warrants it. **Do not choose a cap value yet.** |
 | D-02 | MAJOR | `ddre_core.py::detect_subclaim` vs `baseline_core.py::detect_subclaim` | Algorithm/protocol asymmetry. BSE's stop/continue rule is decision-theoretic (expected cost of retrieving vs stopping) and can decline the **first** fetch, retrieving **0** documents. DDRE's rule is a fixed probability band evaluated after an update, so it has a floor of **one retrieval per non-empty evaluated subclaim**. | Retrieval counts have different origins. On the 190-passage held-out split that floor is **2,387 documents** (all test subclaims are non-empty); DDRE must spend that before it can win on cost, and where BSE retrieves 0, DDRE cannot win at all. **This currently disadvantages DDRE.** | Report BSE's zero-retrieval frequency and the retrieval-floor difference alongside the efficiency numbers. A threshold pre-check does **not** fix this (see §6); giving DDRE a Bayes-risk pre-retrieval decision would be a **stopping-rule redesign**, not a small fairness fix. |
 | D-07 | MAJOR — **RESOLVED by PR #10** | `main.py::tune_ddre_thresholds` → `src/threshold_selection.py` | The feasibility test constrains only `factual_auc_pr` and `balanced_pr_auc`. Nonfactual AUC-PR — Wang's headline metric — is unconstrained. | Balanced PR-AUC is the mean of the two, so a large factual gain can mask a nonfactual loss and still qualify. The tuner may select a configuration that is worse at detecting hallucination. | **Done (PR #10):** feasibility now requires nonfactual AND factual AND balanced PR-AUC, each within the validation tolerance; all three booleans and all three deltas are recorded per candidate. The rule moved into `src/threshold_selection.py` so it is reviewable on its own. See §12. |
-| D-08 | MAJOR — **RESOLVED by PR #10** | `main.py::hypothesis_comparison` → `src/paired_bootstrap.py` | `hypothesis_supported_on_test` requires `factual_delta > 0` and `balanced_delta ≥ 0`, with no nonfactual floor and **no uncertainty quantification of any kind**. | A single point estimate is written into the summary as a scientific conclusion, over three methods and several metrics, with no interval and no multiplicity control. | **Done (PR #10):** the point-estimate boolean is gone. The claim now comes from a pre-registered paired passage-level cluster bootstrap with a conjunctive rule and three claim statuses. See §12 and `docs/confirmatory_statistical_protocol.md`. |
+| D-08 | MAJOR — **RESOLVED by PR #10** | `main.py::hypothesis_comparison` → `src/paired_bootstrap.py` | `hypothesis_supported_on_test` requires `factual_delta > 0` and `balanced_delta ≥ 0`, with no nonfactual floor and **no uncertainty quantification of any kind**. | A single point estimate is written into the summary as a scientific conclusion, over three methods and several metrics, with no interval and no multiplicity control. | **Done (PR #10):** the point-estimate boolean is gone. The claim now comes from a pre-registered paired passage-level cluster bootstrap with a conjunctive rule and three claim statuses, and the pre-registration is **enforced**: bootstrap provenance, the actual run configuration and the split's passage IDs are each verified before a claim can be confirmatory, and the pairing is checked by per-sentence identity attached at evaluation time. See §12 and `docs/confirmatory_statistical_protocol.md`. |
 | D-09 | MAJOR (claim boundary / robustness) | `main.py`, `ddre_core.py` | DDRE selects its stopping band from **64** validation configurations. Published BSE has **no tunable counterpart** — its stopping rule follows from the fixed published costs. | Part of any DDRE advantage may be a model-selection advantage. This bounds what the comparison may claim; it does **not** invalidate it. | Keep **published BSE (CM=28, CFA=96, c_retrieve=1) as the primary comparator** for comparability with Wang et al. Optionally add a validation-tuned BSE variant as a clearly labelled **secondary** robustness comparator, never as the primary. |
 | D-04 | MAJOR — **RESOLVED by PR #9** | `ULSIFDensityRatio._solve` / `.ratio` | Post-hoc non-negativity truncation could in principle drive `α → 0`. Then `r̂ ≡ 0`, clipped to `1e-6`, i.e. `log r = −13.8` **per document**. Nothing in `fit()` detects or reports it. | A silently degenerate fit would look like a spectacularly confident detector. **Not observed in the synthetic audit fixture, and not established on the actual formal fit** — no fixed raw NBC scores exist in this repository to check it against. | **Done (PR #9):** `_validate_final_fit` rejects non-finite parameters, an all-zero `α`, and fitted ratios that are non-finite or identically zero on the training support — before the estimator is usable. Rejection clears the fitted state. See §11. |
 | D-06 | MAJOR — **RESOLVED by PR #9** | `.ratio`, `detect_subclaim` | A NaN score propagates silently: `log(NaN)` → `clip` → `sigmoid` all yield NaN; every stopping comparison is False, so the **full retrieval budget is spent**, and NaN reaches the metrics. `+inf` is clipped to a perfect score of 100. | Silent corruption of both the quality and the efficiency numbers, with no warning anywhere. | **Done (PR #9):** `ratio()` rejects a non-finite score before normalization and a non-finite raw ratio before clipping; `detect_subclaim` validates the score, then the ratio (finite and strictly positive), then the posterior. See §11. |
@@ -914,5 +914,43 @@ Replicates are never dropped, redrawn, or given a substitute metric.
 
 No p-values, and no multiplicity correction: the rule requires every primary gate
 simultaneously, so there is no selection among endpoints to correct for.
+
+**The pre-registration is enforced, not merely documented.** A frozen protocol
+that nothing checks is a comment, so a run must *be* the pre-registered run
+before any claim can be called confirmatory. Three verifications sit in front of
+`assess_claim`, each listing every deviation it finds rather than repairing
+anything:
+
+* **Bootstrap provenance.** The record and *every endpoint inside it* must carry
+  the frozen `bootstrap_unit`, `n_resamples`, `seed`, `ci_level`, `ci_method` and
+  the correct sign convention, with a two-sided interval present. An endpoint
+  that disagrees with its own header describes a different analysis from the one
+  the header claims. Exploratory bootstraps — 200 resamples, seed 7, an 80%
+  interval — remain perfectly legal and can never produce a confirmatory claim,
+  however good their bounds look.
+* **Run configuration.** The **actual** CLI values (`c_miss`, `c_false_alarm`,
+  `c_retrieve`, `p0`, `max_docs`, `validation_fraction`, `split_seed`) are
+  compared with `FROZEN_RUN_CONFIGURATION`. The frozen comparator is BSE official
+  at C_M = 28, C_FA = 96, c_retrieve = 1. The secondary C_M = 14 / C_FA = 24 pair
+  stays a legitimate analysis; it is simply not the comparator this protocol
+  pre-registered.
+* **Split identity.** The **actual passage IDs** of the validation and held-out
+  sets are compared against the split re-derived from the released records at
+  `validation_fraction = 0.20`, `random_state = 42`, and a SHA-256 fingerprint of
+  each is recorded. Size is not identity: a *different* 190 passages is a
+  different held-out set. A split that was never checked fails closed rather than
+  being assumed correct.
+
+**And the pairing itself is verified.** `DetectionResult` carries no identity, so
+two result lists of equal length look paired even when one is permuted — and
+nothing downstream could see it, because passage counts, sentence counts and
+lengths all still agree while method A's sentence *i* is differenced against
+method B's sentence *j*. Each result is therefore wrapped in an
+`EvaluatedSentence` **inside the evaluation loop**, built from the same record
+that produced it, and `validate_paired_inputs` compares
+`(passage_index, sentence_index, gold_label)` at every position before any
+resampling begins. Duplicate identities are rejected too: the released data has
+one row per `(passage, sentence)`, so a duplicate means the evaluated set was
+built wrongly.
 
 **Not resolved by PR #10:** D-02, D-03, D-09, D-10, D-11, D-12 remain open.

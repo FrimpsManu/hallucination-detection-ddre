@@ -32,7 +32,14 @@ order, segmentation, NLI scores, labels, aggregation rule and held-out split.
 | `CONFIRMATORY_BOOTSTRAP_SEED` | **42** |
 | `CONFIRMATORY_CI_LEVEL` | **0.95** |
 | `CONFIRMATORY_BOOTSTRAP_UNIT` | **`"passage"`** |
-| CI method | **percentile** (2.5th, 97.5th) |
+| `CONFIRMATORY_CI_METHOD` | **percentile** (2.5th, 97.5th) |
+| `CONFIRMATORY_C_MISS` | **28** |
+| `CONFIRMATORY_C_FALSE_ALARM` | **96** |
+| `CONFIRMATORY_C_RETRIEVE` | **1** |
+| `CONFIRMATORY_P0` | **0.5** |
+| `CONFIRMATORY_MAX_DOCS` | **10** |
+| `CONFIRMATORY_VALIDATION_FRACTION` | **0.20** |
+| `CONFIRMATORY_SPLIT_SEED` | **42** |
 
 The margin is an **absolute** PR-AUC difference. `DDRE − BSE ≥ −0.005` means
 detection performance is non-inferior within the predeclared margin — any loss
@@ -43,6 +50,44 @@ configuration chosen on validation is judged on test by the same yardstick. A
 run whose validation tolerance differs is **`NOT_CONFIRMATORY`**; alternative
 tolerances remain available for exploratory work, but they cannot quietly change
 the claim rule.
+
+## 2a. The run must *be* the pre-registered run
+
+A pre-registration that is never checked is a comment. Three separate
+verifications run before any claim can be called confirmatory, and each one
+lists every deviation it finds rather than repairing anything.
+
+**Bootstrap provenance.** `validate_bootstrap_provenance` requires the bootstrap
+record *and every endpoint inside it* to carry the frozen `bootstrap_unit`,
+`n_resamples`, `seed`, `ci_level` and `ci_method`, the correct sign convention
+for that endpoint's family, and a two-sided interval. An endpoint whose
+provenance disagrees with its own header describes a different analysis from the
+one the header claims, and is rejected on that ground alone. A 200-resample,
+seed-7, 80%-interval bootstrap is a perfectly legal exploratory analysis; it can
+never produce a confirmatory claim, however good its bounds look.
+
+**Run configuration.** `validate_run_configuration` compares the **actual** CLI
+values the run used — `c_miss`, `c_false_alarm`, `c_retrieve`, `p0`, `max_docs`,
+`validation_fraction`, `split_seed` — against `FROZEN_RUN_CONFIGURATION`. The
+frozen comparator is BSE official at C_M = 28, C_FA = 96, c_retrieve = 1. The
+secondary C_M = 14 / C_FA = 24 pair remains a legitimate analysis in this
+repository; it is simply not the comparator this protocol pre-registered, so a
+run using it cannot report a confirmatory claim against this document. A run
+configuration that was not recorded at all is a disqualifier, not a pass.
+
+**Split identity.** `validate_split_identity` compares the **actual passage IDs**
+of the validation and held-out sets against the split re-derived from the
+released records with `validation_fraction = 0.20` and `random_state = 42`, and
+records a SHA-256 fingerprint of both. Size is not identity: a *different* 190
+passages is a different held-out set and a different experiment. A split that was
+never checked — no expected IDs supplied — fails closed rather than being assumed
+correct.
+
+Each verification contributes its mismatches to `confirmatory_disqualifiers`, so
+the summary states exactly which part of the protocol a run departed from. All
+three are recorded separately in `claim_assessment` as
+`bootstrap_provenance_matches_frozen_protocol`, `run_configuration_matches_frozen`
+and `split_matches_frozen`.
 
 ## 3. Validation selection (D-07)
 
@@ -83,11 +128,24 @@ block**. A passage drawn twice contributes its block **twice** — collapsing th
 duplicate would shrink the resample and destroy the variance the cluster
 bootstrap exists to capture.
 
-**Paired.** DDRE and BSE are evaluated on the identical sentence set in the
-identical order, so each replicate applies the **same** passage draw to both
-methods and the difference is taken within the replicate. That removes the
-between-passage variance the two methods share, which is exactly the variance
-irrelevant to which method is better.
+**Paired — and the pairing is verified, not assumed.** DDRE and BSE are evaluated
+on the identical sentence set in the identical order, so each replicate applies
+the **same** passage draw to both methods and the difference is taken within the
+replicate. That removes the between-passage variance the two methods share,
+which is exactly the variance irrelevant to which method is better.
+
+`DetectionResult` carries no identity, so two result lists of equal length look
+paired even when one has been permuted — and nothing downstream could detect it:
+the analysis would silently difference method A on sentence *i* against method B
+on some other sentence, with every length, passage count and sentence count still
+agreeing. So each result is wrapped in an `EvaluatedSentence` **inside the
+evaluation loop**, built from the same record that produced it, and
+`validate_paired_inputs` compares `(passage_index, sentence_index, gold_label)`
+at every position before any resampling begins. The first disagreement raises
+`PairedInputMismatch` naming the position and both identities. Duplicate sentence
+identities are rejected too: the released Wang data has one row per
+`(passage, sentence)`, so a duplicate means the evaluated set was built wrongly
+and resampling it would double-count that sentence.
 
 **PR-AUC** is `src.evaluation.wang_pr_auc` — `precision_recall_curve` followed by
 `auc(recall, precision)` — the same function the normal evaluation calls. Not
@@ -206,11 +264,18 @@ labelled as such. They carry no uncertainty and **cannot set
 
 ## 9. Where it lands in the results
 
-The experiment summary carries three explicit sections:
+The experiment summary carries four explicit sections:
 
-* `confirmatory_statistical_protocol` — this protocol, machine-readable
+* `confirmatory_statistical_protocol` — this protocol, machine-readable,
+  including `frozen_run_configuration`, `frozen_split_requirement` and
+  `bootstrap_provenance_requirement`
 * `confirmatory_bootstrap` — the actual intervals, once a formal run is performed
-* `claim_assessment` — every gate, recorded separately, plus `claim_status`
+* `claim_assessment` — every gate, recorded separately, plus `claim_status`,
+  the actual `run_configuration`, and the itemised
+  `bootstrap_provenance_mismatches`, `run_configuration_mismatches` and
+  `split_mismatches`
+* `confirmatory_split_identity` — the SHA-256 fingerprint of the split actually
+  used, alongside the fingerprint of the frozen split it was compared against
 
 ## 10. What this protocol does not address
 

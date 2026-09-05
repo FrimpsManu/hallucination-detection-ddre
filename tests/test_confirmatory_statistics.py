@@ -15,6 +15,8 @@ Synthetic data only -- no model, no GPU, no held-out inference.
 """
 
 import ast
+import contextlib
+import io
 import json
 import math
 import unittest
@@ -22,7 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
-from src.evaluation import wang_pr_auc
+from src.evaluation import EvaluatedSentence, wang_pr_auc
 from src.threshold_selection import (
     FALLBACK_SELECTION_RULE,
     FEASIBLE_SELECTION_RULE,
@@ -31,6 +33,19 @@ from src.threshold_selection import (
     select_threshold_configuration,
 )
 from src.paired_bootstrap import (
+    CONFIRMATORY_CI_METHOD,
+    CONFIRMATORY_C_FALSE_ALARM,
+    CONFIRMATORY_C_MISS,
+    CONFIRMATORY_C_RETRIEVE,
+    CONFIRMATORY_MAX_DOCS,
+    CONFIRMATORY_P0,
+    CONFIRMATORY_SPLIT_SEED,
+    CONFIRMATORY_VALIDATION_FRACTION,
+    EFFICIENCY_SIGN_CONVENTION,
+    FROZEN_RUN_CONFIGURATION,
+    PERFORMANCE_ENDPOINTS,
+    PERFORMANCE_SIGN_CONVENTION,
+    BOOTSTRAP_ENDPOINTS,
     CLAIM_NOT_CONFIRMATORY,
     CLAIM_NOT_SUPPORTED,
     CLAIM_SUPPORTED,
@@ -49,17 +64,14 @@ from src.paired_bootstrap import (
     passage_blocks,
     percentile_interval,
     replicate_indices,
+    split_identity,
+    validate_bootstrap_provenance,
+    validate_paired_inputs,
+    validate_run_configuration,
+    validate_split_identity,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-
-class Record:
-    def __init__(self, passage_index, sentence_index, label):
-        self.passage_index = passage_index
-        self.sentence_index = sentence_index
-        self.label = label
-        self.subclaims = []
 
 
 class Result:
@@ -68,6 +80,14 @@ class Result:
         self.prediction = 1 if p_factual > 28.0 / 124.0 else 0
         self.documents_used = documents_used
         self.nli_calls = nli_calls
+
+
+class Record:
+    def __init__(self, passage_index, sentence_index, label):
+        self.passage_index = passage_index
+        self.sentence_index = sentence_index
+        self.label = label
+        self.subclaims = []
 
 
 def synthetic_sample(n_passages=12, per_passage=4, seed=0):
@@ -84,8 +104,17 @@ def synthetic_sample(n_passages=12, per_passage=4, seed=0):
     return records, scores
 
 
-def results_from(scores, documents=1.0, nli=1.0):
-    return [Result(s, documents, nli) for s in scores]
+def observations_from(records, scores, documents=1.0, nli=1.0):
+    """Identity-bearing observations, as evaluate_detector_with_identity builds."""
+    return [
+        EvaluatedSentence(
+            passage_index=record.passage_index,
+            sentence_index=record.sentence_index,
+            gold_label=int(record.label),
+            result=Result(score, documents, nli),
+        )
+        for record, score in zip(records, scores)
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -280,6 +309,38 @@ class TestFrozenProtocol(unittest.TestCase):
         self.assertEqual(CONFIRMATORY_BOOTSTRAP_SEED, 42)
         self.assertEqual(CONFIRMATORY_CI_LEVEL, 0.95)
         self.assertEqual(CONFIRMATORY_BOOTSTRAP_UNIT, "passage")
+        self.assertEqual(CONFIRMATORY_CI_METHOD, "percentile")
+
+    def test_the_frozen_run_configuration_is_the_published_comparator(self):
+        # Wang's published cost pair and this repository's primary settings.
+        # If these drift, the protocol document describes a different run from
+        # the one the gate enforces.
+        self.assertEqual(CONFIRMATORY_C_MISS, 28.0)
+        self.assertEqual(CONFIRMATORY_C_FALSE_ALARM, 96.0)
+        self.assertEqual(CONFIRMATORY_C_RETRIEVE, 1.0)
+        self.assertEqual(CONFIRMATORY_P0, 0.5)
+        self.assertEqual(CONFIRMATORY_MAX_DOCS, 10)
+        self.assertEqual(CONFIRMATORY_VALIDATION_FRACTION, 0.20)
+        self.assertEqual(CONFIRMATORY_SPLIT_SEED, 42)
+        self.assertEqual(
+            FROZEN_RUN_CONFIGURATION,
+            {
+                "c_miss": 28.0,
+                "c_false_alarm": 96.0,
+                "c_retrieve": 1.0,
+                "p0": 0.5,
+                "max_docs": 10,
+                "validation_fraction": 0.20,
+                "split_seed": 42,
+            },
+        )
+        protocol = confirmatory_protocol()
+        self.assertEqual(
+            protocol["frozen_run_configuration"], dict(FROZEN_RUN_CONFIGURATION)
+        )
+        self.assertIn("CM=28, CFA=96", protocol["primary_comparator"])
+        self.assertIn("frozen_split_requirement", protocol)
+        self.assertIn("bootstrap_provenance_requirement", protocol)
 
     def test_the_protocol_record_is_json_serializable_and_complete(self):
         protocol = confirmatory_protocol()
@@ -316,14 +377,13 @@ class TestFrozenProtocol(unittest.TestCase):
 class TestBootstrapMechanics(unittest.TestCase):
     def setUp(self):
         self.records, self.scores = synthetic_sample()
-        self.results = results_from(self.scores)
+        self.observations = observations_from(self.records, self.scores)
 
     def bootstrap(self, ddre=None, baseline=None, **kwargs):
         kwargs.setdefault("n_resamples", 200)
         return paired_passage_bootstrap(
-            self.records,
-            self.results if ddre is None else ddre,
-            self.results if baseline is None else baseline,
+            self.observations if ddre is None else ddre,
+            self.observations if baseline is None else baseline,
             **kwargs,
         )
 
@@ -333,13 +393,13 @@ class TestBootstrapMechanics(unittest.TestCase):
         self.assertEqual(first["endpoints"], second["endpoints"])
 
     def test_a_different_seed_gives_a_different_draw(self):
-        blocks = passage_blocks(self.records)
+        blocks = passage_blocks(self.observations)
         a, _ = replicate_indices(blocks, np.random.default_rng(42))
         b, _ = replicate_indices(blocks, np.random.default_rng(43))
         self.assertFalse(np.array_equal(a, b))
 
     def test_it_resamples_passage_blocks_not_individual_sentences(self):
-        blocks = passage_blocks(self.records)
+        blocks = passage_blocks(self.observations)
         self.assertEqual(len(blocks), 12)
         for _, members in blocks:
             self.assertEqual(len(members), 4)
@@ -352,7 +412,7 @@ class TestBootstrapMechanics(unittest.TestCase):
         self.assertEqual(list(indices), rebuilt)
 
     def test_a_passage_drawn_twice_contributes_its_block_twice(self):
-        blocks = passage_blocks(self.records)
+        blocks = passage_blocks(self.observations)
 
         class TwiceRng:
             def integers(self, low, high, size):
@@ -394,15 +454,15 @@ class TestBootstrapMechanics(unittest.TestCase):
 
     def test_mismatched_inputs_are_rejected(self):
         with self.assertRaises(PairedInputMismatch):
-            paired_passage_bootstrap(self.records, self.results[:-1], self.results)
+            paired_passage_bootstrap(self.observations[:-1], self.observations)
         with self.assertRaises(PairedInputMismatch):
-            paired_passage_bootstrap([], [], [])
+            paired_passage_bootstrap([], [])
 
     def test_a_single_class_sample_is_rejected_up_front(self):
         records = [Record(0, i, 1) for i in range(4)]
-        results = results_from([0.5] * 4)
+        observations = observations_from(records, [0.5] * 4)
         with self.assertRaises(PairedInputMismatch):
-            paired_passage_bootstrap(records, results, results)
+            paired_passage_bootstrap(observations, observations)
 
     def test_an_invalid_replicate_fails_loudly_rather_than_being_dropped(self):
         # One passage holds every nonfactual sentence, so a draw that misses it
@@ -411,9 +471,11 @@ class TestBootstrapMechanics(unittest.TestCase):
             [Record(0, i, 0) for i in range(3)]
             + [Record(p, i, 1) for p in range(1, 6) for i in range(3)]
         )
-        results = results_from([0.5] * len(records))
+        observations = observations_from(records, [0.5] * len(records))
         with self.assertRaises(BootstrapUnavailable) as caught:
-            paired_passage_bootstrap(records, results, results, n_resamples=500, seed=1)
+            paired_passage_bootstrap(
+                observations, observations, n_resamples=500, seed=1
+            )
         message = str(caught.exception)
         self.assertIn("NOT dropped", message)
         self.assertIn("NOT redrawn", message)
@@ -427,25 +489,19 @@ class TestSignConventionsAndValues(unittest.TestCase):
     def test_performance_delta_is_ddre_minus_bse(self):
         # DDRE scores separate the classes; BSE is uninformative. The delta must
         # be POSITIVE, i.e. DDRE - BSE.
-        good = results_from(self.scores)
-        flat = results_from([0.5] * len(self.records))
-        report = paired_passage_bootstrap(
-            self.records, good, flat, n_resamples=200, seed=42
-        )
+        good = observations_from(self.records, self.scores)
+        flat = observations_from(self.records, [0.5] * len(self.records))
+        report = paired_passage_bootstrap(good, flat, n_resamples=200, seed=42)
         self.assertGreater(report["endpoints"]["factual_auc_pr_delta"]["observed"], 0.0)
-        reversed_report = paired_passage_bootstrap(
-            self.records, flat, good, n_resamples=200, seed=42
-        )
+        reversed_report = paired_passage_bootstrap(flat, good, n_resamples=200, seed=42)
         self.assertLess(
             reversed_report["endpoints"]["factual_auc_pr_delta"]["observed"], 0.0
         )
 
     def test_efficiency_saving_is_bse_minus_ddre(self):
-        cheap = results_from(self.scores, documents=2.0, nli=6.0)
-        costly = results_from(self.scores, documents=3.0, nli=12.0)
-        report = paired_passage_bootstrap(
-            self.records, cheap, costly, n_resamples=200, seed=42
-        )
+        cheap = observations_from(self.records, self.scores, documents=2.0, nli=6.0)
+        costly = observations_from(self.records, self.scores, documents=3.0, nli=12.0)
+        report = paired_passage_bootstrap(cheap, costly, n_resamples=200, seed=42)
         documents = report["endpoints"][PRIMARY_EFFICIENCY_ENDPOINT]
         self.assertAlmostEqual(documents["observed"], 1.0)
         self.assertAlmostEqual(documents["ci_lower"], 1.0)
@@ -458,9 +514,9 @@ class TestSignConventionsAndValues(unittest.TestCase):
     def test_the_bootstrap_uses_the_repository_wang_pr_auc(self):
         labels = np.asarray([r.label for r in self.records])
         p_factual = np.asarray(self.scores)
-        flat = results_from([0.5] * len(self.records))
+        flat = observations_from(self.records, [0.5] * len(self.records))
         report = paired_passage_bootstrap(
-            self.records, results_from(self.scores), flat, n_resamples=10, seed=42
+            observations_from(self.records, self.scores), flat, n_resamples=10, seed=42
         )
         expected_factual = wang_pr_auc(labels, p_factual) - wang_pr_auc(
             labels, np.full_like(p_factual, 0.5)
@@ -483,8 +539,40 @@ class TestSignConventionsAndValues(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 
+# The claim-gate tests are about the GATES, not about resampling, so they use a
+# synthetic bootstrap record. That record must nevertheless satisfy the frozen
+# provenance in full: if it did not, every one of these tests would be answered
+# by the provenance gate and the claim logic underneath would go untested.
+
+FROZEN_VALIDATION_PASSAGE_IDS = [3, 7, 11, 19]
+FROZEN_TEST_PASSAGE_IDS = [1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 15, 16, 17, 18, 20]
+
+
+def endpoint_record(name, value, **overrides):
+    record = {
+        "observed": value,
+        "bootstrap_mean": value,
+        "ci_lower": value,
+        "ci_upper": value + 0.1,
+        "ci_level": CONFIRMATORY_CI_LEVEL,
+        "ci_method": CONFIRMATORY_CI_METHOD,
+        "ci_lower_percentile": 2.5,
+        "ci_upper_percentile": 97.5,
+        "n_resamples": CONFIRMATORY_BOOTSTRAP_RESAMPLES,
+        "seed": CONFIRMATORY_BOOTSTRAP_SEED,
+        "bootstrap_unit": CONFIRMATORY_BOOTSTRAP_UNIT,
+        "sign_convention": (
+            PERFORMANCE_SIGN_CONVENTION
+            if name in PERFORMANCE_ENDPOINTS
+            else EFFICIENCY_SIGN_CONVENTION
+        ),
+    }
+    record.update(overrides)
+    return record
+
+
 def bootstrap_with(**lower_bounds):
-    """A minimal bootstrap-shaped record with the given CI lower bounds."""
+    """A bootstrap-shaped record carrying the EXACT frozen provenance."""
     defaults = {
         "nonfactual_auc_pr_delta": 0.0,
         "factual_auc_pr_delta": 0.0,
@@ -494,11 +582,26 @@ def bootstrap_with(**lower_bounds):
     }
     defaults.update(lower_bounds)
     return {
+        "bootstrap_unit": CONFIRMATORY_BOOTSTRAP_UNIT,
+        "n_resamples": CONFIRMATORY_BOOTSTRAP_RESAMPLES,
+        "seed": CONFIRMATORY_BOOTSTRAP_SEED,
+        "ci_level": CONFIRMATORY_CI_LEVEL,
+        "ci_method": CONFIRMATORY_CI_METHOD,
         "endpoints": {
-            name: {"ci_lower": value, "ci_upper": value + 0.1, "observed": value}
-            for name, value in defaults.items()
-        }
+            name: endpoint_record(name, value) for name, value in defaults.items()
+        },
     }
+
+
+def frozen_split_metadata(**overrides):
+    metadata = {
+        "random_state": CONFIRMATORY_SPLIT_SEED,
+        "validation_fraction": CONFIRMATORY_VALIDATION_FRACTION,
+        "validation_passage_ids": list(FROZEN_VALIDATION_PASSAGE_IDS),
+        "test_passage_ids": list(FROZEN_TEST_PASSAGE_IDS),
+    }
+    metadata.update(overrides)
+    return metadata
 
 
 def claim(**overrides):
@@ -506,6 +609,10 @@ def claim(**overrides):
         "validation_selection_confirmatory": True,
         "quality_tolerance": CONFIRMATORY_PR_AUC_MARGIN,
         "smoke_test": False,
+        "run_configuration": dict(FROZEN_RUN_CONFIGURATION),
+        "split_metadata": frozen_split_metadata(),
+        "expected_validation_passage_ids": list(FROZEN_VALIDATION_PASSAGE_IDS),
+        "expected_test_passage_ids": list(FROZEN_TEST_PASSAGE_IDS),
     }
     bootstrap = overrides.pop("bootstrap", bootstrap_with())
     kwargs.update(overrides)
@@ -619,6 +726,359 @@ class TestClaimAssessment(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# The pre-registration is only binding if deviations are DETECTED
+# --------------------------------------------------------------------------
+
+
+class TestBootstrapProvenanceGate(unittest.TestCase):
+    """A bootstrap that is not the frozen one can never be confirmatory.
+
+    Without this gate the pre-registration is only a comment: a 200-resample,
+    seed-7, 80%-interval bootstrap could be handed to ``assess_claim`` and
+    receive SUPPORTED whenever its bounds happened to clear the thresholds.
+    """
+
+    def assert_rejected(self, bootstrap, needle):
+        mismatches = validate_bootstrap_provenance(bootstrap)
+        self.assertTrue(mismatches, "the deviation was not detected at all")
+        self.assertIn(needle, " ".join(mismatches))
+        assessment = claim(bootstrap=bootstrap)
+        self.assertFalse(assessment["bootstrap_provenance_matches_frozen_protocol"])
+        self.assertEqual(assessment["claim_status"], CLAIM_NOT_CONFIRMATORY)
+        self.assertFalse(assessment["primary_claim_supported"])
+        # Never a negative result: the run could not address the claim.
+        self.assertNotEqual(assessment["claim_status"], CLAIM_NOT_SUPPORTED)
+
+    def header(self, **overrides):
+        bootstrap = bootstrap_with()
+        bootstrap.update(overrides)
+        for endpoint in bootstrap["endpoints"].values():
+            for field in overrides:
+                if field in endpoint:
+                    endpoint[field] = overrides[field]
+        return bootstrap
+
+    def test_the_exact_frozen_provenance_is_eligible(self):
+        bootstrap = bootstrap_with()
+        self.assertEqual(validate_bootstrap_provenance(bootstrap), [])
+        assessment = claim(bootstrap=bootstrap)
+        self.assertTrue(assessment["bootstrap_provenance_matches_frozen_protocol"])
+        self.assertTrue(assessment["confirmatory_eligible"])
+        self.assertEqual(assessment["claim_status"], CLAIM_SUPPORTED)
+
+    def test_a_two_hundred_resample_bootstrap_is_rejected(self):
+        self.assert_rejected(self.header(n_resamples=200), "n_resamples")
+
+    def test_a_different_seed_is_rejected(self):
+        self.assert_rejected(self.header(seed=43), "seed")
+
+    def test_a_ninety_percent_interval_is_rejected(self):
+        self.assert_rejected(self.header(ci_level=0.90), "ci_level")
+
+    def test_a_non_percentile_interval_method_is_rejected(self):
+        self.assert_rejected(self.header(ci_method="bca"), "ci_method")
+
+    def test_a_sentence_level_bootstrap_is_rejected(self):
+        # The whole point of the cluster bootstrap: resampling sentences would
+        # understate the variance and narrow every interval.
+        self.assert_rejected(self.header(bootstrap_unit="sentence"), "bootstrap_unit")
+
+    def test_an_endpoint_disagreeing_with_its_own_header_is_rejected(self):
+        bootstrap = bootstrap_with()
+        bootstrap["endpoints"]["factual_auc_pr_delta"]["n_resamples"] = 500
+        self.assert_rejected(bootstrap, "but the bootstrap header records")
+
+    def test_a_wrong_sign_convention_is_rejected(self):
+        bootstrap = bootstrap_with()
+        bootstrap["endpoints"][PRIMARY_EFFICIENCY_ENDPOINT]["sign_convention"] = (
+            PERFORMANCE_SIGN_CONVENTION
+        )
+        self.assert_rejected(bootstrap, "sign convention")
+
+    def test_a_missing_endpoint_is_rejected(self):
+        bootstrap = bootstrap_with()
+        del bootstrap["endpoints"][SECONDARY_EFFICIENCY_ENDPOINT]
+        self.assert_rejected(bootstrap, "missing required endpoint")
+
+    def test_an_endpoint_without_an_interval_is_rejected(self):
+        bootstrap = bootstrap_with()
+        bootstrap["endpoints"]["balanced_pr_auc_delta"]["ci_lower"] = None
+        self.assert_rejected(bootstrap, "has no confidence interval")
+
+    def test_a_missing_endpoint_fails_its_gate_rather_than_raising(self):
+        bootstrap = bootstrap_with()
+        del bootstrap["endpoints"][PRIMARY_EFFICIENCY_ENDPOINT]
+        assessment = claim(bootstrap=bootstrap)
+        self.assertFalse(assessment["retrieval_efficiency_superiority_pass"])
+        self.assertIsNone(assessment["retrieval_efficiency_ci_lower"])
+
+    def test_a_real_bootstrap_run_at_the_frozen_settings_passes_provenance(self):
+        # The production function must actually emit what the gate demands;
+        # a gate no real run can satisfy would be worse than no gate.
+        def cheap_pr_auc(y_binary, score):
+            return float(np.mean(np.asarray(score, dtype=float)))
+
+        records, scores = synthetic_sample(n_passages=6, per_passage=3)
+        ddre = observations_from(records, scores, documents=2.0, nli=6.0)
+        baseline = observations_from(records, scores, documents=3.0, nli=9.0)
+        report = paired_passage_bootstrap(ddre, baseline, pr_auc=cheap_pr_auc)
+        self.assertEqual(validate_bootstrap_provenance(report), [])
+
+
+class TestRunConfigurationGate(unittest.TestCase):
+    """The run must BE the pre-registered run, not merely resemble it."""
+
+    def assert_rejected(self, configuration, needle):
+        mismatches = validate_run_configuration(configuration)
+        self.assertTrue(mismatches, "the deviation was not detected at all")
+        self.assertIn(needle, " ".join(mismatches))
+        assessment = claim(run_configuration=configuration)
+        self.assertFalse(assessment["run_configuration_matches_frozen"])
+        self.assertEqual(assessment["claim_status"], CLAIM_NOT_CONFIRMATORY)
+
+    def altered(self, **overrides):
+        configuration = dict(FROZEN_RUN_CONFIGURATION)
+        configuration.update(overrides)
+        return configuration
+
+    def test_the_frozen_configuration_is_eligible(self):
+        self.assertEqual(validate_run_configuration(dict(FROZEN_RUN_CONFIGURATION)), [])
+        assessment = claim()
+        self.assertTrue(assessment["run_configuration_matches_frozen"])
+        self.assertEqual(assessment["claim_status"], CLAIM_SUPPORTED)
+
+    def test_the_secondary_cost_pair_is_not_the_frozen_comparator(self):
+        # CM=14 / CFA=24 is a legitimate secondary analysis in this repository.
+        # It is simply not the comparator this protocol pre-registered.
+        self.assert_rejected(self.altered(c_miss=14.0, c_false_alarm=24.0), "c_miss")
+
+    def test_a_different_retrieval_cost_is_rejected(self):
+        self.assert_rejected(self.altered(c_retrieve=2.0), "c_retrieve")
+
+    def test_a_different_prior_is_rejected(self):
+        self.assert_rejected(self.altered(p0=0.4), "p0")
+
+    def test_a_different_document_budget_is_rejected(self):
+        self.assert_rejected(self.altered(max_docs=5), "max_docs")
+
+    def test_a_different_validation_fraction_is_rejected(self):
+        self.assert_rejected(
+            self.altered(validation_fraction=0.30), "validation_fraction"
+        )
+
+    def test_a_different_split_seed_is_rejected(self):
+        self.assert_rejected(self.altered(split_seed=7), "split_seed")
+
+    def test_an_unrecorded_field_is_rejected(self):
+        configuration = dict(FROZEN_RUN_CONFIGURATION)
+        del configuration["c_false_alarm"]
+        self.assert_rejected(configuration, "does not record")
+
+    def test_an_absent_configuration_is_rejected(self):
+        self.assertTrue(validate_run_configuration(None))
+        assessment = claim(run_configuration=None)
+        self.assertEqual(assessment["claim_status"], CLAIM_NOT_CONFIRMATORY)
+        self.assertIn(
+            "run configuration was not recorded",
+            " ".join(assessment["confirmatory_disqualifiers"]),
+        )
+
+    def test_the_frozen_configuration_is_reported_alongside_the_actual_one(self):
+        assessment = claim(run_configuration=self.altered(c_miss=14.0))
+        self.assertEqual(assessment["frozen_run_configuration"]["c_miss"], 28.0)
+        self.assertEqual(assessment["run_configuration"]["c_miss"], 14.0)
+
+
+class TestFrozenSplitGate(unittest.TestCase):
+    """The held-out set is checked by IDENTITY, not by size."""
+
+    def test_the_frozen_split_is_eligible(self):
+        mismatches, identity = validate_split_identity(
+            frozen_split_metadata(),
+            FROZEN_VALIDATION_PASSAGE_IDS,
+            FROZEN_TEST_PASSAGE_IDS,
+        )
+        self.assertEqual(mismatches, [])
+        self.assertTrue(identity["matches_frozen_split"])
+        self.assertEqual(identity["sha256"], identity["expected_sha256"])
+        assessment = claim()
+        self.assertTrue(assessment["split_matches_frozen"])
+        self.assertEqual(assessment["claim_status"], CLAIM_SUPPORTED)
+
+    def test_the_same_number_of_different_passages_is_rejected(self):
+        # This is the case a count check cannot see: 16 held-out passages, but
+        # not THESE 16. A different set of passages is a different experiment.
+        swapped = list(FROZEN_TEST_PASSAGE_IDS)
+        swapped[0] = 3  # a validation passage, moved into the held-out set
+        metadata = frozen_split_metadata(test_passage_ids=swapped)
+        mismatches, identity = validate_split_identity(
+            metadata, FROZEN_VALIDATION_PASSAGE_IDS, FROZEN_TEST_PASSAGE_IDS
+        )
+        self.assertEqual(
+            len(metadata["test_passage_ids"]), len(FROZEN_TEST_PASSAGE_IDS)
+        )
+        self.assertTrue(mismatches)
+        self.assertIn("not the frozen split", " ".join(mismatches))
+        self.assertFalse(identity["matches_frozen_split"])
+        assessment = claim(split_metadata=metadata)
+        self.assertFalse(assessment["split_matches_frozen"])
+        self.assertEqual(assessment["claim_status"], CLAIM_NOT_CONFIRMATORY)
+
+    def test_different_validation_passages_are_rejected(self):
+        metadata = frozen_split_metadata(validation_passage_ids=[3, 7, 11, 20])
+        assessment = claim(split_metadata=metadata)
+        self.assertIn(
+            "validation passage IDs are not the frozen split",
+            " ".join(assessment["split_mismatches"]),
+        )
+        self.assertEqual(assessment["claim_status"], CLAIM_NOT_CONFIRMATORY)
+
+    def test_a_different_validation_fraction_is_rejected(self):
+        metadata = frozen_split_metadata(validation_fraction=0.30)
+        assessment = claim(split_metadata=metadata)
+        self.assertIn("validation_fraction", " ".join(assessment["split_mismatches"]))
+        self.assertEqual(assessment["claim_status"], CLAIM_NOT_CONFIRMATORY)
+
+    def test_a_different_split_seed_is_rejected(self):
+        metadata = frozen_split_metadata(random_state=7)
+        assessment = claim(split_metadata=metadata)
+        self.assertIn("random_state", " ".join(assessment["split_mismatches"]))
+        self.assertEqual(assessment["claim_status"], CLAIM_NOT_CONFIRMATORY)
+
+    def test_absent_split_metadata_is_rejected(self):
+        assessment = claim(split_metadata=None)
+        self.assertEqual(assessment["claim_status"], CLAIM_NOT_CONFIRMATORY)
+        self.assertIn(
+            "split metadata was not recorded", " ".join(assessment["split_mismatches"])
+        )
+
+    def test_an_unverified_split_is_rejected_rather_than_assumed_correct(self):
+        # No expected IDs supplied means the split was never checked. Fail
+        # closed: an unchecked split is not a passing split.
+        assessment = claim(expected_validation_passage_ids=None)
+        self.assertFalse(assessment["split_matches_frozen"])
+        self.assertEqual(assessment["claim_status"], CLAIM_NOT_CONFIRMATORY)
+        self.assertIn(
+            "no expected passage IDs", " ".join(assessment["split_mismatches"])
+        )
+
+    def test_the_split_identity_is_a_stable_order_independent_fingerprint(self):
+        forward = split_identity([1, 2, 3], [4, 5])
+        shuffled = split_identity([3, 1, 2], [5, 4])
+        self.assertEqual(forward["sha256"], shuffled["sha256"])
+        self.assertNotEqual(forward["sha256"], split_identity([1, 2, 4], [3, 5])["sha256"])
+        self.assertEqual(forward["validation_passages"], 3)
+        self.assertEqual(forward["test_passages"], 2)
+
+
+class TestPairedIdentityIsVerified(unittest.TestCase):
+    """Equal lengths are not evidence of pairing."""
+
+    def setUp(self):
+        self.records, self.scores = synthetic_sample()
+        self.ddre = observations_from(self.records, self.scores)
+
+    def test_a_permuted_baseline_is_rejected_before_any_resampling(self):
+        # The failure this catches is silent otherwise: DDRE on sentence i
+        # differenced against BSE on some other sentence, with every length
+        # check, passage count and sentence count still agreeing.
+        permuted = list(self.ddre)
+        permuted[0], permuted[-1] = permuted[-1], permuted[0]
+        self.assertEqual(len(permuted), len(self.ddre))
+
+        calls = []
+
+        def counting_pr_auc(y_binary, score):
+            calls.append(1)
+            return 0.5
+
+        with self.assertRaises(PairedInputMismatch) as caught:
+            paired_passage_bootstrap(
+                self.ddre, permuted, n_resamples=10, seed=42,
+                pr_auc=counting_pr_auc,
+            )
+        message = str(caught.exception)
+        self.assertIn("position 0", message)
+        self.assertIn("not paired", message)
+        self.assertEqual(calls, [], "the bootstrap started before validating pairing")
+
+    def test_a_within_passage_permutation_is_rejected(self):
+        # Passage membership and counts are unchanged, so only the per-position
+        # identity comparison can see this.
+        permuted = list(self.ddre)
+        permuted[0], permuted[1] = permuted[1], permuted[0]
+        with self.assertRaises(PairedInputMismatch):
+            validate_paired_inputs(self.ddre, permuted)
+
+    def test_a_relabelled_sentence_is_rejected(self):
+        # Same passage and sentence, different gold label: the two methods are
+        # being scored against different ground truth.
+        relabelled = list(self.ddre)
+        first = relabelled[0]
+        relabelled[0] = EvaluatedSentence(
+            passage_index=first.passage_index,
+            sentence_index=first.sentence_index,
+            gold_label=1 - first.gold_label,
+            result=first.result,
+        )
+        with self.assertRaises(PairedInputMismatch) as caught:
+            validate_paired_inputs(self.ddre, relabelled)
+        self.assertIn("label", str(caught.exception))
+
+    def test_a_duplicated_sentence_is_rejected(self):
+        duplicated = list(self.ddre)
+        duplicated[1] = duplicated[0]
+        with self.assertRaises(PairedInputMismatch) as caught:
+            validate_paired_inputs(duplicated, duplicated)
+        self.assertIn("double-count", str(caught.exception))
+
+    def test_the_identical_sequence_is_accepted_and_its_shape_reported(self):
+        shape = validate_paired_inputs(self.ddre, list(self.ddre))
+        self.assertEqual(shape["sentences"], len(self.records))
+        self.assertEqual(shape["passages"], 12)
+        self.assertEqual(
+            shape["factual_sentences"] + shape["nonfactual_sentences"],
+            shape["sentences"],
+        )
+
+    def test_the_identity_is_attached_inside_the_evaluation_loop(self):
+        # Not zipped on afterwards: the observation is built from the same
+        # record that produced the result, in the same iteration.
+        from src.evaluation import evaluate_detector_with_identity
+
+        class Detector:
+            def detect_sentence(self, record, scorer, use_cache=True):
+                assert use_cache is False
+                return Result(0.9 if record.label else 0.1, 2.0, 6.0)
+
+        records = [Record(p, i, (p + i) % 2) for p in range(3) for i in range(2)]
+        with contextlib.redirect_stderr(io.StringIO()):  # quiet the progress bar
+            _, results, observations = evaluate_detector_with_identity(
+                Detector(), records, scorer=None, description="unit", use_cache=False
+            )
+        self.assertEqual(len(observations), len(records))
+        for record, result, observation in zip(records, results, observations):
+            self.assertIs(observation.result, result)
+            self.assertEqual(
+                observation.identity,
+                (record.passage_index, record.sentence_index, int(record.label)),
+            )
+
+    def test_the_identity_is_built_from_what_was_scored(self):
+        observation = self.ddre[0]
+        self.assertEqual(
+            observation.identity,
+            (
+                observation.passage_index,
+                observation.sentence_index,
+                observation.gold_label,
+            ),
+        )
+        with self.assertRaises(Exception):
+            observation.passage_index = 99  # frozen: identities cannot drift
+
+
+# --------------------------------------------------------------------------
 # End-to-end: bootstrap feeding the claim
 # --------------------------------------------------------------------------
 
@@ -627,28 +1087,56 @@ class TestEndToEnd(unittest.TestCase):
     def setUp(self):
         self.records, self.scores = synthetic_sample()
 
-    def test_identical_methods_give_zero_deltas_and_no_supported_claim(self):
-        results = results_from(self.scores, documents=3.0, nli=9.0)
+    def claim_from(self, report):
+        """Judge a real bootstrap's bounds under the frozen provenance.
+
+        The bootstraps below use 200 resamples to keep the suite fast, which
+        makes them exploratory by construction: they can never be confirmatory,
+        and that is asserted directly in
+        ``test_an_exploratory_bootstrap_can_never_be_confirmatory``. To exercise
+        the claim GATES on genuine bootstrap output, the observed lower bounds
+        are carried unchanged into a record that does carry the frozen
+        provenance. Only the provenance is substituted; no number is.
+        """
+        bounds = {
+            name: report["endpoints"][name]["ci_lower"] for name in BOOTSTRAP_ENDPOINTS
+        }
+        return claim(bootstrap=bootstrap_with(**bounds))
+
+    def test_an_exploratory_bootstrap_can_never_be_confirmatory(self):
+        # 200 resamples at seed 7 with an 80% interval is a perfectly legal
+        # exploratory analysis. It is not the pre-registered one, so however
+        # good its bounds are it cannot produce a confirmatory claim.
+        ddre = observations_from(self.records, self.scores, documents=2.0, nli=6.0)
+        baseline = observations_from(self.records, self.scores, documents=3.0, nli=9.0)
         report = paired_passage_bootstrap(
-            self.records, results, results, n_resamples=200, seed=42
+            ddre, baseline, n_resamples=200, seed=7, ci_level=0.80
         )
+        assessment = claim(bootstrap=report)
+        self.assertEqual(assessment["claim_status"], CLAIM_NOT_CONFIRMATORY)
+        self.assertFalse(
+            assessment["bootstrap_provenance_matches_frozen_protocol"]
+        )
+        joined = " ".join(assessment["bootstrap_provenance_mismatches"])
+        self.assertIn("n_resamples", joined)
+        self.assertIn("seed", joined)
+        self.assertIn("ci_level", joined)
+
+    def test_identical_methods_give_zero_deltas_and_no_supported_claim(self):
+        results = observations_from(self.records, self.scores, documents=3.0, nli=9.0)
+        report = paired_passage_bootstrap(results, results, n_resamples=200, seed=42)
         for name in report["endpoints"]:
             self.assertEqual(report["endpoints"][name]["observed"], 0.0)
             self.assertEqual(report["endpoints"][name]["ci_lower"], 0.0)
-        assessment = assess_claim(
-            report, validation_selection_confirmatory=True,
-            quality_tolerance=CONFIRMATORY_PR_AUC_MARGIN,
-        )
+        assessment = self.claim_from(report)
         self.assertTrue(assessment["performance_noninferiority"]["all_pass"])
         self.assertFalse(assessment["retrieval_efficiency_superiority_pass"])
         self.assertEqual(assessment["claim_status"], CLAIM_NOT_SUPPORTED)
 
     def test_identical_quality_with_one_fewer_document_supports_the_claim(self):
-        ddre = results_from(self.scores, documents=2.0, nli=6.0)
-        baseline = results_from(self.scores, documents=3.0, nli=9.0)
-        report = paired_passage_bootstrap(
-            self.records, ddre, baseline, n_resamples=200, seed=42
-        )
+        ddre = observations_from(self.records, self.scores, documents=2.0, nli=6.0)
+        baseline = observations_from(self.records, self.scores, documents=3.0, nli=9.0)
+        report = paired_passage_bootstrap(ddre, baseline, n_resamples=200, seed=42)
         for name in (
             "nonfactual_auc_pr_delta", "factual_auc_pr_delta", "balanced_pr_auc_delta"
         ):
@@ -656,29 +1144,22 @@ class TestEndToEnd(unittest.TestCase):
             self.assertEqual(report["endpoints"][name]["ci_upper"], 0.0)
         documents = report["endpoints"][PRIMARY_EFFICIENCY_ENDPOINT]
         self.assertEqual((documents["ci_lower"], documents["ci_upper"]), (1.0, 1.0))
-        assessment = assess_claim(
-            report, validation_selection_confirmatory=True,
-            quality_tolerance=CONFIRMATORY_PR_AUC_MARGIN,
-        )
+        assessment = self.claim_from(report)
         self.assertEqual(assessment["claim_status"], CLAIM_SUPPORTED)
 
     def test_fewer_documents_but_worse_nonfactual_does_not_support_the_claim(self):
-        degraded = [
-            Result(0.5 if r.label == 0 else s, 2.0, 6.0)
-            for r, s in zip(self.records, self.scores)
-        ]
-        baseline = results_from(self.scores, documents=3.0, nli=9.0)
-        report = paired_passage_bootstrap(
-            self.records, degraded, baseline, n_resamples=200, seed=42
+        degraded = observations_from(
+            self.records,
+            [0.5 if r.label == 0 else s for r, s in zip(self.records, self.scores)],
+            documents=2.0, nli=6.0,
         )
+        baseline = observations_from(self.records, self.scores, documents=3.0, nli=9.0)
+        report = paired_passage_bootstrap(degraded, baseline, n_resamples=200, seed=42)
         self.assertLess(
             report["endpoints"]["nonfactual_auc_pr_delta"]["ci_lower"],
             -CONFIRMATORY_PR_AUC_MARGIN,
         )
-        assessment = assess_claim(
-            report, validation_selection_confirmatory=True,
-            quality_tolerance=CONFIRMATORY_PR_AUC_MARGIN,
-        )
+        assessment = self.claim_from(report)
         self.assertTrue(assessment["retrieval_efficiency_superiority_pass"])
         self.assertFalse(assessment["performance_noninferiority"]["nonfactual_pass"])
         self.assertEqual(assessment["claim_status"], CLAIM_NOT_SUPPORTED)
@@ -703,11 +1184,9 @@ class TestEndToEnd(unittest.TestCase):
         def cheap_pr_auc(y_binary, score):
             return float(np.mean(np.asarray(score, dtype=float)))
 
-        ddre = results_from(self.scores, documents=2.0, nli=6.0)
-        baseline = results_from(self.scores, documents=3.0, nli=9.0)
-        report = paired_passage_bootstrap(
-            self.records, ddre, baseline, pr_auc=cheap_pr_auc
-        )
+        ddre = observations_from(self.records, self.scores, documents=2.0, nli=6.0)
+        baseline = observations_from(self.records, self.scores, documents=3.0, nli=9.0)
+        report = paired_passage_bootstrap(ddre, baseline, pr_auc=cheap_pr_auc)
         self.assertEqual(report["n_resamples"], CONFIRMATORY_BOOTSTRAP_RESAMPLES)
         self.assertEqual(report["seed"], CONFIRMATORY_BOOTSTRAP_SEED)
         self.assertEqual(report["ci_level"], CONFIRMATORY_CI_LEVEL)
@@ -738,10 +1217,47 @@ class TestSummaryWiring(unittest.TestCase):
         ):
             self.assertIn(field, self.source)
 
-    def test_the_bootstrap_is_computed_from_the_paired_test_results(self):
+    def test_the_bootstrap_is_computed_from_identity_bearing_observations(self):
+        # Identities are attached inside the evaluation loop, not reconstructed
+        # afterwards from a result list whose order nobody checked.
         self.assertIn(
-            "paired_passage_bootstrap(\n                test_records, ddre_results, "
-            "bse_official_results\n            )",
+            "paired_passage_bootstrap(\n                ddre_observations, "
+            "bse_official_observations\n            )",
+            self.source,
+        )
+        self.assertIn("ddre_metrics, ddre_results, ddre_observations", self.source)
+        self.assertIn(
+            "bse_official_metrics, bse_official_results, bse_official_observations",
+            self.source,
+        )
+        self.assertIn("evaluate_detector_with_identity", self.source)
+
+    def test_the_claim_receives_the_actual_run_configuration(self):
+        # Not the frozen constants echoed back: the values the run used.
+        for field in (
+            '"c_miss": args.c_miss',
+            '"c_false_alarm": args.c_false_alarm',
+            '"c_retrieve": args.c_retrieve',
+            '"p0": args.p0',
+            '"max_docs": args.max_docs',
+            '"validation_fraction": args.validation_fraction',
+            '"split_seed": RANDOM_STATE',
+        ):
+            self.assertIn(field, self.source)
+
+    def test_the_frozen_split_is_re_derived_and_compared_by_identity(self):
+        self.assertIn("validation_fraction=CONFIRMATORY_VALIDATION_FRACTION", self.source)
+        self.assertIn("random_state=CONFIRMATORY_SPLIT_SEED", self.source)
+        self.assertIn(
+            'expected_validation_passage_ids=frozen_split["validation_passage_ids"]',
+            self.source,
+        )
+        self.assertIn(
+            'expected_test_passage_ids=frozen_split["test_passage_ids"]', self.source
+        )
+        self.assertIn("split_metadata=split_metadata", self.source)
+        self.assertIn(
+            '"confirmatory_split_identity": claim_assessment["split_identity"]',
             self.source,
         )
 
