@@ -769,12 +769,11 @@ class TestNoNaNPosteriorIsReachable(unittest.TestCase):
 
 class TestProtectedBehaviourUnchanged(unittest.TestCase):
     def test_bse_decision_logic_is_untouched_by_this_change(self):
-        # Originally a whole-file byte diff against origin/main. PR #12 added
-        # BSEDetector.detect_sentence_with_trace and made detect_sentence
-        # delegate to it (audit finding D-10), which is instrumentation, not a
-        # decision change -- so the guard is TIGHTENED rather than dropped:
-        # every other top-level and method definition in the file must still be
-        # byte-identical to origin/main, and only those two names may differ.
+        # Originally a whole-file byte diff against origin/main. PR #12 turned
+        # it into a per-definition comparison so its trace accessor (audit
+        # finding D-10) could land without weakening the guard. That exemption
+        # is now spent: every top-level and method definition must be
+        # byte-identical to origin/main, with nothing added or removed.
         import ast
         import subprocess
 
@@ -798,15 +797,19 @@ class TestProtectedBehaviourUnchanged(unittest.TestCase):
             (Path(__file__).resolve().parents[1] / "src" / "baseline_core.py")
             .read_text(encoding="utf-8")
         )
-        permitted_to_differ = {"detect_sentence", "detect_sentence_with_trace"}
+        # PR #12's trace accessor is on main now, so the exemption it needed is
+        # spent: nothing may be added, removed or altered any more. A future PR
+        # that legitimately touches this file updates this list VISIBLY rather
+        # than the guard quietly permitting drift.
+        permitted_to_differ = frozenset()
 
         self.assertEqual(
             set(baseline) - set(current), set(),
             "no BSE definition may be removed",
         )
         self.assertEqual(
-            set(current) - set(baseline), {"detect_sentence_with_trace"},
-            "only the trace accessor may be added",
+            set(current) - set(baseline), set(),
+            "no BSE definition may be added",
         )
         for name, source in baseline.items():
             if name in permitted_to_differ:
