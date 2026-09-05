@@ -928,6 +928,21 @@ anything:
   the header claims. Exploratory bootstraps — 200 resamples, seed 7, an 80%
   interval — remain perfectly legal and can never produce a confirmatory claim,
   however good their bounds look.
+* **The metric implementation.** `paired_passage_bootstrap` accepts an injected
+  `pr_auc`, so a run could otherwise carry every frozen setting and still be
+  measuring a different quantity at high precision. The hook stays open for unit
+  tests and exploratory work, but only the default path (`pr_auc=None` →
+  `src.evaluation.wang_pr_auc`) may record the canonical
+  `CONFIRMATORY_PR_AUC_DEFINITION`; an injected function is recorded as
+  `custom:<module>.<qualname>` and is `NOT_CONFIRMATORY`. Equivalence is never
+  inferred from a name — a function *called* `wang_pr_auc` that is not this
+  repository's is still custom.
+* **Interval validity.** Every required endpoint's bound must be present,
+  numeric, finite and correctly ordered. `float("nan") >= -0.005` is False, so a
+  NaN bound would otherwise fail its non-inferiority gate quietly and be
+  reported as `NOT_SUPPORTED` — a negative result manufactured out of a broken
+  computation. Corrupted intervals make the analysis unavailable, and no bound
+  is repaired, clipped or reordered.
 * **Run configuration.** The **actual** CLI values (`c_miss`, `c_false_alarm`,
   `c_retrieve`, `p0`, `max_docs`, `validation_fraction`, `split_seed`) are
   compared with `FROZEN_RUN_CONFIGURATION`. The frozen comparator is BSE official

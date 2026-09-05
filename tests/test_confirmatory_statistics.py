@@ -34,6 +34,7 @@ from src.threshold_selection import (
 )
 from src.paired_bootstrap import (
     CONFIRMATORY_CI_METHOD,
+    CONFIRMATORY_PR_AUC_DEFINITION,
     CONFIRMATORY_C_FALSE_ALARM,
     CONFIRMATORY_C_MISS,
     CONFIRMATORY_C_RETRIEVE,
@@ -531,7 +532,9 @@ class TestSignConventionsAndValues(unittest.TestCase):
             report["endpoints"]["nonfactual_auc_pr_delta"]["observed"],
             expected_nonfactual,
         )
-        self.assertIn("wang_pr_auc", report["pr_auc_definition"])
+        self.assertEqual(
+            report["pr_auc_definition"], CONFIRMATORY_PR_AUC_DEFINITION
+        )
 
 
 # --------------------------------------------------------------------------
@@ -587,6 +590,7 @@ def bootstrap_with(**lower_bounds):
         "seed": CONFIRMATORY_BOOTSTRAP_SEED,
         "ci_level": CONFIRMATORY_CI_LEVEL,
         "ci_method": CONFIRMATORY_CI_METHOD,
+        "pr_auc_definition": CONFIRMATORY_PR_AUC_DEFINITION,
         "endpoints": {
             name: endpoint_record(name, value) for name, value in defaults.items()
         },
@@ -602,6 +606,11 @@ def frozen_split_metadata(**overrides):
     }
     metadata.update(overrides)
     return metadata
+
+
+def assess_claim_status(bootstrap):
+    """The claim status a run with this bootstrap would receive."""
+    return claim(bootstrap=bootstrap)["claim_status"]
 
 
 def claim(**overrides):
@@ -803,7 +812,7 @@ class TestBootstrapProvenanceGate(unittest.TestCase):
     def test_an_endpoint_without_an_interval_is_rejected(self):
         bootstrap = bootstrap_with()
         bootstrap["endpoints"]["balanced_pr_auc_delta"]["ci_lower"] = None
-        self.assert_rejected(bootstrap, "has no confidence interval")
+        self.assert_rejected(bootstrap, "has no ci_lower")
 
     def test_a_missing_endpoint_fails_its_gate_rather_than_raising(self):
         bootstrap = bootstrap_with()
@@ -812,17 +821,274 @@ class TestBootstrapProvenanceGate(unittest.TestCase):
         self.assertFalse(assessment["retrieval_efficiency_superiority_pass"])
         self.assertIsNone(assessment["retrieval_efficiency_ci_lower"])
 
-    def test_a_real_bootstrap_run_at_the_frozen_settings_passes_provenance(self):
-        # The production function must actually emit what the gate demands;
-        # a gate no real run can satisfy would be worse than no gate.
-        def cheap_pr_auc(y_binary, score):
-            return float(np.mean(np.asarray(score, dtype=float)))
-
+    def test_a_real_default_metric_run_satisfies_every_gate_but_the_one_varied(self):
+        # A gate no real run could satisfy would be worse than no gate. A
+        # genuine run on the real Wang PR-AUC is used, with only the resample
+        # count reduced to keep the suite fast -- so the ONLY mismatches
+        # permitted are the ones that count produces. Everything else (metric
+        # identity, unit, method, sign conventions, interval validity) must
+        # already be exactly right. That the function emits 10,000 when asked
+        # is covered by test_the_full_frozen_settings_run_end_to_end.
         records, scores = synthetic_sample(n_passages=6, per_passage=3)
         ddre = observations_from(records, scores, documents=2.0, nli=6.0)
         baseline = observations_from(records, scores, documents=3.0, nli=9.0)
-        report = paired_passage_bootstrap(ddre, baseline, pr_auc=cheap_pr_auc)
-        self.assertEqual(validate_bootstrap_provenance(report), [])
+        report = paired_passage_bootstrap(
+            ddre,
+            baseline,
+            n_resamples=50,
+            seed=CONFIRMATORY_BOOTSTRAP_SEED,
+            ci_level=CONFIRMATORY_CI_LEVEL,
+        )
+        self.assertEqual(
+            report["pr_auc_definition"], CONFIRMATORY_PR_AUC_DEFINITION
+        )
+        mismatches = validate_bootstrap_provenance(report)
+        self.assertTrue(all("n_resamples" in m for m in mismatches), mismatches)
+
+
+class TestPrAucMetricIdentityGate(unittest.TestCase):
+    """The estimand itself must be the frozen one.
+
+    Every other setting can be exactly right -- 10,000 resamples, seed 42, a
+    95% percentile interval over passages -- while the metric is something
+    else, and then the protocol is measuring the wrong quantity at high
+    precision. The injected-metric hook stays open for unit tests and
+    exploratory work; it simply cannot be confirmatory.
+    """
+
+    def setUp(self):
+        self.records, self.scores = synthetic_sample(n_passages=5, per_passage=3)
+        self.ddre = observations_from(self.records, self.scores, documents=2.0, nli=6.0)
+        self.baseline = observations_from(
+            self.records, self.scores, documents=3.0, nli=9.0
+        )
+
+    def bootstrap(self, **kwargs):
+        kwargs.setdefault("n_resamples", 20)
+        return paired_passage_bootstrap(self.ddre, self.baseline, **kwargs)
+
+    def test_the_default_path_records_the_frozen_wang_identifier(self):
+        report = self.bootstrap()
+        self.assertEqual(
+            report["pr_auc_definition"], CONFIRMATORY_PR_AUC_DEFINITION
+        )
+        self.assertIn("wang_pr_auc", report["pr_auc_definition"])
+        # No mismatch is contributed by the metric.
+        self.assertEqual(
+            [m for m in validate_bootstrap_provenance(report) if "pr_auc" in m], []
+        )
+
+    def test_an_injected_metric_is_recorded_as_custom_and_is_not_confirmatory(self):
+        def fake_pr_auc(y_binary, score):
+            return 0.99  # nothing to do with precision or recall
+
+        report = self.bootstrap(pr_auc=fake_pr_auc)
+        self.assertTrue(report["pr_auc_definition"].startswith("custom:"))
+        self.assertIn("fake_pr_auc", report["pr_auc_definition"])
+        assessment = claim(bootstrap=report)
+        self.assertEqual(assessment["claim_status"], CLAIM_NOT_CONFIRMATORY)
+        self.assertFalse(assessment["bootstrap_provenance_matches_frozen_protocol"])
+        self.assertIn(
+            "pr_auc_definition",
+            " ".join(assessment["bootstrap_provenance_mismatches"]),
+        )
+        # Exploratory, not negative.
+        self.assertNotEqual(assessment["claim_status"], CLAIM_NOT_SUPPORTED)
+        self.assertIn("NOT a negative result", assessment["interpretation"])
+
+    def test_an_average_precision_like_metric_is_not_confirmatory(self):
+        # The estimand this repository deliberately does NOT use: Wang's PR-AUC
+        # is precision_recall_curve followed by auc(recall, precision), which is
+        # not average precision. Injecting it must not inherit the frozen
+        # protocol's authority.
+        from sklearn.metrics import average_precision_score
+
+        def average_precision(y_binary, score):
+            return float(average_precision_score(y_binary, score))
+
+        report = self.bootstrap(pr_auc=average_precision)
+        self.assertTrue(report["pr_auc_definition"].startswith("custom:"))
+        self.assertEqual(
+            assess_claim_status(report), CLAIM_NOT_CONFIRMATORY
+        )
+
+    def test_a_custom_record_never_carries_the_canonical_identifier(self):
+        # The failure mode this closes: a custom metric labelled as Wang's.
+        def whatever(y_binary, score):
+            return 0.5
+
+        def two_arg_mean(y_binary, score):
+            return float(np.mean(np.asarray(score, dtype=float)))
+
+        for metric in (whatever, lambda y, s: 0.5, two_arg_mean):
+            with self.subTest(metric=getattr(metric, "__name__", metric)):
+                report = self.bootstrap(pr_auc=metric)
+                self.assertNotEqual(
+                    report["pr_auc_definition"], CONFIRMATORY_PR_AUC_DEFINITION
+                )
+                self.assertNotIn("src.evaluation", report["pr_auc_definition"])
+                self.assertTrue(report["pr_auc_definition"].startswith("custom:"))
+
+    def test_a_name_that_imitates_the_wang_helper_is_still_custom(self):
+        # Equivalence cannot be read off a name, and no attempt is made to
+        # infer it. A function called wang_pr_auc that is not the repository's
+        # is still custom.
+        def wang_pr_auc(y_binary, score):
+            return 0.42
+
+        report = self.bootstrap(pr_auc=wang_pr_auc)
+        self.assertNotEqual(
+            report["pr_auc_definition"], CONFIRMATORY_PR_AUC_DEFINITION
+        )
+        self.assertTrue(report["pr_auc_definition"].startswith("custom:"))
+        self.assertEqual(assess_claim_status(report), CLAIM_NOT_CONFIRMATORY)
+
+    def test_a_missing_metric_definition_is_not_confirmatory(self):
+        bootstrap = bootstrap_with()
+        del bootstrap["pr_auc_definition"]
+        mismatches = validate_bootstrap_provenance(bootstrap)
+        self.assertIn("pr_auc_definition", " ".join(mismatches))
+        self.assertEqual(assess_claim_status(bootstrap), CLAIM_NOT_CONFIRMATORY)
+
+    def test_a_wrong_metric_definition_is_not_confirmatory(self):
+        bootstrap = bootstrap_with()
+        bootstrap["pr_auc_definition"] = "sklearn.metrics.average_precision_score"
+        self.assertIn(
+            "pr_auc_definition", " ".join(validate_bootstrap_provenance(bootstrap))
+        )
+        self.assertEqual(assess_claim_status(bootstrap), CLAIM_NOT_CONFIRMATORY)
+
+    def test_the_protocol_publishes_the_canonical_identifier(self):
+        protocol = confirmatory_protocol()
+        self.assertEqual(
+            protocol["pr_auc_definition"], CONFIRMATORY_PR_AUC_DEFINITION
+        )
+        self.assertIn("pr_auc_definition_requirement", protocol)
+        self.assertIn("NOT_CONFIRMATORY", protocol["pr_auc_definition_requirement"])
+
+
+class TestIntervalValidityGate(unittest.TestCase):
+    """A corrupted interval makes the analysis unavailable, never negative.
+
+    ``float("nan") >= -0.005`` is False, so without this gate a NaN lower bound
+    would quietly fail its non-inferiority test and be reported as
+    ``NOT_SUPPORTED`` -- a negative scientific result manufactured out of a
+    broken computation.
+    """
+
+    def corrupted(self, endpoint_name, **fields):
+        bootstrap = bootstrap_with()
+        bootstrap["endpoints"][endpoint_name].update(fields)
+        return bootstrap
+
+    def assert_unavailable(self, bootstrap, needle):
+        mismatches = validate_bootstrap_provenance(bootstrap)
+        self.assertTrue(mismatches, "the corrupted interval was not detected")
+        self.assertIn(needle, " ".join(mismatches))
+        assessment = claim(bootstrap=bootstrap)
+        self.assertEqual(assessment["claim_status"], CLAIM_NOT_CONFIRMATORY)
+        self.assertNotEqual(assessment["claim_status"], CLAIM_NOT_SUPPORTED)
+        self.assertIn("NOT a negative result", assessment["interpretation"])
+        return assessment
+
+    def test_a_nan_lower_bound_is_not_confirmatory(self):
+        # Without the gate this reads as a clean non-inferiority failure.
+        bootstrap = self.corrupted("nonfactual_auc_pr_delta", ci_lower=float("nan"))
+        assessment = self.assert_unavailable(bootstrap, "non-finite ci_lower")
+        self.assertFalse(
+            assessment["performance_noninferiority"]["nonfactual_pass"],
+            "NaN must not pass its gate either",
+        )
+
+    def test_an_infinite_upper_bound_is_not_confirmatory(self):
+        self.assert_unavailable(
+            self.corrupted("factual_auc_pr_delta", ci_upper=float("inf")),
+            "non-finite ci_upper",
+        )
+
+    def test_a_negative_infinite_lower_bound_is_not_confirmatory(self):
+        self.assert_unavailable(
+            self.corrupted(PRIMARY_EFFICIENCY_ENDPOINT, ci_lower=float("-inf")),
+            "non-finite ci_lower",
+        )
+
+    def test_a_reversed_interval_is_not_confirmatory_and_is_not_reordered(self):
+        bootstrap = self.corrupted(
+            "balanced_pr_auc_delta", ci_lower=0.40, ci_upper=-0.10
+        )
+        self.assert_unavailable(bootstrap, "above ci_upper")
+        endpoint = bootstrap["endpoints"]["balanced_pr_auc_delta"]
+        self.assertEqual((endpoint["ci_lower"], endpoint["ci_upper"]), (0.40, -0.10))
+
+    def test_a_non_numeric_bound_is_not_confirmatory(self):
+        assessment = self.assert_unavailable(
+            self.corrupted(SECONDARY_EFFICIENCY_ENDPOINT, ci_lower="0.1"),
+            "non-numeric ci_lower",
+        )
+        # Fails its gate rather than raising or comparing, and is still
+        # reported verbatim so a reader can see what was recorded.
+        self.assertFalse(assessment["nli_efficiency_superiority_pass"])
+        self.assertEqual(assessment["nli_efficiency_ci_lower"], "0.1")
+
+    def test_a_corrupted_bound_is_reported_verbatim_not_repaired(self):
+        bootstrap = self.corrupted(
+            PRIMARY_EFFICIENCY_ENDPOINT, ci_lower=float("nan")
+        )
+        assessment = claim(bootstrap=bootstrap)
+        self.assertFalse(assessment["retrieval_efficiency_superiority_pass"])
+        self.assertTrue(math.isnan(assessment["retrieval_efficiency_ci_lower"]))
+
+    def test_a_missing_bound_is_not_confirmatory(self):
+        self.assert_unavailable(
+            self.corrupted("factual_auc_pr_delta", ci_upper=None), "has no ci_upper"
+        )
+
+    def test_an_infinite_saving_does_not_pass_the_superiority_gate(self):
+        # The discriminating case for the finiteness filter on the gate itself.
+        # NaN already fails every comparison, but +inf > 0 is True, so without
+        # the filter a corrupted bound would *pass* the retrieval-superiority
+        # test. The provenance gate makes the run NOT_CONFIRMATORY either way;
+        # this asserts the individual gate is not also silently satisfied.
+        bootstrap = self.corrupted(
+            PRIMARY_EFFICIENCY_ENDPOINT, ci_lower=float("inf"), ci_upper=float("inf")
+        )
+        assessment = claim(bootstrap=bootstrap)
+        self.assertFalse(assessment["retrieval_efficiency_superiority_pass"])
+        self.assertFalse(assessment["primary_claim_supported"])
+        self.assertEqual(assessment["claim_status"], CLAIM_NOT_CONFIRMATORY)
+
+        nli = self.corrupted(
+            SECONDARY_EFFICIENCY_ENDPOINT, ci_lower=float("inf"), ci_upper=float("inf")
+        )
+        self.assertFalse(claim(bootstrap=nli)["nli_efficiency_superiority_pass"])
+
+    def test_valid_finite_ordered_intervals_remain_eligible(self):
+        bootstrap = bootstrap_with()
+        for endpoint in bootstrap["endpoints"].values():
+            self.assertLessEqual(endpoint["ci_lower"], endpoint["ci_upper"])
+        self.assertEqual(validate_bootstrap_provenance(bootstrap), [])
+        self.assertEqual(assess_claim_status(bootstrap), CLAIM_SUPPORTED)
+
+    def test_an_equal_lower_and_upper_bound_is_valid(self):
+        # A degenerate but legitimate interval: every replicate agreed.
+        bootstrap = bootstrap_with()
+        for endpoint in bootstrap["endpoints"].values():
+            endpoint["ci_upper"] = endpoint["ci_lower"]
+        bootstrap["endpoints"][PRIMARY_EFFICIENCY_ENDPOINT].update(
+            {"ci_lower": 1.0, "ci_upper": 1.0}
+        )
+        self.assertEqual(validate_bootstrap_provenance(bootstrap), [])
+        self.assertEqual(assess_claim_status(bootstrap), CLAIM_SUPPORTED)
+
+    def test_numpy_scalars_are_accepted_as_numeric(self):
+        # Real bootstrap output is float(), but be explicit that a numpy scalar
+        # is not treated as a corrupted bound.
+        bootstrap = self.corrupted(
+            "factual_auc_pr_delta",
+            ci_lower=np.float64(0.0),
+            ci_upper=np.float64(0.1),
+        )
+        self.assertEqual(validate_bootstrap_provenance(bootstrap), [])
 
 
 class TestRunConfigurationGate(unittest.TestCase):

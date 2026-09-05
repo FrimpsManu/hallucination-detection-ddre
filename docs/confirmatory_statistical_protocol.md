@@ -33,6 +33,7 @@ order, segmentation, NLI scores, labels, aggregation rule and held-out split.
 | `CONFIRMATORY_CI_LEVEL` | **0.95** |
 | `CONFIRMATORY_BOOTSTRAP_UNIT` | **`"passage"`** |
 | `CONFIRMATORY_CI_METHOD` | **percentile** (2.5th, 97.5th) |
+| `CONFIRMATORY_PR_AUC_DEFINITION` | **`src.evaluation.wang_pr_auc:precision_recall_curve+auc(recall,precision)`** |
 | `CONFIRMATORY_C_MISS` | **28** |
 | `CONFIRMATORY_C_FALSE_ALARM` | **96** |
 | `CONFIRMATORY_C_RETRIEVE` | **1** |
@@ -59,12 +60,38 @@ lists every deviation it finds rather than repairing anything.
 
 **Bootstrap provenance.** `validate_bootstrap_provenance` requires the bootstrap
 record *and every endpoint inside it* to carry the frozen `bootstrap_unit`,
-`n_resamples`, `seed`, `ci_level` and `ci_method`, the correct sign convention
-for that endpoint's family, and a two-sided interval. An endpoint whose
-provenance disagrees with its own header describes a different analysis from the
-one the header claims, and is rejected on that ground alone. A 200-resample,
-seed-7, 80%-interval bootstrap is a perfectly legal exploratory analysis; it can
-never produce a confirmatory claim, however good its bounds look.
+`n_resamples`, `seed`, `ci_level`, `ci_method` and `pr_auc_definition`, the
+correct sign convention for that endpoint's family, and a valid two-sided
+interval. An endpoint whose provenance disagrees with its own header describes a
+different analysis from the one the header claims, and is rejected on that ground
+alone. A 200-resample, seed-7, 80%-interval bootstrap is a perfectly legal
+exploratory analysis; it can never produce a confirmatory claim, however good its
+bounds look.
+
+**The metric implementation.** A bootstrap can carry every other frozen setting
+— 10,000 resamples, seed 42, a 95% percentile interval over passages — and still
+be measuring something else, because `paired_passage_bootstrap` accepts an
+injected `pr_auc`. That hook stays open for unit tests, fast mechanics tests and
+exploratory analyses. What changes is the record: only the default path
+(`pr_auc=None`, resolving to `src.evaluation.wang_pr_auc`) may record the
+canonical `CONFIRMATORY_PR_AUC_DEFINITION`; anything injected is recorded as
+`custom:<module>.<qualname>`, and a run carrying a custom identifier is
+`NOT_CONFIRMATORY`.
+
+> No attempt is made to decide whether an injected function is *equivalent* to
+> Wang PR-AUC. Equivalence cannot be read off a name — a function called
+> `wang_pr_auc` that is not this repository's is still custom — and a wrong guess
+> would let a different estimand inherit the frozen protocol's authority. A
+> custom metric makes the run exploratory, which is not a negative result.
+
+**Interval validity.** Every required endpoint must carry a bound that is
+present, numeric, finite and correctly ordered (`ci_lower ≤ ci_upper`). This is
+not pedantry: `float("nan") >= -0.005` is **False**, so a NaN lower bound would
+otherwise fail its non-inferiority gate quietly and be reported as
+`NOT_SUPPORTED` — a negative scientific result manufactured out of a broken
+computation. A corrupted interval makes the analysis **unavailable**, and bounds
+are never repaired, clipped or reordered. The recorded value is still reported
+verbatim so a reader can see exactly what was produced.
 
 **Run configuration.** `validate_run_configuration` compares the **actual** CLI
 values the run used — `c_miss`, `c_false_alarm`, `c_retrieve`, `p0`, `max_docs`,
@@ -151,7 +178,8 @@ and resampling it would double-count that sentence.
 `auc(recall, precision)` — the same function the normal evaluation calls. Not
 `average_precision_score`, and not a second implementation: an interval computed
 on a different estimand from the point estimate it brackets is not an interval
-for that point estimate.
+for that point estimate. A confirmatory run must use that canonical
+implementation, and §2a describes how the requirement is enforced.
 
 ### Sign conventions
 
