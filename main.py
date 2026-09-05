@@ -289,6 +289,18 @@ def auto_push_results(paths):
     A detached or otherwise ambiguous HEAD is refused for the same reason: there
     is no branch to push to, and guessing one is exactly the kind of helpfulness
     that produces a commit nobody asked for.
+
+    A pre-existing dirty index is refused too. ``git commit -m`` commits
+    EVERYTHING already staged, so someone who had run ``git add
+    src/unrelated_work.py`` before starting the experiment would find that file
+    swept into a commit labelled "update full experiment results" -- which this
+    function's own docstring says it never does. Nothing is unstaged to work
+    around it, and no partial commit is attempted: the index belongs to whoever
+    staged it, and it is theirs to review and commit.
+
+    The order is: resolve branch -> protected/detached -> pre-existing index ->
+    add -> post-add no-change -> commit -> push. Every refusal happens before
+    the index is touched.
     """
     try:
         branch = subprocess.check_output(
@@ -307,6 +319,33 @@ def auto_push_results(paths):
                 "to push to. Results are on disk."
             )
             return {"pushed": False, "reason": "detached HEAD", "branch": branch}
+        # Fail closed on ANY answer but a clean index: 0 is clean, 1 is dirty,
+        # and anything else means the check itself did not work, which is not a
+        # licence to proceed.
+        preexisting = subprocess.run(
+            ["git", "diff", "--cached", "--quiet"],
+            check=False,
+        )
+        if preexisting.returncode != 0:
+            if preexisting.returncode == 1:
+                detail = (
+                    "the index already contains staged changes that must be "
+                    "reviewed and committed separately"
+                )
+                reason = "pre-existing staged changes"
+            else:
+                detail = (
+                    "the staged-changes check itself failed "
+                    f"(git exited {preexisting.returncode})"
+                )
+                reason = "index check failed"
+            print(
+                f"Refusing to auto-push: {detail}. Result artifacts remain on "
+                "disk; nothing was staged, committed or pushed, and the "
+                "existing index was not modified."
+            )
+            return {"pushed": False, "reason": reason, "branch": branch}
+
         subprocess.run(["git", "add", *[str(path) for path in paths]], check=True)
         staged = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],
