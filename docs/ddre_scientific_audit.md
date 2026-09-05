@@ -72,8 +72,8 @@ Two things are in good shape and should be stated plainly:
 | D-07 | MAJOR | `main.py::tune_ddre_thresholds` | The feasibility test constrains only `factual_auc_pr` and `balanced_pr_auc`. Nonfactual AUC-PR — Wang's headline metric — is unconstrained. | Balanced PR-AUC is the mean of the two, so a large factual gain can mask a nonfactual loss and still qualify. The tuner may select a configuration that is worse at detecting hallucination. | Add an explicit nonfactual AUC-PR floor to the feasibility test. |
 | D-08 | MAJOR | `main.py::hypothesis_comparison` | `hypothesis_supported_on_test` requires `factual_delta > 0` and `balanced_delta ≥ 0`, with no nonfactual floor and **no uncertainty quantification of any kind**. | A single point estimate is written into the summary as a scientific conclusion, over three methods and several metrics, with no interval and no multiplicity control. | Require a nonfactual floor, and gate the claim on the paired passage-level bootstrap (§4-H). |
 | D-09 | MAJOR (claim boundary / robustness) | `main.py`, `ddre_core.py` | DDRE selects its stopping band from **64** validation configurations. Published BSE has **no tunable counterpart** — its stopping rule follows from the fixed published costs. | Part of any DDRE advantage may be a model-selection advantage. This bounds what the comparison may claim; it does **not** invalidate it. | Keep **published BSE (CM=28, CFA=96, c_retrieve=1) as the primary comparator** for comparability with Wang et al. Optionally add a validation-tuned BSE variant as a clearly labelled **secondary** robustness comparator, never as the primary. |
-| D-04 | MAJOR | `ULSIFDensityRatio._solve` / `.ratio` | Post-hoc non-negativity truncation could in principle drive `α → 0`. Then `r̂ ≡ 0`, clipped to `1e-6`, i.e. `log r = −13.8` **per document**. Nothing in `fit()` detects or reports it. | A silently degenerate fit would look like a spectacularly confident detector. **Not observed in the synthetic audit fixture, and not established on the actual formal fit** — no fixed raw NBC scores exist in this repository to check it against. | Add a post-fit sanity check: `α` not all zero, and `r̂` finite and non-degenerate across the observed score range. |
-| D-06 | MAJOR | `.ratio`, `detect_subclaim` | A NaN score propagates silently: `log(NaN)` → `clip` → `sigmoid` all yield NaN; every stopping comparison is False, so the **full retrieval budget is spent**, and NaN reaches the metrics. `+inf` is clipped to a perfect score of 100. | Silent corruption of both the quality and the efficiency numbers, with no warning anywhere. | Validate the score at the detector boundary and fail loudly. |
+| D-04 | MAJOR — **RESOLVED by PR #9** | `ULSIFDensityRatio._solve` / `.ratio` | Post-hoc non-negativity truncation could in principle drive `α → 0`. Then `r̂ ≡ 0`, clipped to `1e-6`, i.e. `log r = −13.8` **per document**. Nothing in `fit()` detects or reports it. | A silently degenerate fit would look like a spectacularly confident detector. **Not observed in the synthetic audit fixture, and not established on the actual formal fit** — no fixed raw NBC scores exist in this repository to check it against. | **Done (PR #9):** `_validate_final_fit` rejects non-finite parameters, an all-zero `α`, and fitted ratios that are non-finite or identically zero on the training support — before the estimator is usable. Rejection clears the fitted state. See §11. |
+| D-06 | MAJOR — **RESOLVED by PR #9** | `.ratio`, `detect_subclaim` | A NaN score propagates silently: `log(NaN)` → `clip` → `sigmoid` all yield NaN; every stopping comparison is False, so the **full retrieval budget is spent**, and NaN reaches the metrics. `+inf` is clipped to a perfect score of 100. | Silent corruption of both the quality and the efficiency numbers, with no warning anywhere. | **Done (PR #9):** `ratio()` rejects a non-finite score before normalization and a non-finite raw ratio before clipping; `detect_subclaim` validates the score, then the ratio (finite and strictly positive), then the posterior. See §11. |
 | D-05 | MINOR | `detect_subclaim` | The running log-odds are clipped to `±40` **after each update**, so accumulation is non-associative and evidence beyond the bound is discarded. | Harmless under any stopping band in the current grid (`sigmoid(±40)` is far outside it), but it is a silent modification of the stated update rule. | Document it, or clip only at the sigmoid. |
 | D-10 | MINOR | `evaluation.py::prediction_rows`, `detect_sentence` | Per-subclaim results are collapsed into one `DetectionResult` with summed counters. Per-subclaim stopping depth is unrecoverable, and the CSV omits the subclaim count. | §4-G asks for stopping depth; §4-H needs the subclaim count to express documents-per-subclaim on a bootstrap resample. | Add `n_subclaims` to `prediction_rows` and retain per-subclaim depths. |
 | D-11 | MINOR | `main.py::tune_ddre_thresholds` | `normalized_docs = avg_docs / max_docs` divides a **per-sentence** document count by a **per-subclaim** budget. With ~1.57 subclaims/sentence it can exceed 1.0. | The fallback penalty's exchange rate against balanced PR-AUC is therefore not the declared one. | Normalise by `max_docs × subclaims_per_sentence`, or state the scale explicitly. |
@@ -598,8 +598,8 @@ tuner's own objective prefers the region the fix removes.
 
 **Required for defensible reporting:**
 
-7. **D-04, D-06** — post-fit sanity check on the estimator; loud failure on
-   non-finite scores.
+7. ~~**D-04, D-06** — post-fit sanity check on the estimator; loud failure on
+   non-finite scores.~~ **DONE — PR #9.** See §11.
 8. **D-10** — add `n_subclaims` to `prediction_rows`; retain per-subclaim
    stopping depth.
 9. **D-11** — fix the fallback's cost normalisation, or state its scale.
@@ -760,3 +760,93 @@ analytic clause, and pointing the tuner at the unfiltered grid.
 `cost_based_prediction` itself is **not** modified. The floating-point edge it
 exhibits is handled by consulting it rather than by changing it, which is what
 makes the invariant operational as well as analytic.
+
+### D-04 and D-06 — RESOLVED by PR #9, *research: fail closed on invalid DDRE numerical states*
+
+One principle: **an invalid numerical state must never be converted into
+evidence.** A NaN is not a weak signal, an infinite score is not a perfect one,
+and an identically-zero fitted ratio is not proof of hallucination.
+
+**D-04 — degenerate fit.** `_validate_final_fit` runs after the final fit and
+before the estimator is usable. It rejects: non-finite or empty centres; a
+non-positive or non-finite σ; a negative or non-finite λ; an empty, non-finite
+or negative `α`; an `α` with no strictly positive coefficient; and fitted ratios
+on the observed training support that are non-finite, negative, or identically
+zero. On rejection the fitted state is **cleared**, so `ratio()` reports "not
+fit" rather than serving an invalid model — the 1e-6 floor can no longer turn
+a broken fit into `log r = −13.82` per document.
+
+The claim boundary is respected and pinned by test: **no fit is rejected for the
+scale or spread of its ratios.** Large ratios, tiny-but-positive ratios, a narrow
+range and heavy class overlap all still pass. Those are D-03 questions, and **no
+log-evidence cap is chosen here**.
+
+A read-only `fit_diagnostics` record (JSON-serialisable, reaching the summary as
+`ddre.ulsif_fit_diagnostics`) carries the sample sizes, σ, λ, the selected CV
+objective, the centre and coefficient counts, `α` sum/min/max, and the raw
+fitted-ratio range on the factual, hallucinated and combined training support.
+It is provenance only and selects nothing.
+
+Model selection is also protected: a non-finite σ, λ or CV objective now fails
+loudly rather than being skipped. Skipping would silently change the effective
+search space — a scientific behaviour change, not a safety fix. This matters
+because NaN loses every comparison, so an unchecked NaN objective could survive
+as `best` purely through comparison semantics.
+
+**D-06 — non-finite values.** `ratio()` rejects a non-finite score **before**
+normalization (so `+inf` can no longer become a perfect 100) and rejects a
+non-finite raw ratio **before** the clip, rather than clipping it into range.
+The existing `[1e-6, 1e6]` clip is unchanged. `fit()` rejects non-finite training
+scores with a bounded message naming the input set, the count and the first few
+offending indices.
+
+`DDREDetector.detect_subclaim` validates at three points: the document score
+immediately after scoring, the returned ratio (finite **and strictly positive**)
+before `log()`, and the posterior after the update. The score check duplicates
+the estimator's own guard deliberately — the detector accepts any ratio-estimator
+implementation, and the sequential accumulator must not depend on one of them
+being careful. Invalid values are **not** repaired with an epsilon. Failure stops
+retrieval immediately: later documents are never scored, `ratio()` is never
+invoked for a bad score, and no `DetectionResult` is produced.
+
+Errors are `NonFiniteScoreError` and `DegenerateULSIFFit`, both subclasses of
+`DDRENumericalError(ValueError)`.
+
+**Worth recording:** D-06 was DDRE-specific. BSE already fails on a non-finite
+score, because its bucket discretiser calls `int()` on it — `ValueError` for NaN,
+`OverflowError` for an infinity. That is incidental rather than a designed guard,
+and its message names neither the subclaim nor the document, but it does mean BSE
+never silently converted NaN into evidence. `baseline_core.py` is untouched.
+
+**Failed and repeated fits.** A fit attempt must leave the object representing
+*that* attempt, or no usable fit at all. `_clear_fit_state()` discards centres,
+`α`, σ, λ, the diagnostics and the CV table, and it runs **at the start of every
+fit attempt — before input validation and before model selection** — as well as
+on a final-fit failure. Without it, a second fit that failed early (non-finite
+training input, a non-finite CV objective) left the previous successful model in
+place: `ratio()` went on serving evidence from a fit the caller believed was
+replaced, and `fit_diagnostics` described that older fit, making provenance
+ambiguous exactly when something had gone wrong. The final-fit failure path now
+clears the *whole* state; previously it left σ and λ behind, describing a model
+that no longer existed. After any failed attempt `ratio()` reports "must be fit
+before use".
+
+**Tests.** `tests/test_ddre_numerical_safety.py` (67 tests) covers training-input
+validation, model-selection safety, every final-fit rejection reason, the
+diagnostics record, `ratio()` input and output validation, all seven detector
+failure modes, failed and repeated fit state management, and the claim
+boundary. The D-04 and D-06 tests in
+`tests/test_ddre_audit.py` were **updated, not deleted**, and still explain the
+historical behaviour. Twenty-five mutations are caught, including removing any
+individual guard, turning any failure into silent clipping, and failing to clear
+any single element of the fitted state on a failed or repeated fit.
+
+Three of those mutations initially escaped, which sharpened the tests: the
+finite-`α` check was masked by the later fitted-ratio check (now pinned by
+asserting *which* check fires), the fitted-ratio check needed a case with finite
+coefficients whose sum overflows, and the posterior check needed the accumulator
+itself faulted, since the score and ratio guards make it unreachable through
+them.
+
+**D-03 is NOT resolved.** Nothing in this PR bounds, caps or calibrates the
+log-evidence a single document may carry.
