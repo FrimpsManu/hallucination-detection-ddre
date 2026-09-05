@@ -723,27 +723,80 @@ class TestNoTestSetAccessDuringTuning(unittest.TestCase):
         self.assertEqual(len(before), 1)
         self.assertIn("stratified_subset", self.source.splitlines()[before[0] - 1])
 
-    def test_AUDIT_the_quality_constraint_does_not_protect_nonfactual_pr_auc(self):
-        # AUDIT finding D-07. The feasibility test names only factual AUC-PR
-        # and balanced PR-AUC, so a configuration may trade away nonfactual
-        # AUC-PR -- Wang's headline metric -- and still qualify.
+    def test_RESOLVED_the_quality_constraint_now_protects_nonfactual_pr_auc(self):
+        # AUDIT finding D-07 -- RESOLVED by PR #10.
+        #
+        # WAS: the feasibility test named only factual AUC-PR and balanced
+        # PR-AUC, so a configuration could trade away nonfactual AUC-PR --
+        # Wang's headline metric -- and still qualify, because balanced is the
+        # mean of the two and a factual gain masks a nonfactual loss.
+        #
+        # NOW: all three safeguards are required, and each is recorded per
+        # candidate so the trade-off is auditable. The rule moved out of
+        # main.py into src/threshold_selection.py so it is reviewable and
+        # unit-testable on its own; the tuner delegates to it.
+        from src.threshold_selection import candidate_record
+
         tuner = ast.get_source_segment(
             self.source, self.functions["tune_ddre_thresholds"]
         )
-        qualifies = tuner[tuner.index("qualifies = ("):tuner.index("candidate = {")]
-        self.assertIn("factual", qualifies)
-        self.assertIn("balanced_pr_auc", qualifies)
-        self.assertNotIn("nonfactual", qualifies)
+        self.assertIn("candidate_record(", tuner)
+        self.assertIn("select_threshold_configuration(", tuner)
 
-    def test_AUDIT_the_hypothesis_rule_does_not_protect_nonfactual_pr_auc(self):
-        # AUDIT finding D-08. The same omission decides whether the paper's
-        # claim is reported as supported.
+        record = candidate_record(
+            0.05, 0.60,
+            {
+                "nonfactual": {"auc_pr": 0.78},   # -0.02 vs baseline
+                "factual": {"auc_pr": 0.62},      # +0.02 vs baseline
+                "balanced_pr_auc": 0.70,          # unchanged
+                "accuracy": 0.5, "macro_f1": 0.5,
+                "efficiency": {
+                    "avg_retrieved_documents_per_sentence": 1.0,
+                    "avg_nli_span_calls_per_sentence": 3.0,
+                },
+            },
+            {
+                "nonfactual": {"auc_pr": 0.80},
+                "factual": {"auc_pr": 0.60},
+                "balanced_pr_auc": 0.70,
+            },
+            quality_tolerance=0.005, retrieval_penalty=0.05, max_docs=10,
+        )
+        for safeguard in (
+            "preserves_nonfactual", "preserves_factual", "preserves_balanced"
+        ):
+            self.assertIn(safeguard, record)
+        for recorded in (
+            "nonfactual_auc_pr_delta_vs_bse",
+            "factual_auc_pr_delta_vs_bse",
+            "balanced_pr_auc_delta_vs_bse",
+        ):
+            self.assertIn(recorded, record)
+        # The exact old bug: factual up, nonfactual down, balanced unchanged.
+        self.assertTrue(record["preserves_factual"])
+        self.assertTrue(record["preserves_balanced"])
+        self.assertFalse(record["preserves_nonfactual"])
+        self.assertFalse(record["preserves_baseline_quality"])
+
+    def test_RESOLVED_no_point_estimate_can_declare_the_hypothesis_supported(self):
+        # AUDIT finding D-08 -- RESOLVED by PR #10.
+        #
+        # WAS: hypothesis_comparison computed `hypothesis_supported_on_test`
+        # from test-set point estimates alone, with no uncertainty of any kind,
+        # and with no nonfactual floor.
+        #
+        # NOW: the boolean is gone; the function returns labelled descriptive
+        # effect sizes, and the confirmatory decision comes from the frozen
+        # paired passage-level bootstrap.
+        self.assertNotIn("hypothesis_supported_on_test", self.source)
         rule = ast.get_source_segment(
             self.source, self.functions["hypothesis_comparison"]
         )
-        supported = rule[rule.index("supported = ("):rule.index("return {")]
-        self.assertIn("factual_delta", supported)
-        self.assertNotIn("nonfactual_delta", supported)
+        self.assertNotIn("supported = (", rule)
+        self.assertIn("descriptive point estimates", rule)
+        self.assertIn("claim_assessment", rule)
+        self.assertIn("assess_claim", self.source)
+        self.assertIn("paired_passage_bootstrap", self.source)
 
 
 # --------------------------------------------------------------------------
