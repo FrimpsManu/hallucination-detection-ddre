@@ -140,6 +140,10 @@ def scored_candidates(table, baseline, quality_tolerance=CONFIRMATORY_PR_AUC_MAR
                 "macro_f1": 0.5,
                 "efficiency": {
                     "avg_retrieved_documents_per_sentence": documents,
+                    # One subclaim per sentence in this fixture, so the
+                    # per-sentence and per-subclaim counts coincide. Fixtures
+                    # where they differ live in the D-11 tests.
+                    "avg_retrieved_documents_per_subclaim": documents,
                     "avg_nli_span_calls_per_sentence": documents * 3.0,
                 },
             },
