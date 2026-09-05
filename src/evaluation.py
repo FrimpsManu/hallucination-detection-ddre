@@ -25,8 +25,14 @@ def _safe_corr(fn, x, y):
     return float(fn(x, y)[0])
 
 
-def _wang_pr_auc(y_binary, score):
-    """Match Wang released code: precision_recall_curve followed by auc(recall, precision)."""
+def wang_pr_auc(y_binary, score):
+    """Match Wang released code: precision_recall_curve followed by auc(recall, precision).
+
+    Public because the confirmatory bootstrap must use exactly this definition.
+    A second, subtly different PR-AUC would make the interval describe a
+    different estimand from the point estimate it is meant to bracket, so both
+    paths call this one function.
+    """
     precision, recall, _ = precision_recall_curve(y_binary, score)
     return float(auc(recall, precision))
 
@@ -72,14 +78,14 @@ def summarize_method(records, results, elapsed_seconds=None):
             "precision": float(precision_score(y_true, y_pred, pos_label=0, zero_division=0)),
             "recall": float(recall_score(y_true, y_pred, pos_label=0, zero_division=0)),
             "f1": float(f1_score(y_true, y_pred, pos_label=0, zero_division=0)),
-            "auc_pr": _wang_pr_auc(nonfact_true, p_nonfact),
+            "auc_pr": wang_pr_auc(nonfact_true, p_nonfact),
             "average_precision": float(average_precision_score(nonfact_true, p_nonfact)),
         },
         "factual": {
             "precision": float(precision_score(y_true, y_pred, pos_label=1, zero_division=0)),
             "recall": float(recall_score(y_true, y_pred, pos_label=1, zero_division=0)),
             "f1": float(f1_score(y_true, y_pred, pos_label=1, zero_division=0)),
-            "auc_pr": _wang_pr_auc(factual_true, p_factual),
+            "auc_pr": wang_pr_auc(factual_true, p_factual),
             "average_precision": float(average_precision_score(factual_true, p_factual)),
         },
     }
