@@ -982,10 +982,40 @@ built wrongly.
 The defect, unchanged from the table above: the fallback objective computed
 `normalized_docs = avg_retrieved_documents_per_sentence / max_docs`, dividing a
 **per-sentence** document count by a **per-subclaim** budget. That is not a
-fraction of anything. With roughly 1.57 subclaims per sentence in this dataset it
-can exceed 1.0, and — worse than the range problem — the same retrieval *policy*
-scored differently purely because the sentences it happened to see carried more
-subclaims, which is a property of the data rather than of the method.
+fraction of anything, and with roughly 1.57 subclaims per sentence in this
+dataset it can exceed 1.0.
+
+**What the defect actually does, stated precisely.** Every threshold candidate in
+one tuning run is evaluated on the *same* `validation_records`, so the sentence
+and subclaim counts are fixed across candidates:
+
+```
+avg_docs_per_sentence = total_docs / N_sentences
+avg_docs_per_subclaim = total_docs / N_subclaims
+
+  =>  avg_docs_per_sentence
+        = avg_docs_per_subclaim × (N_subclaims / N_sentences)
+```
+
+and `N_subclaims / N_sentences ≈ 1.57` is a **constant of the split**, identical
+for every candidate. So no two real candidates differ in that factor, and the
+defect is *not* that some configuration's sentences carried more subclaims than
+another's — they cannot.
+
+The defect is the **exchange rate**. The old cost was the correct cost multiplied
+by that constant, so the fallback objective was effectively
+
+```
+balanced_pr_auc − (retrieval_penalty × subclaims_per_sentence) × correct_cost
+```
+
+i.e. it traded balanced PR-AUC against retrieval cost at ~1.57× the declared
+`retrieval_penalty`. Balanced PR-AUC is not scaled alongside the cost, so the two
+objectives are **not order-equivalent** and the old one could select a different
+fallback configuration. `TestRealisticFallbackRegression` exhibits exactly that,
+on a candidate pair that obeys the fixed-record invariant above (asserted
+directly: both candidates share one `docs_per_sentence / docs_per_subclaim`
+ratio).
 
 The corrected cost is
 
@@ -996,9 +1026,11 @@ normalized_document_cost = avg_retrieved_documents_per_subclaim
 
 equivalently `total_documents / (total_subclaims × max_docs)`. Both quantities
 are documents per subclaim, so the ratio is dimensionless and lies in `[0, 1]`:
-5 documents per subclaim against a budget of 10 scores 0.5 however many subclaims
-each sentence carries. The repository already computed
-`avg_retrieved_documents_per_subclaim`; it simply was not the quantity being used.
+5 documents per subclaim against a budget of 10 scores 0.5, and the penalty's
+exchange rate against balanced PR-AUC is the declared `retrieval_penalty` rather
+than that value inflated by the split's subclaims-per-sentence constant. The
+repository already computed `avg_retrieved_documents_per_subclaim`; it simply was
+not the quantity being used.
 
 Nothing is clamped. `max_docs ≤ 0` raises, and so does a normalized cost below 0
 or above 1 — a subclaim cannot consume more than the budget, so such a value is
@@ -1040,6 +1072,18 @@ ambiguous HEAD, **before `git add`** — staging first and refusing afterwards
 would still leave the index dirty on a protected branch. This repository's
 workflow is branch → PR → review → merge, and an experiment helper must not
 bypass it. There is no override flag.
+
+It also refuses a **pre-existing dirty index**, again before `git add`. A plain
+`git commit -m` commits everything already staged, so a contributor who had run
+`git add src/unrelated_work.py` before starting the experiment would find that
+file swept into a commit labelled "update full experiment results" — precisely
+what this function's own docstring says it never does. The refusal is total:
+nothing is unstaged, no partial commit is attempted, and the existing index is
+left exactly as it was. The staged-changes probe fails closed on any answer but
+a clean index — `git diff --cached --quiet` returning 0 continues, 1 refuses as
+dirty, and any other code refuses because the check itself did not work. The
+full order is: resolve branch → protected/detached → pre-existing index → `git
+add` → post-add no-change → commit → push.
 
 The summary records `result_publication.automatic_push_requested` and the policy.
 That is the **intent** expressed on the command line, not whether a remote later

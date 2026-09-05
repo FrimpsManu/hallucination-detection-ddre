@@ -28,9 +28,23 @@ than accidental.
 
 A second rule lives here (audit finding D-11): the **fallback** objective's
 retrieval penalty must be dimensionless. It previously divided a *per-sentence*
-document count by a *per-subclaim* budget, which is not a fraction of anything
--- the same retrieval behaviour scored differently purely because sentences in
-one configuration happened to carry more subclaims. The corrected cost is
+document count by a *per-subclaim* budget, which is not a fraction of anything.
+
+Every threshold candidate in one tuning run is evaluated on the *same*
+validation records, so the sentence and subclaim counts are fixed and
+
+    avg_docs_per_sentence = avg_docs_per_subclaim * subclaims_per_sentence
+
+where ``subclaims_per_sentence`` is a constant of the split (~1.57 here). The
+old quantity was therefore the correct cost multiplied by that constant, so the
+fallback traded balanced PR-AUC against retrieval cost at the wrong **exchange
+rate**: effectively ``retrieval_penalty * subclaims_per_sentence`` rather than
+``retrieval_penalty``. Balanced PR-AUC is not scaled alongside it, so the two
+objectives are not order-equivalent and can select different configurations.
+The old value could also exceed 1.0, which is how the unit error is visible
+even without comparing candidates.
+
+The corrected cost is
 ``avg_retrieved_documents_per_subclaim / max_documents_per_subclaim``, so
 numerator and denominator share a unit and the value is a genuine fraction of
 the per-subclaim budget.
@@ -118,9 +132,11 @@ def candidate_record(
 def _normalized_document_cost(avg_documents_per_subclaim, max_docs):
     """The fallback cost as a genuine fraction of the per-subclaim budget.
 
-    Both quantities are documents per subclaim, so the ratio is dimensionless
-    and a configuration retrieving 5 of a possible 10 documents per subclaim
-    scores 0.5 however many subclaims its sentences happen to carry.
+    Both quantities are documents per subclaim, so the ratio is dimensionless:
+    a configuration retrieving 5 of a possible 10 documents per subclaim scores
+    0.5, and the penalty's exchange rate against balanced PR-AUC is the declared
+    ``retrieval_penalty`` rather than that value inflated by the split's
+    subclaims-per-sentence constant.
 
     Nothing is clamped or rescaled. A value outside ``[0, 1]`` means the metric
     is impossible for the configured budget -- a subclaim cannot consume more

@@ -1,9 +1,19 @@
 """Tests for audit findings D-11 and D-12.
 
 **D-11:** the fallback objective's retrieval penalty must be *dimensionless*.
-It divided a per-sentence document count by a per-subclaim budget, so the same
-retrieval behaviour scored differently purely because sentences in one
-configuration happened to carry more subclaims. The corrected cost is
+It divided a per-sentence document count by a per-subclaim budget.
+
+Every threshold candidate in one tuning run is evaluated on the SAME
+``validation_records``, so the sentence and subclaim counts are fixed and
+
+    avg_docs_per_sentence = avg_docs_per_subclaim * subclaims_per_sentence
+
+with ``subclaims_per_sentence`` a constant (~1.57 on this dataset). The old
+quantity was therefore the correct cost multiplied by that constant, i.e. the
+fallback used the wrong **exchange rate** between balanced PR-AUC and retrieval
+cost -- and because balanced PR-AUC is not scaled with it, that can select a
+different fallback configuration, which ``TestRealisticFallbackRegression``
+exhibits. The corrected cost is
 ``avg_retrieved_documents_per_subclaim / max_documents_per_subclaim``.
 
 **D-12:** publishing result artifacts must be opt-in, and an automatic push
@@ -119,11 +129,14 @@ class TestFallbackCostNormalization(unittest.TestCase):
         self.assertEqual(record["normalized_document_cost"], 0.4)
         self.assertNotEqual(record["normalized_document_cost"], 0.8)
 
-    def test_the_same_per_subclaim_retrieval_costs_the_same(self):
-        # This is the unit correction, stated as a property. Two configurations
-        # retrieving 2 documents per subclaim differ only in how many subclaims
-        # their sentences carry, which is a property of the DATA, not of the
-        # retrieval policy. Under the old normalization they scored differently.
+    def test_the_cost_is_invariant_to_the_supplied_per_sentence_number(self):
+        # UNIT / CROSS-DATASET property, NOT two candidates from one fixed
+        # validation split. Within a single tuning run every candidate sees the
+        # same records, so subclaims-per-sentence is constant and this pair is
+        # not realizable there; the realizable consequence of D-11 is in
+        # TestRealisticFallbackRegression. What this pins is narrower and still
+        # worth pinning: the cost reads the per-subclaim count and nothing else,
+        # so a per-sentence number supplied alongside it cannot influence it.
         cheap_sentences = record_for(
             documents_per_sentence=4.0, documents_per_subclaim=2.0, max_docs=10
         )
@@ -338,29 +351,103 @@ class TestFeasibleSelectionIsUnchanged(unittest.TestCase):
         )
 
 
-class TestFallbackRemainsNonConfirmatory(unittest.TestCase):
-    def test_the_corrected_fallback_can_pick_a_different_configuration(self):
-        # Nothing preserves baseline quality, so the fallback decides. Candidate
-        # B is cheaper per subclaim but more expensive per sentence; the
-        # corrected objective prefers B, the old per-sentence one preferred A.
-        # That change is exactly what D-11 asks for.
-        a = record_for(
-            documents_per_sentence=2.0, documents_per_subclaim=9.0,
-            nonfactual=0.50, factual=0.40, lower=0.10, upper=0.60,
-            retrieval_penalty=0.50,
+class TestRealisticFallbackRegression(unittest.TestCase):
+    """The consequence of D-11 under the tuner's real invariant.
+
+    Every threshold candidate in one tuning run is scored on the SAME
+    ``validation_records``, so the sentence and subclaim counts are fixed and
+    every candidate satisfies
+
+        avg_docs_per_sentence / avg_docs_per_subclaim
+            == N_subclaims / N_sentences   (a constant, ~1.57 here)
+
+    That invariant is what makes the pair below realizable, and it is asserted
+    directly. Because the old cost was the correct cost multiplied by that
+    constant while balanced PR-AUC was NOT, the two objectives are not
+    order-equivalent and can choose differently -- which is the actual defect,
+    not any claim about candidates seeing different data.
+    """
+
+    SUBCLAIMS_PER_SENTENCE = 1.5
+    MAX_DOCS = 10
+    PENALTY = 0.05  # the production default, unchanged
+
+    def candidates(self):
+        # Chosen so 0.2 * PENALTY < (balanced_b - balanced_a) < 0.3 * PENALTY,
+        # the window in which the corrected and the old objectives disagree.
+        cheap = record_for(
+            documents_per_subclaim=2.0,
+            documents_per_sentence=2.0 * self.SUBCLAIMS_PER_SENTENCE,
+            nonfactual=0.3000, factual=0.3000,   # balanced 0.3000
+            max_docs=self.MAX_DOCS, retrieval_penalty=self.PENALTY,
+            lower=0.10, upper=0.60,
         )
-        b = record_for(
-            documents_per_sentence=9.0, documents_per_subclaim=1.0,
-            nonfactual=0.50, factual=0.40, lower=0.15, upper=0.65,
-            retrieval_penalty=0.50,
+        better_but_dearer = record_for(
+            documents_per_subclaim=4.0,
+            documents_per_sentence=4.0 * self.SUBCLAIMS_PER_SENTENCE,
+            nonfactual=0.3125, factual=0.3125,   # balanced 0.3125
+            max_docs=self.MAX_DOCS, retrieval_penalty=self.PENALTY,
+            lower=0.15, upper=0.65,
         )
-        self.assertFalse(a["preserves_baseline_quality"])
-        self.assertFalse(b["preserves_baseline_quality"])
-        selected, rule, confirmatory = select_threshold_configuration([a, b])
-        self.assertEqual(selected["lower"], 0.15)
+        return cheap, better_but_dearer
+
+    def old_objective(self, record):
+        """What the pre-D-11 code computed: the PER-SENTENCE count over max_docs."""
+        return record["balanced_pr_auc"] - self.PENALTY * (
+            record["avg_documents"] / self.MAX_DOCS
+        )
+
+    def test_every_candidate_shares_one_subclaims_per_sentence_constant(self):
+        # Without this the pair would not be realizable, and the regression
+        # below would be testing a situation the tuner cannot produce.
+        ratios = {
+            record["avg_documents"] / record["avg_documents_per_subclaim"]
+            for record in self.candidates()
+        }
+        self.assertEqual(ratios, {self.SUBCLAIMS_PER_SENTENCE})
+
+    def test_the_old_and_corrected_objectives_disagree(self):
+        cheap, better_but_dearer = self.candidates()
+        self.assertGreater(
+            self.old_objective(cheap), self.old_objective(better_but_dearer),
+            "the old per-sentence objective should prefer the cheap candidate",
+        )
+        self.assertGreater(
+            better_but_dearer["fallback_objective"], cheap["fallback_objective"],
+            "the corrected objective should prefer the dearer, better candidate",
+        )
+
+    def test_the_tuner_now_selects_the_configuration_the_corrected_scale_prefers(self):
+        cheap, better_but_dearer = self.candidates()
+        # Neither preserves baseline quality, so the fallback decides.
+        self.assertFalse(cheap["preserves_baseline_quality"])
+        self.assertFalse(better_but_dearer["preserves_baseline_quality"])
+
+        selected, rule, confirmatory = select_threshold_configuration(
+            [cheap, better_but_dearer]
+        )
+        self.assertEqual((selected["lower"], selected["upper"]), (0.15, 0.65))
+        # And it is NOT what the old normalization would have picked.
+        self.assertNotEqual(
+            (selected["lower"], selected["upper"]),
+            (cheap["lower"], cheap["upper"]),
+        )
         self.assertFalse(confirmatory)
         self.assertIs(rule, FALLBACK_SELECTION_RULE)
 
+    def test_the_old_cost_was_the_correct_cost_times_the_constant(self):
+        # The relationship stated as an identity, since it is the whole of the
+        # finding: the old objective used an exchange rate inflated by the
+        # subclaims-per-sentence factor.
+        for record in self.candidates():
+            old_cost = record["avg_documents"] / self.MAX_DOCS
+            self.assertAlmostEqual(
+                old_cost,
+                record["normalized_document_cost"] * self.SUBCLAIMS_PER_SENTENCE,
+            )
+
+
+class TestFallbackRemainsNonConfirmatory(unittest.TestCase):
     def test_a_fallback_selection_is_never_confirmatory(self):
         candidates = [
             record_for(
@@ -384,12 +471,23 @@ class FakeCompleted:
 
 
 class RecordingGit:
-    """Records every git invocation so 'before git add' can be asserted."""
+    """Records every git invocation so ordering can be asserted, not just outcome.
 
-    def __init__(self, branch, staged_returncode=1):
+    ``git diff --cached --quiet`` is now consulted twice -- once BEFORE staging,
+    to refuse a pre-existing dirty index, and once after, to detect that the
+    result files were unchanged. The two are answered separately so a test can
+    say which one it is exercising.
+
+    Return codes follow git: 0 means no staged differences, 1 means there are
+    some, anything else means the check itself failed.
+    """
+
+    def __init__(self, branch, index_before_add=0, index_after_add=1):
         self.branch = branch
-        self.staged_returncode = staged_returncode
+        self.index_before_add = index_before_add
+        self.index_after_add = index_after_add
         self.calls = []
+        self.added = False
 
     def check_output(self, argv, text=True):
         self.calls.append(list(argv))
@@ -397,8 +495,13 @@ class RecordingGit:
 
     def run(self, argv, check=False):
         self.calls.append(list(argv))
+        if argv[:2] == ["git", "add"]:
+            self.added = True
+            return FakeCompleted(0)
         if argv[:3] == ["git", "diff", "--cached"]:
-            return FakeCompleted(self.staged_returncode)
+            return FakeCompleted(
+                self.index_after_add if self.added else self.index_before_add
+            )
         return FakeCompleted(0)
 
     def subcommands(self):
@@ -572,8 +675,8 @@ class TestProtectedBranchSafety(unittest.TestCase):
         self.namespace = load_auto_push_results()
         self.auto_push_results = self.namespace["auto_push_results"]
 
-    def push(self, branch, staged_returncode=1):
-        git = RecordingGit(branch, staged_returncode)
+    def push(self, branch, index_before_add=0, index_after_add=1):
+        git = RecordingGit(branch, index_before_add, index_after_add)
         self.namespace["subprocess"] = git
         self.namespace["datetime"] = __import__("datetime").datetime
         self.namespace["timezone"] = __import__("datetime").timezone
@@ -620,11 +723,99 @@ class TestProtectedBranchSafety(unittest.TestCase):
             self.assertIn(subcommand, git.subcommands())
 
     def test_no_result_changes_remains_a_clean_no_op(self):
-        status, git = self.push("claude/research", staged_returncode=0)
+        # Clean index to begin with, and staging the result files changed
+        # nothing: the existing no-op behaviour, unaffected by the new guard.
+        status, git = self.push(
+            "claude/research", index_before_add=0, index_after_add=0
+        )
         self.assertEqual(status, {"pushed": False, "reason": "no changes"})
         self.assertIn("add", git.subcommands())
         self.assertNotIn("commit", git.subcommands())
         self.assertNotIn("push", git.subcommands())
+
+    def test_a_pre_existing_staged_change_refuses_the_push(self):
+        # `git commit -m` commits EVERYTHING staged. Someone who ran
+        # `git add src/unrelated_work.py` before starting the experiment would
+        # otherwise find that file swept into a commit labelled "update full
+        # experiment results".
+        status, _ = self.push("claude/research", index_before_add=1)
+        self.assertFalse(status["pushed"])
+        self.assertEqual(status["reason"], "pre-existing staged changes")
+        self.assertEqual(status["branch"], "claude/research")
+
+    def test_a_dirty_index_is_never_staged_committed_or_pushed(self):
+        _, git = self.push("claude/research", index_before_add=1)
+        subcommands = git.subcommands()
+        self.assertNotIn("add", subcommands)
+        self.assertNotIn("commit", subcommands)
+        self.assertNotIn("push", subcommands)
+
+    def test_a_dirty_index_is_not_unstaged_or_partially_committed(self):
+        # Fail closed: the index belongs to whoever staged it. Nothing is
+        # reset, restored or stashed to work around the refusal.
+        _, git = self.push("claude/research", index_before_add=1)
+        for repair in ("reset", "restore", "stash", "checkout", "rm"):
+            self.assertNotIn(repair, git.subcommands())
+
+    def test_the_refusal_message_says_the_results_are_still_on_disk(self):
+        self.push("claude/research", index_before_add=1)
+        self.assertIn("Result artifacts remain on disk", self.printed)
+        self.assertIn("reviewed and committed separately", self.printed)
+        self.assertIn("existing index was not modified", self.printed)
+
+    def test_an_index_check_error_fails_closed(self):
+        # Any return code but 0 or 1 means the check itself did not work, which
+        # is not a licence to proceed.
+        status, git = self.push("claude/research", index_before_add=128)
+        self.assertFalse(status["pushed"])
+        self.assertEqual(status["reason"], "index check failed")
+        self.assertIn("check itself failed", self.printed)
+        for subcommand in ("add", "commit", "push"):
+            self.assertNotIn(subcommand, git.subcommands())
+
+    def test_the_index_is_checked_before_git_add(self):
+        # Ordering again: a guard that runs after staging has already done the
+        # damage it exists to prevent.
+        _, git = self.push("claude/research")
+        subcommands = git.subcommands()
+        self.assertIn("add", subcommands)
+        self.assertLess(subcommands.index("diff"), subcommands.index("add"))
+
+    def test_a_protected_branch_is_refused_before_the_index_is_even_inspected(self):
+        # Branch safety comes first, so a protected-branch run does not depend
+        # on the index check working at all.
+        _, git = self.push("main", index_before_add=1)
+        self.assertNotIn("diff", git.subcommands())
+        self.assertNotIn("add", git.subcommands())
+
+    def test_a_detached_head_is_refused_before_the_index_is_even_inspected(self):
+        _, git = self.push("HEAD", index_before_add=1)
+        self.assertNotIn("diff", git.subcommands())
+        self.assertNotIn("add", git.subcommands())
+
+    def test_a_clean_index_on_a_feature_branch_still_publishes(self):
+        # The guard must not break the case it is guarding.
+        status, git = self.push(
+            "claude/research", index_before_add=0, index_after_add=1
+        )
+        self.assertTrue(status["pushed"])
+        subcommands = git.subcommands()
+        for subcommand in ("add", "commit", "push"):
+            self.assertIn(subcommand, subcommands)
+        self.assertLess(subcommands.index("add"), subcommands.index("commit"))
+        self.assertLess(subcommands.index("commit"), subcommands.index("push"))
+
+    def test_the_full_refusal_order_is_branch_then_index_then_staging(self):
+        source = (PROJECT_ROOT / "main.py").read_text(encoding="utf-8")
+        positions = [
+            source.index("if branch in PROTECTED_BRANCHES:"),
+            source.index('if not branch or branch == "HEAD":'),
+            source.index("preexisting = subprocess.run("),
+            source.index('subprocess.run(["git", "add"'),
+            source.index('["git", "commit", "-m"'),
+            source.index('subprocess.run(["git", "push"'),
+        ]
+        self.assertEqual(positions, sorted(positions))
 
     def test_the_protected_set_is_the_default_branches(self):
         self.assertEqual(self.namespace["PROTECTED_BRANCHES"], {"main", "master"})
