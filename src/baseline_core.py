@@ -184,13 +184,29 @@ class BSEDetector:
             nli_calls=nli_calls,
         )
 
-    def detect_sentence(self, record, scorer, *, use_cache=True):
-        subclaim_results = [
+    def detect_sentence_with_trace(self, record, scorer, *, use_cache=True):
+        """The sentence result AND the exact subclaim results that produced it.
+
+        Audit finding D-10: ``detect_sentence`` collapsed the per-subclaim
+        retrieval depths into one sentence total and discarded them, so the
+        distribution of stopping depths could not be recovered afterwards.
+
+        The trace is returned from the SAME pass that computes the result, in
+        ``record.subclaims`` order. It is deliberately not obtainable by
+        re-running ``detect_subclaim`` afterwards: that would duplicate NLI
+        work, distort the wall-clock accounting, touch the cache a second time,
+        and -- most importantly -- produce a trace of a *different* computation
+        from the one that produced the sentence result.
+
+        This is instrumentation. No decision in ``detect_subclaim`` observes it,
+        and the aggregation below is the one ``detect_sentence`` always used.
+        """
+        subclaim_results = tuple(
             self.detect_subclaim(subclaim, scorer, use_cache=use_cache)
             for subclaim in record.subclaims
-        ]
+        )
         p_factual = min(result.p_factual for result in subclaim_results)
-        return DetectionResult(
+        sentence_result = DetectionResult(
             p_factual=float(p_factual),
             prediction=cost_based_prediction(
                 p_factual, self.c_miss, self.c_false_alarm
@@ -198,3 +214,16 @@ class BSEDetector:
             documents_used=sum(r.documents_used for r in subclaim_results),
             nli_calls=sum(r.nli_calls for r in subclaim_results),
         )
+        return sentence_result, subclaim_results
+
+    def detect_sentence(self, record, scorer, *, use_cache=True):
+        """Unchanged behaviour: the sentence result alone.
+
+        Delegates so there is exactly ONE aggregation implementation. Two copies
+        would be free to drift, and a traced run could then disagree with an
+        untraced one on the same input.
+        """
+        sentence_result, _ = self.detect_sentence_with_trace(
+            record, scorer, use_cache=use_cache
+        )
+        return sentence_result
