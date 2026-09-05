@@ -19,13 +19,20 @@ from src.ddre_core import (
     ULSIFDensityRatio,
     cost_consistent_thresholds,
 )
-from src.evaluation import evaluate_detector, prediction_rows, summarize_method
+from src.evaluation import (
+    evaluate_detector,
+    evaluate_detector_with_identity,
+    prediction_rows,
+    summarize_method,
+)
 from src.threshold_selection import (
     SAFEGUARD_NOTE,
     candidate_record,
     select_threshold_configuration,
 )
 from src.paired_bootstrap import (
+    CONFIRMATORY_SPLIT_SEED,
+    CONFIRMATORY_VALIDATION_FRACTION,
     BootstrapUnavailable,
     PairedInputMismatch,
     assess_claim,
@@ -430,12 +437,14 @@ def main():
 
         use_cache_for_test = not args.live_inference
         print("\nFinal held-out test evaluation: BSE official...")
-        bse_official_metrics, bse_official_results = evaluate_detector(
-            bse_official,
-            test_records,
-            scorer,
-            description="BSE official test",
-            use_cache=use_cache_for_test,
+        bse_official_metrics, bse_official_results, bse_official_observations = (
+            evaluate_detector_with_identity(
+                bse_official,
+                test_records,
+                scorer,
+                description="BSE official test",
+                use_cache=use_cache_for_test,
+            )
         )
         print("\nFinal held-out test evaluation: BSE Equation 8...")
         bse_eq8_metrics, bse_eq8_results = evaluate_detector(
@@ -446,12 +455,14 @@ def main():
             use_cache=use_cache_for_test,
         )
         print("\nFinal held-out test evaluation: DDRE/uLSIF...")
-        ddre_metrics, ddre_results = evaluate_detector(
-            ddre,
-            test_records,
-            scorer,
-            description="DDRE uLSIF test",
-            use_cache=use_cache_for_test,
+        ddre_metrics, ddre_results, ddre_observations = (
+            evaluate_detector_with_identity(
+                ddre,
+                test_records,
+                scorer,
+                description="DDRE uLSIF test",
+                use_cache=use_cache_for_test,
+            )
         )
 
         comparison = hypothesis_comparison(ddre_metrics, bse_official_metrics)
@@ -464,12 +475,24 @@ def main():
         bootstrap = None
         bootstrap_error = None
         try:
+            # Identity-bearing observations, built inside the evaluation loop,
+            # so "paired" is verified rather than assumed.
             bootstrap = paired_passage_bootstrap(
-                test_records, ddre_results, bse_official_results
+                ddre_observations, bse_official_observations
             )
         except (BootstrapUnavailable, PairedInputMismatch) as exc:
             bootstrap_error = f"{type(exc).__name__}: {exc}"
             print(f"  CONFIRMATORY BOOTSTRAP UNAVAILABLE: {bootstrap_error}")
+
+        # Re-derive the canonical split from the released records with the
+        # FROZEN fraction and seed, and compare passage IDs. "190 passages" is
+        # not the frozen test set; a different 190 would be a different
+        # experiment. No held-out result is inspected to do this.
+        _, _, frozen_split = group_split_records(
+            records,
+            validation_fraction=CONFIRMATORY_VALIDATION_FRACTION,
+            random_state=CONFIRMATORY_SPLIT_SEED,
+        )
 
         claim_assessment = assess_claim(
             bootstrap,
@@ -479,6 +502,18 @@ def main():
             quality_tolerance=args.quality_tolerance,
             smoke_test=args.smoke_test,
             bootstrap_error=bootstrap_error,
+            run_configuration={
+                "c_miss": args.c_miss,
+                "c_false_alarm": args.c_false_alarm,
+                "c_retrieve": args.c_retrieve,
+                "p0": args.p0,
+                "max_docs": args.max_docs,
+                "validation_fraction": args.validation_fraction,
+                "split_seed": RANDOM_STATE,
+            },
+            split_metadata=split_metadata,
+            expected_validation_passage_ids=frozen_split["validation_passage_ids"],
+            expected_test_passage_ids=frozen_split["test_passage_ids"],
         )
         run_timestamp = datetime.now(timezone.utc).isoformat()
 
@@ -523,6 +558,7 @@ def main():
                 ),
             },
             "split": split_metadata,
+            "confirmatory_split_identity": claim_assessment["split_identity"],
             "execution_sentences": {
                 "validation": len(validation_records),
                 "test": len(test_records),
@@ -650,6 +686,14 @@ def main():
               f"{claim_assessment['nli_efficiency_superiority_pass']}")
         print("  validation selection confirmatory: "
               f"{claim_assessment['validation_selection_confirmatory']}")
+        print("  bootstrap provenance matches frozen protocol: "
+              f"{claim_assessment['bootstrap_provenance_matches_frozen_protocol']}")
+        print("  run configuration matches frozen: "
+              f"{claim_assessment['run_configuration_matches_frozen']}")
+        print("  held-out split matches frozen: "
+              f"{claim_assessment['split_matches_frozen']}")
+        for disqualifier in claim_assessment["confirmatory_disqualifiers"]:
+            print(f"    ! {disqualifier}")
         print(f"  CLAIM STATUS: {claim_assessment['claim_status']}")
         print(f"  {claim_assessment['interpretation']}")
         print("=" * 88)

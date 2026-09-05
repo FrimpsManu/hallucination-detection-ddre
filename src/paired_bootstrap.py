@@ -37,6 +37,8 @@ adjustment is applied. No p-values are produced.
 Standard library, numpy, and the repository's single Wang PR-AUC helper.
 """
 
+import hashlib
+import json
 import math
 
 import numpy as np
@@ -56,6 +58,31 @@ CONFIRMATORY_BOOTSTRAP_SEED = 42
 CONFIRMATORY_CI_LEVEL = 0.95
 CONFIRMATORY_BOOTSTRAP_UNIT = "passage"
 CONFIRMATORY_CI_METHOD = "percentile"
+
+# The frozen primary comparator and split. The CLI can still change any of
+# these -- alternative configurations remain valid for exploratory work -- but a
+# run that differs from these values is NOT the run this protocol pre-registered
+# and cannot produce a confirmatory claim, however good its numbers look.
+CONFIRMATORY_C_MISS = 28.0
+CONFIRMATORY_C_FALSE_ALARM = 96.0
+CONFIRMATORY_C_RETRIEVE = 1.0
+CONFIRMATORY_P0 = 0.5
+CONFIRMATORY_MAX_DOCS = 10
+CONFIRMATORY_VALIDATION_FRACTION = 0.20
+CONFIRMATORY_SPLIT_SEED = 42
+
+FROZEN_RUN_CONFIGURATION = {
+    "c_miss": CONFIRMATORY_C_MISS,
+    "c_false_alarm": CONFIRMATORY_C_FALSE_ALARM,
+    "c_retrieve": CONFIRMATORY_C_RETRIEVE,
+    "p0": CONFIRMATORY_P0,
+    "max_docs": CONFIRMATORY_MAX_DOCS,
+    "validation_fraction": CONFIRMATORY_VALIDATION_FRACTION,
+    "split_seed": CONFIRMATORY_SPLIT_SEED,
+}
+
+PERFORMANCE_SIGN_CONVENTION = "DDRE - BSE; positive favours DDRE"
+EFFICIENCY_SIGN_CONVENTION = "BSE - DDRE; positive favours DDRE"
 
 CLAIM_SUPPORTED = "SUPPORTED"
 CLAIM_NOT_SUPPORTED = "NOT_SUPPORTED"
@@ -97,45 +124,93 @@ def _wang_pr_auc():
     return wang_pr_auc
 
 
-def validate_paired_inputs(records, ddre_results, baseline_results):
+def validate_paired_inputs(ddre_observations, baseline_observations):
     """Confirm the two methods were scored on the identical sentence sequence.
 
-    A paired analysis is only paired if position *i* means the same sentence in
-    both result lists. Nothing downstream can detect a misalignment, so it is
-    checked here.
+    This compares **identities**, not just lengths. Two result lists of equal
+    length look paired even when one is permuted, and nothing downstream can
+    detect that -- the analysis would silently difference method A on sentence
+    *i* against method B on some other sentence. So every position must agree on
+    ``(passage_index, sentence_index, gold_label)``, and the first disagreement
+    raises with the position and both identities.
+
+    The identities come from ``EvaluatedSentence`` observations built inside the
+    evaluation loop, so they record what was actually scored rather than what a
+    later caller assumed.
     """
-    if not records:
-        raise PairedInputMismatch("no records to bootstrap over")
-    if not (len(records) == len(ddre_results) == len(baseline_results)):
+    if not ddre_observations:
+        raise PairedInputMismatch("no observations to bootstrap over")
+    if len(ddre_observations) != len(baseline_observations):
         raise PairedInputMismatch(
-            "paired bootstrap requires one result per record for each method: "
-            f"{len(records)} records, {len(ddre_results)} DDRE results, "
-            f"{len(baseline_results)} baseline results"
+            "paired bootstrap requires one observation per sentence for each "
+            f"method: {len(ddre_observations)} DDRE, "
+            f"{len(baseline_observations)} baseline"
         )
-    labels = [int(record.label) for record in records]
+
+    seen = {}
+    for position, (ddre, baseline) in enumerate(
+        zip(ddre_observations, baseline_observations)
+    ):
+        if ddre.identity != baseline.identity:
+            raise PairedInputMismatch(
+                "DDRE and BSE were not evaluated on the same sentence at "
+                f"position {position}: DDRE identity "
+                f"(passage={ddre.passage_index}, sentence={ddre.sentence_index}, "
+                f"label={ddre.gold_label}) vs baseline identity "
+                f"(passage={baseline.passage_index}, "
+                f"sentence={baseline.sentence_index}, "
+                f"label={baseline.gold_label}). The analysis is not paired."
+            )
+        key = (ddre.passage_index, ddre.sentence_index)
+        if key in seen:
+            raise PairedInputMismatch(
+                f"sentence identity {key} appears at positions {seen[key]} and "
+                f"{position}. The released Wang data has one row per "
+                "(passage, sentence), so a duplicate means the evaluated set was "
+                "built wrongly; resampling it would double-count that sentence."
+            )
+        seen[key] = position
+
+    # Implied by the positional equality above, but asserted explicitly because
+    # the passage grouping is what the cluster bootstrap resamples.
+    ddre_passages = {}
+    baseline_passages = {}
+    for ddre, baseline in zip(ddre_observations, baseline_observations):
+        ddre_passages.setdefault(ddre.passage_index, []).append(ddre.sentence_index)
+        baseline_passages.setdefault(baseline.passage_index, []).append(
+            baseline.sentence_index
+        )
+    if ddre_passages != baseline_passages:
+        raise PairedInputMismatch(
+            "the passage membership implied by the two methods' identities "
+            "differs, so the cluster bootstrap would resample different blocks "
+            "for each method"
+        )
+
+    labels = [int(o.gold_label) for o in ddre_observations]
     if len(set(labels)) < 2:
         raise PairedInputMismatch(
             "the evaluated sentences contain only one class, so PR-AUC is "
             "undefined for the observed sample"
         )
     return {
-        "sentences": len(records),
-        "passages": len({record.passage_index for record in records}),
+        "sentences": len(ddre_observations),
+        "passages": len(ddre_passages),
         "factual_sentences": int(sum(labels)),
         "nonfactual_sentences": int(len(labels) - sum(labels)),
     }
 
 
-def passage_blocks(records):
-    """Sentence indices grouped by passage, in first-appearance order.
+def passage_blocks(observations):
+    """Sentence positions grouped by passage, in first-appearance order.
 
     The blocks are the resampling unit. Order is deterministic so a seed fully
     determines a replicate.
     """
     order = []
     blocks = {}
-    for index, record in enumerate(records):
-        key = record.passage_index
+    for index, observation in enumerate(observations):
+        key = observation.passage_index
         if key not in blocks:
             blocks[key] = []
             order.append(key)
@@ -157,14 +232,18 @@ def replicate_indices(blocks, rng):
     return np.asarray(indices, dtype=int), draw
 
 
-def _method_arrays(records, results):
+def _method_arrays(observations):
     return {
-        "label": np.asarray([int(r.label) for r in records], dtype=int),
-        "p_factual": np.asarray([float(r.p_factual) for r in results], dtype=float),
-        "documents": np.asarray(
-            [float(r.documents_used) for r in results], dtype=float
+        "label": np.asarray([int(o.gold_label) for o in observations], dtype=int),
+        "p_factual": np.asarray(
+            [float(o.result.p_factual) for o in observations], dtype=float
         ),
-        "nli_calls": np.asarray([float(r.nli_calls) for r in results], dtype=float),
+        "documents": np.asarray(
+            [float(o.result.documents_used) for o in observations], dtype=float
+        ),
+        "nli_calls": np.asarray(
+            [float(o.result.nli_calls) for o in observations], dtype=float
+        ),
     }
 
 
@@ -223,9 +302,8 @@ def percentile_interval(values, ci_level=CONFIRMATORY_CI_LEVEL):
 
 
 def paired_passage_bootstrap(
-    records,
-    ddre_results,
-    baseline_results,
+    ddre_observations,
+    baseline_observations,
     *,
     n_resamples=CONFIRMATORY_BOOTSTRAP_RESAMPLES,
     seed=CONFIRMATORY_BOOTSTRAP_SEED,
@@ -233,14 +311,14 @@ def paired_passage_bootstrap(
     pr_auc=None,
 ):
     """Paired cluster bootstrap over passages. Returns observed values and CIs."""
-    shape = validate_paired_inputs(records, ddre_results, baseline_results)
+    shape = validate_paired_inputs(ddre_observations, baseline_observations)
     pr_auc = _wang_pr_auc() if pr_auc is None else pr_auc
 
-    ddre_arrays = _method_arrays(records, ddre_results)
-    baseline_arrays = _method_arrays(records, baseline_results)
-    blocks = passage_blocks(records)
+    ddre_arrays = _method_arrays(ddre_observations)
+    baseline_arrays = _method_arrays(baseline_observations)
+    blocks = passage_blocks(ddre_observations)
 
-    observed_indices = np.arange(len(records), dtype=int)
+    observed_indices = np.arange(len(ddre_observations), dtype=int)
     observed = _paired_deltas(
         _metrics_on(ddre_arrays, observed_indices, pr_auc),
         _metrics_on(baseline_arrays, observed_indices, pr_auc),
@@ -275,9 +353,9 @@ def paired_passage_bootstrap(
             "seed": int(seed),
             "bootstrap_unit": CONFIRMATORY_BOOTSTRAP_UNIT,
             "sign_convention": (
-                "DDRE - BSE; positive favours DDRE"
+                PERFORMANCE_SIGN_CONVENTION
                 if name in PERFORMANCE_ENDPOINTS
-                else "BSE - DDRE; positive favours DDRE"
+                else EFFICIENCY_SIGN_CONVENTION
             ),
         }
 
@@ -297,6 +375,159 @@ def paired_passage_bootstrap(
         ),
         "endpoints": endpoints,
     }
+
+
+def validate_bootstrap_provenance(bootstrap):
+    """Every way the recorded bootstrap can fail to be the frozen one.
+
+    Without this the pre-registration is only a comment: a 200-resample,
+    seed-7, 80%-interval bootstrap could be handed to ``assess_claim`` and
+    receive SUPPORTED if its bounds happened to pass. Exploratory bootstraps
+    remain perfectly legal -- they simply cannot produce a confirmatory claim.
+
+    Nothing is repaired. Every mismatch is listed, so a reader sees exactly
+    which part of the protocol the run departed from.
+    """
+    if not bootstrap:
+        return ["no bootstrap record was produced"]
+
+    mismatches = []
+    for field, expected in (
+        ("bootstrap_unit", CONFIRMATORY_BOOTSTRAP_UNIT),
+        ("n_resamples", CONFIRMATORY_BOOTSTRAP_RESAMPLES),
+        ("seed", CONFIRMATORY_BOOTSTRAP_SEED),
+        ("ci_level", CONFIRMATORY_CI_LEVEL),
+        ("ci_method", CONFIRMATORY_CI_METHOD),
+    ):
+        actual = bootstrap.get(field)
+        if actual != expected:
+            mismatches.append(
+                f"bootstrap {field} is {actual!r}, frozen protocol requires "
+                f"{expected!r}"
+            )
+
+    endpoints = bootstrap.get("endpoints") or {}
+    for name in BOOTSTRAP_ENDPOINTS:
+        if name not in endpoints:
+            mismatches.append(f"bootstrap is missing required endpoint {name!r}")
+            continue
+        endpoint = endpoints[name]
+        # An endpoint that disagrees with its own parent record describes a
+        # different analysis from the one the header claims.
+        for field in ("n_resamples", "seed", "ci_level", "ci_method", "bootstrap_unit"):
+            if endpoint.get(field) != bootstrap.get(field):
+                mismatches.append(
+                    f"endpoint {name!r} records {field}="
+                    f"{endpoint.get(field)!r} but the bootstrap header records "
+                    f"{bootstrap.get(field)!r}"
+                )
+        expected_sign = (
+            PERFORMANCE_SIGN_CONVENTION
+            if name in PERFORMANCE_ENDPOINTS
+            else EFFICIENCY_SIGN_CONVENTION
+        )
+        if endpoint.get("sign_convention") != expected_sign:
+            mismatches.append(
+                f"endpoint {name!r} records sign convention "
+                f"{endpoint.get('sign_convention')!r}, frozen protocol requires "
+                f"{expected_sign!r}"
+            )
+        if endpoint.get("ci_lower") is None or endpoint.get("ci_upper") is None:
+            mismatches.append(f"endpoint {name!r} has no confidence interval")
+    return mismatches
+
+
+def validate_run_configuration(run_configuration):
+    """The run must BE the pre-registered run, not merely resemble it.
+
+    ``confirmatory_protocol()`` states the comparator is BSE official at
+    C_M=28, C_FA=96, c_retrieve=1. The CLI can change every one of those, so a
+    ``--c-miss 14`` run could otherwise report SUPPORTED against a protocol
+    document describing a different comparator.
+    """
+    if not run_configuration:
+        return ["the run configuration was not recorded"]
+    mismatches = []
+    for field, expected in FROZEN_RUN_CONFIGURATION.items():
+        if field not in run_configuration:
+            mismatches.append(f"run configuration does not record {field!r}")
+            continue
+        actual = run_configuration[field]
+        if actual is None or float(actual) != float(expected):
+            mismatches.append(
+                f"run {field} is {actual!r}, frozen confirmatory configuration "
+                f"requires {expected!r}"
+            )
+    return mismatches
+
+
+def split_identity(validation_passage_ids, test_passage_ids):
+    """A stable fingerprint of a split, for recording and comparison."""
+    payload = json.dumps(
+        {
+            "validation": sorted(int(x) for x in validation_passage_ids),
+            "test": sorted(int(x) for x in test_passage_ids),
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    return {
+        "validation_passages": len(set(int(x) for x in validation_passage_ids)),
+        "test_passages": len(set(int(x) for x in test_passage_ids)),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def validate_split_identity(split_metadata, expected_validation_ids, expected_test_ids):
+    """The held-out set must be the canonical split, by IDENTITY not by size.
+
+    "190 passages" is not the frozen test set -- a *different* 190 passages is a
+    different test set, and would silently make the held-out evaluation a
+    different experiment. So the actual passage IDs are compared against the
+    split re-derived from the released records with the frozen fraction and
+    seed, and no result is inspected to do it.
+    """
+    if not split_metadata:
+        return ["the split metadata was not recorded"], None
+
+    mismatches = []
+    for field, expected in (
+        ("validation_fraction", CONFIRMATORY_VALIDATION_FRACTION),
+        ("random_state", CONFIRMATORY_SPLIT_SEED),
+    ):
+        actual = split_metadata.get(field)
+        if actual is None or float(actual) != float(expected):
+            mismatches.append(
+                f"split {field} is {actual!r}, frozen confirmatory split "
+                f"requires {expected!r}"
+            )
+
+    actual_validation = [int(x) for x in split_metadata.get("validation_passage_ids", [])]
+    actual_test = [int(x) for x in split_metadata.get("test_passage_ids", [])]
+    expected_validation = sorted(int(x) for x in expected_validation_ids)
+    expected_test = sorted(int(x) for x in expected_test_ids)
+
+    identity = split_identity(actual_validation, actual_test)
+    expected_identity = split_identity(expected_validation, expected_test)
+    identity["expected_sha256"] = expected_identity["sha256"]
+    identity["matches_frozen_split"] = identity["sha256"] == expected_identity["sha256"]
+
+    if sorted(actual_validation) != expected_validation:
+        mismatches.append(
+            "the validation passage IDs are not the frozen split "
+            f"({len(actual_validation)} recorded vs "
+            f"{len(expected_validation)} expected; "
+            f"{len(set(actual_validation) ^ set(expected_validation))} differ). "
+            "A different set of passages is a different experiment, even at the "
+            "same size."
+        )
+    if sorted(actual_test) != expected_test:
+        mismatches.append(
+            "the held-out passage IDs are not the frozen split "
+            f"({len(actual_test)} recorded vs {len(expected_test)} expected; "
+            f"{len(set(actual_test) ^ set(expected_test))} differ). A different "
+            "set of passages is a different held-out set, even at the same size."
+        )
+    return mismatches, identity
 
 
 def confirmatory_protocol():
@@ -319,6 +550,21 @@ def confirmatory_protocol():
         "primary_performance_endpoints": list(PERFORMANCE_ENDPOINTS),
         "primary_efficiency_endpoint": PRIMARY_EFFICIENCY_ENDPOINT,
         "secondary_efficiency_endpoint": SECONDARY_EFFICIENCY_ENDPOINT,
+        "frozen_run_configuration": dict(FROZEN_RUN_CONFIGURATION),
+        "frozen_split_requirement": (
+            "The held-out set must be the canonical split: validation_fraction "
+            f"{CONFIRMATORY_VALIDATION_FRACTION}, random_state "
+            f"{CONFIRMATORY_SPLIT_SEED}, and the ACTUAL validation/test passage "
+            "IDs must equal the split re-derived from the released records. A "
+            "different set of passages of the same size is a different held-out "
+            "set."
+        ),
+        "bootstrap_provenance_requirement": (
+            "The bootstrap record and every endpoint must carry the frozen "
+            "bootstrap_unit, n_resamples, seed, ci_level, ci_method and sign "
+            "conventions. Exploratory bootstraps with other settings are "
+            "allowed but can never produce a confirmatory claim."
+        ),
         "primary_claim_rule": (
             "CONJUNCTIVE (intersection-union). The primary claim is supported "
             "only if the validation threshold selection was confirmatory, the "
@@ -353,6 +599,10 @@ def assess_claim(
     quality_tolerance,
     smoke_test=False,
     bootstrap_error=None,
+    run_configuration=None,
+    split_metadata=None,
+    expected_validation_passage_ids=None,
+    expected_test_passage_ids=None,
 ):
     """Structured claim assessment. Every gate is recorded separately.
 
@@ -365,6 +615,25 @@ def assess_claim(
         float(quality_tolerance), margin, rel_tol=0.0, abs_tol=1e-12
     )
     bootstrap_available = bootstrap is not None and bootstrap_error is None
+
+    # Every way this run can fail to BE the pre-registered run. Each is a
+    # disqualifier, never a negative result.
+    provenance_mismatches = (
+        validate_bootstrap_provenance(bootstrap) if bootstrap_available else []
+    )
+    configuration_mismatches = validate_run_configuration(run_configuration)
+    split_mismatches, split_identity_record = ([], None)
+    if expected_validation_passage_ids is not None:
+        split_mismatches, split_identity_record = validate_split_identity(
+            split_metadata,
+            expected_validation_passage_ids,
+            expected_test_passage_ids or [],
+        )
+    else:
+        split_mismatches = [
+            "the frozen split was not verified: no expected passage IDs were "
+            "supplied for comparison"
+        ]
 
     disqualifiers = []
     if smoke_test:
@@ -385,10 +654,17 @@ def assess_claim(
             "the confirmatory bootstrap is unavailable"
             + (f": {bootstrap_error}" if bootstrap_error else "")
         )
+    disqualifiers.extend(provenance_mismatches)
+    disqualifiers.extend(configuration_mismatches)
+    disqualifiers.extend(split_mismatches)
     confirmatory_eligible = not disqualifiers
 
     def lower_bound(name):
-        return bootstrap["endpoints"][name]["ci_lower"] if bootstrap_available else None
+        """None when absent: a missing endpoint fails its gate, it never raises."""
+        if not bootstrap_available:
+            return None
+        endpoint = (bootstrap.get("endpoints") or {}).get(name)
+        return None if endpoint is None else endpoint.get("ci_lower")
 
     performance = {}
     for name, key in (
@@ -454,6 +730,15 @@ def assess_claim(
         ),
         "validation_tolerance_matches_frozen_margin": tolerance_matches,
         "bootstrap_available": bootstrap_available,
+        "bootstrap_provenance_matches_frozen_protocol": not provenance_mismatches,
+        "bootstrap_provenance_mismatches": provenance_mismatches,
+        "run_configuration": run_configuration,
+        "run_configuration_matches_frozen": not configuration_mismatches,
+        "run_configuration_mismatches": configuration_mismatches,
+        "frozen_run_configuration": dict(FROZEN_RUN_CONFIGURATION),
+        "split_identity": split_identity_record,
+        "split_matches_frozen": not split_mismatches,
+        "split_mismatches": split_mismatches,
         "performance_noninferiority": performance,
         "retrieval_efficiency_superiority_pass": retrieval_pass,
         "retrieval_efficiency_ci_lower": retrieval_bound,
