@@ -67,7 +67,7 @@ Two things are in good shape and should be stated plainly:
 | ID | Severity | Location | Scientific issue | Why it matters | Recommended action |
 | --- | --- | --- | --- | --- | --- |
 | D-01 | **BLOCKER — RESOLVED by PR #8** | `main.py::tune_ddre_thresholds`, `ddre_core.py::DDREDetector.detect_subclaim` | The lower stopping grid is `{0.05 … 0.40}`; the CM=28/CFA=96 classification threshold is `0.225806`. For `lower ∈ {0.25, 0.30, 0.35, 0.40}` the detector can stop *because it is confident of hallucination* and the cost rule then labels the claim **factual**. | The two rules disagree on the same posterior. The selector is lexicographic — average documents first, PR-AUC only on exact ties — and a larger `lower` stops earlier, so within the feasible set nothing but the document count pushes back on choosing a contradictory threshold. | **Done (PR #8):** §7 option 1 — `cost_decision_threshold` is the single source of the arithmetic, `DDREDetector` refuses `lower > t` or `upper ≤ t` at construction, and `cost_consistent_thresholds` filters the tuner's grid from the *configured* costs. See §10. |
-| D-03 | **MAJOR / NEEDS EMPIRICAL CHECK** | `ddre_core.py::ULSIFDensityRatio.ratio` | The estimate is most empirically constrained where the training data provide local support. Sparse and tail regions are more sensitive to bandwidth, regularisation and kernel extrapolation, so the ratio there can be large or small for reasons that are not evidential. | A large ratio is **not** by itself a defect — where factual support is strong and hallucinated support is weak, a large ratio is exactly what the estimator should report. The question is whether large values come from stable local support or from weak-support instability, and that is **unmeasured** on the actual NBC fit; the demonstrations below use synthetic scores and establish only the mechanism. | Before tuning, run the measurement in §4-A over the fitted score support, **distinguishing large-but-stable ratios from weak-support instability**. Pre-register a per-document log-evidence sensitivity analysis only if the measurement warrants it. **Do not choose a cap value yet.** |
+| D-03 | **MAJOR / NEEDS EMPIRICAL CHECK** — **DIAGNOSTIC PROTOCOL FROZEN / INSTRUMENTED by PR #13** (empirical run still required) | `ddre_core.py::ULSIFDensityRatio.ratio` | The estimate is most empirically constrained where the training data provide local support. Sparse and tail regions are more sensitive to bandwidth, regularisation and kernel extrapolation, so the ratio there can be large or small for reasons that are not evidential. | A large ratio is **not** by itself a defect — where factual support is strong and hallucinated support is weak, a large ratio is exactly what the estimator should report. The question is whether large values come from stable local support or from weak-support instability, and that is **unmeasured** on the actual NBC fit; the demonstrations below use synthetic scores and establish only the mechanism. | Before tuning, run the measurement in §4-A over the fitted score support, **distinguishing large-but-stable ratios from weak-support instability**. Pre-register a per-document log-evidence sensitivity analysis only if the measurement warrants it. **Do not choose a cap value yet.** |
 | D-02 | MAJOR — **REPORTED by PR #12** (not corrected) | `ddre_core.py::detect_subclaim` vs `baseline_core.py::detect_subclaim` | Algorithm/protocol asymmetry. BSE's stop/continue rule is decision-theoretic (expected cost of retrieving vs stopping) and can decline the **first** fetch, retrieving **0** documents. DDRE's rule is a fixed probability band evaluated after an update, so it has a floor of **one retrieval per non-empty evaluated subclaim**. | Retrieval counts have different origins. On the 190-passage held-out split that floor is **2,387 documents** (all test subclaims are non-empty); DDRE must spend that before it can win on cost, and where BSE retrieves 0, DDRE cannot win at all. **This currently disadvantages DDRE.** | Report BSE's zero-retrieval frequency and the retrieval-floor difference alongside the efficiency numbers. A threshold pre-check does **not** fix this (see §6); giving DDRE a Bayes-risk pre-retrieval decision would be a **stopping-rule redesign**, not a small fairness fix. **Done (PR #12), as reporting:** the summary now carries `retrieval_protocol_asymmetry` with BSE's observed zero-retrieval frequency, DDRE's structural floor and the documents above it. Both stopping protocols are unchanged, and no floor adjustment enters the confirmatory endpoint. See §14. |
 | D-07 | MAJOR — **RESOLVED by PR #10** | `main.py::tune_ddre_thresholds` → `src/threshold_selection.py` | The feasibility test constrains only `factual_auc_pr` and `balanced_pr_auc`. Nonfactual AUC-PR — Wang's headline metric — is unconstrained. | Balanced PR-AUC is the mean of the two, so a large factual gain can mask a nonfactual loss and still qualify. The tuner may select a configuration that is worse at detecting hallucination. | **Done (PR #10):** feasibility now requires nonfactual AND factual AND balanced PR-AUC, each within the validation tolerance; all three booleans and all three deltas are recorded per candidate. The rule moved into `src/threshold_selection.py` so it is reviewable on its own. See §12. |
 | D-08 | MAJOR — **RESOLVED by PR #10** | `main.py::hypothesis_comparison` → `src/paired_bootstrap.py` | `hypothesis_supported_on_test` requires `factual_delta > 0` and `balanced_delta ≥ 0`, with no nonfactual floor and **no uncertainty quantification of any kind**. | A single point estimate is written into the summary as a scientific conclusion, over three methods and several metrics, with no interval and no multiplicity control. | **Done (PR #10):** the point-estimate boolean is gone. The claim now comes from a pre-registered paired passage-level cluster bootstrap with a conjunctive rule and three claim statuses, and the pre-registration is **enforced**: bootstrap provenance, the actual run configuration and the split's passage IDs are each verified before a claim can be confirmatory, and the pairing is checked by per-sentence identity attached at evaluation time. See §12 and `docs/confirmatory_statistical_protocol.md`. |
@@ -1180,3 +1180,61 @@ the pre-first-fetch stop being measured.
 
 **Not resolved by PR #12:** D-03 and D-09 remain open. D-03 — the density-ratio
 support and stability question — is the next major pre-tuning empirical task.
+
+---
+
+## 15. Status update — PR #13
+
+### D-03 — DIAGNOSTIC PROTOCOL FROZEN / INSTRUMENTED. **Empirical run still required before tuning.**
+
+**D-03 is NOT resolved.** PR #13 pre-registers and implements the measurement;
+it does not run it. The full protocol is
+`docs/d03_density_ratio_diagnostic_protocol.md`; the methodology lives in
+`src/density_ratio_diagnostics.py` (pure, GPU-free, unit-tested) and the runner
+in `scripts/diagnose_ddre_ratio_support.py`.
+
+The finding is often misread as "large density ratios are wrong". It is not: a
+large ratio is what a density-ratio estimator should produce where the classes
+separate. The measurable question is whether the evidence DDRE consumes is
+**supported** by the training score regions and **stable** across the production
+uLSIF hyperparameter surface — separating large-but-stable evidence from
+tail-driven evidence.
+
+Frozen by this PR, before any real number exists:
+
+* **Validation only**, threshold-independent: all candidate documents for all
+  validation subclaims up to `max_docs = 10` (48 passages, 383 sentences, 603
+  subclaims, 5,969 document occurrences, 603 first documents). The held-out
+  split is never scored, and the validation split is verified by passage
+  **identity**, not count. Running DDRE first and inspecting only what it
+  retrieved would condition the diagnostic on the untuned stopping policy.
+* **Canonical batch-1 Wang-fidelity scorer**, gated by the existing
+  `provenance_guard` / `score_compatibility` machinery, with the fixed 398-pair
+  exact-equality probe and the source digest measured on both sides of it. The
+  formal cache is read-only; new scores go to a derived cache bound to the
+  certified digest.
+* The historical limitation is **preserved**: `checkpoint_identity_established`
+  may remain false because the v2 Gate report did not record its Hub revision.
+  D-03 relies instead on the directly measured
+  `score_compatibility_established`.
+* **Support strata** `0 / 1-2 / 3-4 / 5-9 / >=10`, measured in the kernel's own
+  normalized space at a radius of the selected sigma. No single "weak support"
+  cutoff is declared.
+* **Full sigma/lambda sensitivity** over exactly the production `cv_table`
+  pairs, with the selected fit's final centre set held fixed so the surface
+  isolates the hyperparameters.
+* **The general log-odds one-document rule** with the actual cost-consistent
+  CM=28/CFA=96 grid, reporting low / high / either separately. `|log r|` is not
+  used as the criterion.
+* **Three escalation triggers**, and no magnitude criterion anywhere. They can
+  conclude only that a *separate* cap/calibration study is required; the
+  diagnostic never emits a cap (`selected_cap` and `selected_calibration` are
+  always `null`, `method_change_made` always `false`). A false result means the
+  predeclared criteria did not fire, **not** that uLSIF is proven correct.
+* **D-13** is measured descriptively from the two score populations the
+  diagnostic already holds. It is not corrected and **not marked resolved**.
+
+`--dry-run` reports the exact measurement population without loading a model,
+so it can be reviewed before any GPU time is spent.
+
+**Not resolved by PR #13:** D-03 (protocol only), D-09 and D-13 remain open.
