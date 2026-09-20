@@ -37,16 +37,21 @@ from src.wang_original import (  # noqa: E402
     COST_CONFIGURATIONS,
     WANG_PINNED_COMMIT,
     WANG_REPO_URL,
+    OurGate1Unreadable,
     WangCheckoutInvalid,
+    WangEnvironmentUnusable,
     WangOutputUnparsed,
     build_command,
     comparison,
     environment_provenance,
+    failure_reasons,
     nbc_counts,
+    our_gate1_metrics,
     parse_histograms,
     parse_metrics,
     released_data_fingerprint,
     run_label,
+    run_succeeded,
     verify_checkout,
 )
 
@@ -125,28 +130,17 @@ def selected_configurations(args):
     return chosen
 
 
-def our_gate1_metrics(path):
+def read_our_gate1(path):
     """Read our formal Gate 1 report READ-ONLY for the comparison column.
 
-    Only the reproduced numbers are lifted out. None of our code is imported
-    and the file is never written.
+    Opened for reading only; none of our code is imported. Parsing lives in
+    ``src.wang_original.our_gate1_metrics``, which knows the artifact's real
+    shape and raises rather than returning blanks.
     """
     if not path:
         return None
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    reproduced = payload.get("reproduced") or {}
-    out = {}
-    for config_name, block in reproduced.items():
-        if isinstance(block, dict):
-            out[config_name] = {
-                key: block.get(key)
-                for key in (
-                    "accuracy", "nonfactual_auc_pr", "factual_auc_pr",
-                    "pearson", "spearman", "evidence_num_per_sentence",
-                    "evidence_num_per_subclaim",
-                )
-            }
-    return out or None
+    return our_gate1_metrics(payload)
 
 
 def run_configuration(config_name, c_miss, c_false_alarm, args, output_dir, device):
@@ -202,11 +196,22 @@ def run_configuration(config_name, c_miss, c_false_alarm, args, output_dir, devi
         record["parsed"] = False
         record["parse_error"] = str(exc)
 
+    # A non-zero exit is a failed run whatever its stdout contains: main.py
+    # prints its metric block before it can still fail afterwards, and a
+    # timed-out process may have emitted a full-looking block from a partial
+    # evaluation.
+    record["succeeded"] = run_succeeded(record)
+    record["failure_reasons"] = failure_reasons(record)
+
     (output_dir / f"{config_name}_metrics.json").write_text(
         json.dumps(record, indent=2), encoding="utf-8"
     )
-    print(f"[{config_name}] rc={returncode} parsed={record['parsed']} "
+    print(f"[{config_name}] rc={returncode} timed_out={timed_out} "
+          f"parsed={record['parsed']} succeeded={record['succeeded']} "
           f"{elapsed:.1f}s")
+    if record["failure_reasons"]:
+        for reason in record["failure_reasons"]:
+            print(f"    ! {reason}")
     if record["parsed"]:
         for key, value in record["metrics"].items():
             print(f"    {key:30s} {value}")
@@ -239,15 +244,28 @@ def main():
         return 1
     fingerprint = released_data_fingerprint(args.wang_checkout)
     counts = nbc_counts(args.wang_checkout)
-    environment = environment_provenance()
+    # Probed in a SUBPROCESS using args.python -- the interpreter that will
+    # actually run Wang -- so the harness's own virtualenv cannot leak in.
+    try:
+        environment = environment_provenance(args.python)
+    except WangEnvironmentUnusable as exc:
+        print(f"\nABORTED: {exc}")
+        return 1
     device = environment["device"].get("selected_device") or "cpu"
 
     print(f"\n  HEAD:            {checkout_state['head_commit']}")
+    print(f"  HEAD tree:       {checkout_state['head_tree']}")
     print(f"  commit matches:  {checkout_state['commit_matches']}")
     print(f"  clean:           {not checkout_state['dirty']}")
     print(f"  NBC positive:    {counts['positive']}   (observed, not forced to 200)")
     print(f"  NBC negative:    {counts['negative']}   (observed, not forced to 200)")
-    print(f"  device:          {device}")
+    print(f"  probed python:   {environment['probed_interpreter']}")
+    print(f"  python version:  {environment['python']}")
+    print(f"  libraries:       " + ", ".join(
+        f"{k}={v}" for k, v in environment["libraries"].items()
+    ))
+    print(f"  device:          {device}  (cuda_available="
+          f"{environment['device'].get('cuda_available')})")
     print(f"  run label:       {run_label('*', device)}")
     print("\n  released data fingerprints:")
     for relative, info in fingerprint.items():
@@ -308,7 +326,9 @@ def main():
             name, c_miss, c_false_alarm, args, output_dir, device
         )
         results.append(record)
-        if record["parsed"]:
+        # Only a SUCCEEDED run contributes numbers to the comparison. Metrics
+        # scraped from a failed or truncated process are not a measurement.
+        if record["succeeded"]:
             wang_metrics[name] = record["metrics"]
 
     provenance["runs"] = [
@@ -318,9 +338,13 @@ def main():
         json.dumps(provenance, indent=2), encoding="utf-8"
     )
 
-    side_by_side = comparison(
-        wang_metrics, our_results=our_gate1_metrics(args.our_gate1_report)
-    )
+    try:
+        ours = read_our_gate1(args.our_gate1_report)
+    except (OurGate1Unreadable, OSError, json.JSONDecodeError) as exc:
+        print(f"\nABORTED: could not read our Gate 1 report: {exc}")
+        return 1
+
+    side_by_side = comparison(wang_metrics, our_results=ours)
     side_by_side["wang_checkout"] = checkout_state
     side_by_side["nbc_counts"] = counts
     side_by_side["device"] = device
@@ -333,8 +357,12 @@ def main():
     print(f"Wrote {output_dir / 'comparison.json'}")
     print("\nNo interpretation category is asserted; the measurements are "
           "recorded for review.")
+
+    failed = [r["configuration"] for r in results if not r["succeeded"]]
+    if failed:
+        print(f"\nFAILED configuration(s): {failed}")
     print("=" * 84)
-    return 0 if all(r["parsed"] for r in results) else 1
+    return 0 if not failed else 1
 
 
 if __name__ == "__main__":
