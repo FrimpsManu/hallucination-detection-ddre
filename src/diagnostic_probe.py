@@ -100,6 +100,49 @@ def python_state():
     }
 
 
+def mps_available(torch_module):
+    """Is Apple Metal usable? Defensive because old torch has no ``backends.mps``."""
+    backends = getattr(torch_module, "backends", None)
+    mps = getattr(backends, "mps", None)
+    is_available = getattr(mps, "is_available", None)
+    if is_available is None:
+        return False
+    try:
+        return bool(is_available())
+    except Exception:  # noqa: BLE001 - an unusable probe is an unusable backend
+        return False
+
+
+def select_device(torch_module=None):
+    """The accelerator to run on, in a fixed priority order.
+
+        CUDA  ->  MPS  ->  CPU
+
+    CUDA keeps absolute priority so every existing CUDA run selects exactly
+    what it selected before; Apple Metal is consulted only where CUDA is
+    absent, which is precisely the machines that were falling back to CPU.
+
+    This decides only WHERE the arithmetic runs. It does not touch the scoring
+    mathematics, the score version, host-side probability scaling, truncation,
+    or any frozen protocol value -- the backend is not part of the estimand.
+    The caller is expected to record the returned string as the run's device,
+    so provenance states the backend that was actually used.
+
+    ``torch_module`` is injectable so the three branches can be tested without
+    a GPU, and without torch at all.
+    """
+    if torch_module is None:
+        import torch as torch_module  # noqa: PLC0415 - lazy, keeps CI torch-free
+
+    cuda = getattr(torch_module, "cuda", None)
+    cuda_available = getattr(cuda, "is_available", None)
+    if cuda_available is not None and bool(cuda_available()):
+        return "cuda"
+    if mps_available(torch_module):
+        return "mps"
+    return "cpu"
+
+
 def device_state():
     """Device and accelerator identity, including the exact GPU."""
     try:
