@@ -75,6 +75,11 @@ __pypackages__/
 # Do not duplicate their large dataset in this repository.
 data/wang/
 
+# Separate checkout of Wang et al.'s released repository: upstream code at a
+# pinned commit, cloned by scripts/reproduce_wang_original.py and never
+# modified. It must not be committed into this repository.
+external/
+
 # Project-local persistent inference cache. This can be large and is machine-local.
 results/*.sqlite
 results/*.sqlite-wal
