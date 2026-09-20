@@ -37,6 +37,7 @@ import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from src.baseline_core import BSEDetector, build_nbc_histograms, stop_cost
+from src.diagnostic_probe import select_device
 from src.evaluation import evaluate_detector
 from src.provenance import collect_provenance
 from src.reproduction_gate import (
@@ -111,7 +112,14 @@ def retrieval_condition(p0, c_miss, c_false_alarm, c_retrieve):
 
 
 def build_scorer(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # CUDA -> MPS -> CPU. CUDA behaviour is unchanged; Apple Metal is consulted
+    # only where CUDA is absent. The selected name is what collect_provenance
+    # records below, so the artifact states the backend actually used.
+    device = torch.device(select_device(torch))
+    # Batch size is deliberately NOT changed for MPS. The canonical
+    # Wang-fidelity path is batch size 1 and the formal run passes it
+    # explicitly; inventing a new default here would be a scientific decision
+    # dressed up as a hardware fix.
     batch_size = args.batch_size or (8 if torch.cuda.is_available() else 2)
     print(f"NLI model: {args.model_name}")
     print(f"Device: {device}; batch size: {batch_size}")
