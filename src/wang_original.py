@@ -120,6 +120,38 @@ class WangOutputUnparsed(RuntimeError):
     """Wang's stdout did not contain every expected metric. Never guessed."""
 
 
+class OurGate1Unreadable(RuntimeError):
+    """Our formal Gate 1 report is present but the required values are absent."""
+
+
+def run_succeeded(record):
+    """A configuration counts as reproduced only if all three hold.
+
+    Parsing alone is not enough. Wang's ``main.py`` prints its metric lines
+    before it can crash on teardown, and a process killed by a timeout may have
+    emitted a full-looking block from a partial evaluation. A non-zero exit is
+    a failed run whatever its stdout happens to contain, so the exit status and
+    the timeout flag gate the result alongside the parse.
+    """
+    return bool(
+        record.get("timed_out") is False
+        and record.get("returncode") == 0
+        and record.get("parsed") is True
+    )
+
+
+def failure_reasons(record):
+    """Why a configuration did not count as reproduced. Empty when it did."""
+    reasons = []
+    if record.get("timed_out"):
+        reasons.append("the process exceeded its wall-clock budget and was killed")
+    if record.get("returncode") != 0:
+        reasons.append(f"the process exited with returncode {record.get('returncode')!r}")
+    if not record.get("parsed"):
+        reasons.append("not every expected metric was present in stdout")
+    return reasons
+
+
 def _git(checkout, *args):
     result = subprocess.run(
         ["git", "-C", str(checkout), *args],
@@ -145,12 +177,17 @@ def verify_checkout(checkout, expected_commit=WANG_PINNED_COMMIT):
         raise WangCheckoutInvalid(f"not a git checkout: {checkout}")
 
     head = _git(checkout, "rev-parse", "HEAD")
+    # The tree object identifies the CONTENT at that commit. Recorded beside
+    # the commit id so the artifact pins what was executed, not just which
+    # revision was asked for; the per-file digests remain supplemental.
+    tree = _git(checkout, "rev-parse", "HEAD^{tree}")
     porcelain = _git(checkout, "status", "--porcelain")
     dirty_entries = [line for line in porcelain.split("\n") if line.strip()]
 
     state = {
         "checkout_path": str(checkout),
         "head_commit": head,
+        "head_tree": tree,
         "expected_commit": expected_commit,
         "commit_matches": head == expected_commit,
         "dirty": bool(dirty_entries),
@@ -280,49 +317,135 @@ def parse_histograms(stdout):
     return None
 
 
-def environment_provenance():
-    """Versions and platform of the interpreter that will run Wang's code."""
-    import platform
-    import sys
+# Wang's main.py imports torch, scipy.stats, transformers, sklearn.metrics and
+# tqdm; numpy underlies all of them. If the interpreter that will run Wang
+# cannot import one of these, the run cannot happen, and recording a partial
+# environment would describe a run that never occurred.
+REQUIRED_WANG_RUNTIME = ("numpy", "scipy", "sklearn", "torch", "transformers", "tqdm")
 
-    versions = {}
-    for module in ("numpy", "scipy", "sklearn", "torch", "transformers", "tqdm"):
-        try:
-            versions[module] = __import__(module).__version__
-        except Exception:  # noqa: BLE001 - absence is itself the record
-            versions[module] = None
+# Executed BY the target interpreter, so every version reported is that
+# interpreter's. Kept as source text rather than an importable helper because
+# it must run somewhere this package is not installed.
+_ENVIRONMENT_PROBE = r"""
+import json, platform, sys
 
-    device = {"cuda_available": None, "selected_device": None, "gpu_name": None}
+report = {
+    "python": sys.version.split()[0],
+    "python_full_version": sys.version,
+    "python_executable": sys.executable,
+    "platform": platform.platform(),
+    "machine": platform.machine(),
+    "libraries": {},
+    "device": {},
+}
+for module in ("numpy", "scipy", "sklearn", "torch", "transformers", "tqdm"):
     try:
-        import torch
+        report["libraries"][module] = __import__(module).__version__
+    except Exception as exc:
+        report["libraries"][module] = None
+        report.setdefault("import_errors", {})[module] = repr(exc)
 
-        device["cuda_available"] = bool(torch.cuda.is_available())
-        # Wang's main.py: torch.device("cuda") if cuda.is_available() else cpu.
-        # No MPS branch, and none is added -- this mirrors their selection.
-        device["selected_device"] = "cuda" if device["cuda_available"] else "cpu"
-        if device["cuda_available"]:
-            device["gpu_name"] = torch.cuda.get_device_name(0)
-        device["mps_available"] = bool(
-            getattr(getattr(torch.backends, "mps", None), "is_available", bool)()
+device = {"cuda_available": None, "selected_device": None, "gpu_name": None,
+          "cuda_version": None, "mps_available": None}
+try:
+    import torch
+    device["cuda_available"] = bool(torch.cuda.is_available())
+    # Wang's main.py and utils.py: torch.device("cuda") if cuda.is_available()
+    # else cpu. No MPS branch, and none is added here.
+    device["selected_device"] = "cuda" if device["cuda_available"] else "cpu"
+    device["cuda_version"] = getattr(torch.version, "cuda", None)
+    if device["cuda_available"]:
+        device["gpu_name"] = torch.cuda.get_device_name(0)
+    backend = getattr(getattr(torch, "backends", None), "mps", None)
+    probe = getattr(backend, "is_available", None)
+    # Recorded diagnostically only; it never influences the device above.
+    device["mps_available"] = bool(probe()) if probe is not None else False
+except Exception as exc:
+    device["error"] = repr(exc)
+report["device"] = device
+
+sys.stdout.write("<<<WANG_ENV_JSON>>>" + json.dumps(report))
+"""
+
+_PROBE_SENTINEL = "<<<WANG_ENV_JSON>>>"
+
+
+class WangEnvironmentUnusable(RuntimeError):
+    """The interpreter that would run Wang cannot be probed, or cannot run it."""
+
+
+def environment_provenance(python_executable, timeout=120):
+    """Probe the interpreter that will ACTUALLY execute Wang's main.py.
+
+    This is deliberately a SUBPROCESS. The harness may run in our project
+    virtualenv while Wang runs under a separate one supplied via ``--python``;
+    importing numpy/torch/transformers here would record the harness's versions
+    and attribute them to a run that used entirely different ones. The
+    provenance has to describe the interpreter that did the work.
+
+    Fails closed: if the probe cannot execute, or the target interpreter cannot
+    import every dependency Wang's code needs, no environment record is
+    produced. A partial record would describe a run that cannot happen.
+    """
+    import subprocess as _subprocess
+
+    executable = str(python_executable)
+    try:
+        completed = _subprocess.run(
+            [executable, "-c", _ENVIRONMENT_PROBE],
+            capture_output=True, text=True, timeout=timeout,
         )
-    except Exception:  # noqa: BLE001
-        pass
+    except FileNotFoundError as exc:
+        raise WangEnvironmentUnusable(
+            f"cannot execute the interpreter {executable!r}: {exc}"
+        ) from exc
+    except _subprocess.TimeoutExpired as exc:
+        raise WangEnvironmentUnusable(
+            f"the environment probe on {executable!r} timed out after {timeout}s"
+        ) from exc
 
-    return {
-        "python": sys.version.split()[0],
-        "python_executable": sys.executable,
-        "platform": platform.platform(),
-        "machine": platform.machine(),
-        "libraries": versions,
-        "device": device,
-        "model_name": "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli",
-        "hardware_note": (
-            "Wang's code selects CUDA if available, else CPU. That selection is "
-            "preserved exactly; MPS is NOT substituted into their source. A run "
-            "on a machine without CUDA is a CPU diagnostic, not a "
-            "hardware-equivalent reproduction."
-        ),
-    }
+    if completed.returncode != 0 or _PROBE_SENTINEL not in completed.stdout:
+        raise WangEnvironmentUnusable(
+            f"the environment probe on {executable!r} failed "
+            f"(rc={completed.returncode}). stderr: {completed.stderr.strip()[:500]}"
+        )
+
+    payload = completed.stdout.split(_PROBE_SENTINEL, 1)[1]
+    try:
+        report = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise WangEnvironmentUnusable(
+            f"the environment probe on {executable!r} returned unparseable JSON"
+        ) from exc
+
+    missing = [
+        name for name in REQUIRED_WANG_RUNTIME
+        if report.get("libraries", {}).get(name) is None
+    ]
+    if missing:
+        raise WangEnvironmentUnusable(
+            f"the interpreter {executable!r} cannot import {missing}, which "
+            "Wang's main.py requires. Refusing to record an environment for a "
+            "run that cannot happen. Import errors: "
+            f"{report.get('import_errors')}"
+        )
+
+    report["probed_interpreter"] = executable
+    report["probed_in_subprocess"] = True
+    report["required_runtime"] = list(REQUIRED_WANG_RUNTIME)
+    report["model_name"] = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
+    report["hardware_note"] = (
+        "Wang's code selects CUDA if available, else CPU. That selection is "
+        "preserved exactly; MPS is NOT substituted into their source, and the "
+        "mps_available field is diagnostic only. A run on a machine without "
+        "CUDA is a CPU diagnostic, not a hardware-equivalent reproduction."
+    )
+    report["provenance_note"] = (
+        "Every version and device fact here was measured BY the interpreter "
+        "named in probed_interpreter, in a subprocess, not by the harness "
+        "process. The two may be different virtualenvs."
+    )
+    return report
 
 
 def run_label(config_name, device):
@@ -333,6 +456,92 @@ def run_label(config_name, device):
         f"CPU diagnostic on non-original hardware ({device}); NOT a "
         "hardware-equivalent reproduction of Wang et al."
     )
+
+
+# Where our formal Gate 1 report actually keeps each value. Six of the seven
+# live as rows in gate.configurations[<config>].metrics (each row carrying
+# "metric" and "reproduced"); documents-per-subclaim is a diagnostic and lives
+# beside them. There is no top-level "reproduced" key.
+OUR_GATE1_ROW_METRICS = (
+    "accuracy",
+    "nonfactual_auc_pr",
+    "factual_auc_pr",
+    "pearson",
+    "spearman",
+    "evidence_num_per_sentence",
+)
+OUR_GATE1_DIAGNOSTIC_METRICS = {
+    "evidence_num_per_subclaim": "avg_retrieved_documents_per_subclaim",
+}
+
+
+def our_gate1_metrics(payload, configurations=None):
+    """Lift our bse_official numbers out of the REAL formal Gate 1 artifact.
+
+    The artifact's shape is::
+
+        {"mode": "gate", "provenance": ..., "dataset": ..., "nbc": ...,
+         "gate": {"configurations": {"<CONFIG>": {
+             "metrics": [{"metric": "...", "reproduced": <float>, ...}, ...],
+             "diagnostics": {"avg_retrieved_documents_per_subclaim": <float>, ...}}}},
+         "full_metrics": {...}}
+
+    Fails closed. If the report is present but a requested configuration or
+    metric is absent, that is raised rather than returned as ``None``: a blank
+    cell in the comparison would read as "our run did not measure this", which
+    would be a false statement about our own experiment.
+    """
+    wanted = [name for name, _, _ in COST_CONFIGURATIONS] if configurations is None \
+        else list(configurations)
+
+    gate = (payload or {}).get("gate")
+    if not isinstance(gate, dict) or not isinstance(gate.get("configurations"), dict):
+        raise OurGate1Unreadable(
+            "the Gate 1 report has no 'gate.configurations' block. Expected the "
+            "formal artifact written by scripts/reproduce_wang_baseline.py; "
+            f"top-level keys present: {sorted((payload or {}).keys())}"
+        )
+    configurations_block = gate["configurations"]
+
+    extracted = {}
+    for config_name in wanted:
+        block = configurations_block.get(config_name)
+        if not isinstance(block, dict):
+            raise OurGate1Unreadable(
+                f"the Gate 1 report has no configuration {config_name!r}; "
+                f"present: {sorted(configurations_block)}"
+            )
+        rows = {
+            row.get("metric"): row
+            for row in block.get("metrics", [])
+            if isinstance(row, dict)
+        }
+        values = {}
+        for metric in OUR_GATE1_ROW_METRICS:
+            if metric not in rows:
+                raise OurGate1Unreadable(
+                    f"configuration {config_name!r} has no metric row for "
+                    f"{metric!r}; rows present: {sorted(rows)}"
+                )
+            reproduced = rows[metric].get("reproduced")
+            if reproduced is None:
+                raise OurGate1Unreadable(
+                    f"configuration {config_name!r} metric {metric!r} has a null "
+                    "'reproduced' value; the run did not produce it"
+                )
+            values[metric] = float(reproduced)
+
+        diagnostics = block.get("diagnostics") or {}
+        for metric, source_key in OUR_GATE1_DIAGNOSTIC_METRICS.items():
+            if source_key not in diagnostics:
+                raise OurGate1Unreadable(
+                    f"configuration {config_name!r} diagnostics has no "
+                    f"{source_key!r}; present: {sorted(diagnostics)}"
+                )
+            value = diagnostics[source_key]
+            values[metric] = None if value is None else float(value)
+        extracted[config_name] = values
+    return extracted
 
 
 def comparison(wang_results, our_results=None, published=None):
