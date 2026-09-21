@@ -95,6 +95,48 @@ hypothesis_avg_search_time: 3.7551
 """
 
 
+def stub_env_interpreter(tmp, name, cuda=False, mps=False):
+    """A launcher that runs the REAL probe against a STUBBED torch.
+
+    Not a fabricated payload: this is the actual interpreter, with a stub
+    package directory ahead of it on PYTHONPATH, executing the real
+    ``_ENVIRONMENT_PROBE`` source. That makes the device rule itself testable
+    -- including combinations no real machine here offers, such as MPS present
+    while CUDA is absent -- instead of merely asserting whatever the host
+    happens to report.
+    """
+    import stat
+
+    stubs = tmp / f"{name}-stubs"
+    stubs.mkdir(parents=True, exist_ok=True)
+    (stubs / "torch.py").write_text(
+        "__version__ = '0.0.0-stub'\n"
+        "class _Cuda:\n"
+        f"    @staticmethod\n    def is_available(): return {bool(cuda)!r}\n"
+        "    @staticmethod\n    def get_device_name(index): return 'StubGPU'\n"
+        "class _Mps:\n"
+        f"    @staticmethod\n    def is_available(): return {bool(mps)!r}\n"
+        "class _Backends:\n    mps = _Mps()\n"
+        "class _Version:\n    cuda = '11.8'\n"
+        "cuda = _Cuda()\nbackends = _Backends()\nversion = _Version()\n",
+        encoding="utf-8",
+    )
+    for module in REQUIRED_WANG_RUNTIME:
+        if module == "torch":
+            continue
+        (stubs / f"{module}.py").write_text(
+            f"__version__ = '0.0.0-stub-{module}'\n", encoding="utf-8"
+        )
+
+    launcher = tmp / f"{name}-python"
+    launcher.write_text(
+        f'#!/bin/sh\nPYTHONPATH={stubs} exec {sys.executable} "$@"\n',
+        encoding="utf-8",
+    )
+    launcher.chmod(launcher.stat().st_mode | stat.S_IEXEC)
+    return str(launcher)
+
+
 def make_repo(tmp, commit_files=True, dirty=False):
     """A throwaway git repo standing in for a Wang checkout."""
     tmp.mkdir(parents=True, exist_ok=True)
@@ -411,6 +453,15 @@ class TestComparisonRecord(unittest.TestCase):
 
 
 class TestHardwarePolicy(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory(prefix="wang-hardware-")
+        self.tmp = Path(self._tmp.name).resolve()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
     def test_a_non_cuda_run_is_labelled_a_cpu_diagnostic(self):
         label = run_label("CM_28_CFA_96", "cpu")
         self.assertIn("CPU diagnostic", label)
@@ -433,11 +484,17 @@ class TestHardwarePolicy(unittest.TestCase):
             self.assertNotIn("select_device", source)
 
     def test_the_environment_record_reports_the_wang_device_rule(self):
-        environment = environment_provenance(sys.executable)
-        self.assertIn("selected_device", environment["device"])
-        self.assertIn(
-            environment["device"]["selected_device"], {"cuda", "cpu"}
-        )
+        # Probed against a CONTROLLED interpreter, never sys.executable. The
+        # record must describe the interpreter that will RUN Wang, so the
+        # harness's own environment is irrelevant to it -- and asserting
+        # against the host would make this test pass or fail on what happens
+        # to be installed rather than on the rule under test.
+        interpreter = stub_env_interpreter(self.tmp, "rule", cuda=True)
+        environment = environment_provenance(interpreter)
+
+        self.assertEqual(environment["device"]["selected_device"], "cuda")
+        self.assertTrue(environment["device"]["cuda_available"])
+        self.assertEqual(environment["device"]["gpu_name"], "StubGPU")
         for library in REQUIRED_WANG_RUNTIME:
             self.assertIn(library, environment["libraries"])
             self.assertIsNotNone(environment["libraries"][library])
@@ -449,11 +506,28 @@ class TestHardwarePolicy(unittest.TestCase):
         )
 
     def test_mps_availability_never_changes_the_selected_device(self):
-        # Recorded diagnostically; Wang's rule stays CUDA-else-CPU.
-        environment = environment_provenance(sys.executable)
-        self.assertIn("mps_available", environment["device"])
-        expected = "cuda" if environment["device"]["cuda_available"] else "cpu"
-        self.assertEqual(environment["device"]["selected_device"], expected)
+        """Every cuda/mps combination, including ones no host here offers.
+
+        The decisive case is MPS present with CUDA absent -- an Apple machine.
+        Wang's rule must still choose cpu there, because substituting MPS into
+        their device selection would change the computation being reproduced.
+        """
+        cases = (
+            (False, True, "cpu"),   # Apple silicon: the case that matters
+            (False, False, "cpu"),
+            (True, True, "cuda"),
+            (True, False, "cuda"),
+        )
+        for cuda, mps, expected in cases:
+            with self.subTest(cuda=cuda, mps=mps):
+                interpreter = stub_env_interpreter(
+                    self.tmp, f"dev-{int(cuda)}{int(mps)}", cuda=cuda, mps=mps
+                )
+                device = environment_provenance(interpreter)["device"]
+                self.assertEqual(device["selected_device"], expected)
+                self.assertEqual(device["cuda_available"], cuda)
+                # Recorded, and recorded accurately -- but never consulted.
+                self.assertEqual(device["mps_available"], mps)
 
 
 class TestEnvironmentProbeUsesTheTargetInterpreter(unittest.TestCase):
