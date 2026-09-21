@@ -22,7 +22,9 @@ torch, without a network and without a Wang checkout present.
 
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -118,6 +120,79 @@ class WangCheckoutInvalid(RuntimeError):
 
 class WangOutputUnparsed(RuntimeError):
     """Wang's stdout did not contain every expected metric. Never guessed."""
+
+
+class WangInterpreterUnresolvable(RuntimeError):
+    """The interpreter named by --python cannot be resolved to a real program."""
+
+
+def resolve_interpreter(python_executable, which=None):
+    """Turn --python into ONE absolute executable path, before any cwd change.
+
+    Wang's ``main.py`` is launched with ``cwd`` set to Wang's checkout, because
+    their code resolves ``dataset/...`` relative to the repository root. A
+    relative interpreter path such as ``.venv-wang/bin/python`` is written
+    relative to OUR project root, where the harness starts; once ``cwd`` moves
+    to ``external/HallucinationDetection`` that same string names a file under
+    Wang's tree that does not exist. The environment probe, which runs without a
+    ``cwd`` change, would have succeeded moments earlier -- so the run would die
+    on an interpreter the provenance had just certified as usable.
+
+    Resolving once, here, removes the possibility: the probe and the run are
+    handed the identical absolute string, and a path is interpreted in the
+    directory the user typed it in.
+
+    A spec containing a path separator (or a leading ``~``) is a filesystem
+    path. Anything else is a command name and is looked up on ``PATH``. Either
+    way the result must exist and be executable, or this raises.
+    """
+    spec = str(python_executable)
+    if not spec:
+        raise WangInterpreterUnresolvable("--python was empty")
+
+    looks_like_path = (
+        os.sep in spec
+        or (os.altsep is not None and os.altsep in spec)
+        or spec.startswith("~")
+    )
+
+    if looks_like_path:
+        # Resolved against the CURRENT working directory, which is the
+        # directory the harness was invoked from -- our project root.
+        #
+        # abspath, deliberately, NOT Path.resolve(): a virtualenv's bin/python
+        # is normally a symlink to the base interpreter, and following it would
+        # hand Wang the SYSTEM python instead. Python decides which
+        # site-packages to use from the executable path it was started with, so
+        # dereferencing the link would silently swap the environment whose
+        # versions the probe just recorded.
+        candidate = Path(spec).expanduser()
+        resolved = os.path.abspath(str(candidate))
+        origin = "filesystem path"
+    else:
+        lookup = shutil.which if which is None else which
+        found = lookup(spec)
+        if not found:
+            raise WangInterpreterUnresolvable(
+                f"--python {spec!r} is not a filesystem path and was not found "
+                "on PATH. Give an explicit path to the Wang environment's "
+                "interpreter, e.g. .venv-wang/bin/python"
+            )
+        resolved = os.path.abspath(str(found))
+        origin = "PATH lookup"
+
+    if not os.path.isfile(resolved):
+        raise WangInterpreterUnresolvable(
+            f"--python {spec!r} resolved to {resolved!r} ({origin}), which is "
+            "not an existing file. Refusing to probe or run an interpreter "
+            "that is not there."
+        )
+    if not os.access(resolved, os.X_OK):
+        raise WangInterpreterUnresolvable(
+            f"--python {spec!r} resolved to {resolved!r} ({origin}), which is "
+            "not executable."
+        )
+    return resolved
 
 
 class OurGate1Unreadable(RuntimeError):
@@ -256,6 +331,11 @@ def nbc_counts(checkout):
 
 def build_command(c_miss, c_false_alarm, python_executable="python"):
     """The exact argv used to invoke Wang's original main.py.
+
+    ``python_executable`` is expected to be the output of
+    :func:`resolve_interpreter` -- an absolute path -- because this command
+    is run with ``cwd`` set to Wang's checkout, where a relative path would
+    mean a different file. The value is otherwise passed through verbatim.
 
     ``main.py`` is invoked directly rather than through ``bash run.sh``.
 

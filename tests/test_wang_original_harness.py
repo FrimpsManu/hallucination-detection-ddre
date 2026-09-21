@@ -22,6 +22,7 @@ from src.wang_original import (
     OurGate1Unreadable,
     REQUIRED_WANG_RUNTIME,
     WangEnvironmentUnusable,
+    WangInterpreterUnresolvable,
     METRIC_PATTERNS,
     PUBLISHED_TABLE1,
     RELEASED_DATA_FILES,
@@ -38,6 +39,7 @@ from src.wang_original import (
     parse_histograms,
     parse_metrics,
     released_data_fingerprint,
+    resolve_interpreter,
     run_label,
     run_succeeded,
     verify_checkout,
@@ -991,6 +993,222 @@ class TestProvenanceFields(unittest.TestCase):
         dry = body[body.index("if args.dry_run:"):]
         self.assertIn("No model loaded, no inference run", dry)
 
+
+class TestTheInterpreterIsResolvedBeforeTheCwdChange(unittest.TestCase):
+    """--python must survive the move to Wang's working directory.
+
+    Wang's main.py is launched with ``cwd`` set to Wang's own checkout, because
+    their code opens ``dataset/...`` relative to the repository root. The
+    documented invocation passes ``--python .venv-wang/bin/python``, which is
+    written relative to OUR project root. Left literal, that string would be
+    looked up inside ``external/HallucinationDetection`` at run time -- after an
+    environment probe (which does not change directory) had already certified
+    the interpreter as usable. The resolution therefore has to happen once, up
+    front, and the same absolute string has to reach both.
+    """
+
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory(prefix="wang-resolve-")
+        self.tmp = Path(self._tmp.name).resolve()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def executable(self, relative):
+        """An executable stub at ``relative`` under the temp root."""
+        import stat
+
+        path = self.tmp / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+        return path
+
+    def test_the_documented_relative_path_becomes_absolute(self):
+        import os
+
+        created = self.executable(".venv-wang/bin/python")
+        wang_checkout = self.tmp / "external" / "HallucinationDetection"
+        wang_checkout.mkdir(parents=True)
+
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        try:
+            resolved = resolve_interpreter(".venv-wang/bin/python")
+        finally:
+            os.chdir(cwd)
+
+        self.assertTrue(os.path.isabs(resolved), resolved)
+        self.assertEqual(Path(resolved), created)
+        # The point of the fix: under Wang's cwd the original string names
+        # nothing, so an unresolved argv would have died at launch.
+        self.assertFalse((wang_checkout / ".venv-wang/bin/python").exists())
+
+    def test_an_absolute_path_is_unchanged(self):
+        created = self.executable("envs/wang/bin/python")
+        self.assertEqual(resolve_interpreter(str(created)), str(created))
+
+    def test_a_bare_command_name_goes_through_shutil_which(self):
+        from unittest import mock
+
+        created = self.executable("bin/python3")
+        with mock.patch("src.wang_original.shutil.which") as which:
+            which.return_value = str(created)
+            resolved = resolve_interpreter("python3")
+        which.assert_called_once_with("python3")
+        self.assertEqual(resolved, str(created))
+
+    def test_a_bare_command_name_missing_from_path_fails_closed(self):
+        with self.assertRaises(WangInterpreterUnresolvable) as caught:
+            resolve_interpreter("python-that-is-not-installed-anywhere")
+        self.assertIn("not found on PATH", str(caught.exception))
+
+    def test_a_which_result_is_made_absolute(self):
+        # Defence in depth: a relative PATH entry would otherwise leak through.
+        created = self.executable("bin/python3")
+        resolved = resolve_interpreter(
+            "python3", which=lambda name: str(created)
+        )
+        self.assertEqual(resolved, str(created))
+
+    def test_a_symlinked_venv_python_is_not_dereferenced(self):
+        """A venv's bin/python is a symlink; following it swaps the env.
+
+        Python picks its site-packages from the executable path it was started
+        with. Dereferencing ``.venv-wang/bin/python`` to the base interpreter
+        would run Wang against a different set of libraries than the probe
+        measured -- exactly the divergence this whole fix exists to prevent.
+        """
+        target = self.executable("system/python3.11")
+        link = self.tmp / ".venv-wang" / "bin" / "python"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(target)
+
+        resolved = resolve_interpreter(str(link))
+        self.assertEqual(Path(resolved), link)
+        self.assertNotEqual(Path(resolved), target)
+
+    def test_a_nonexistent_interpreter_fails_closed(self):
+        with self.assertRaises(WangInterpreterUnresolvable) as caught:
+            resolve_interpreter(str(self.tmp / "no-such-python"))
+        self.assertIn("not an existing file", str(caught.exception))
+
+    def test_a_non_executable_file_fails_closed(self):
+        path = self.tmp / "not-executable"
+        path.write_text("", encoding="utf-8")
+        with self.assertRaises(WangInterpreterUnresolvable) as caught:
+            resolve_interpreter(str(path))
+        self.assertIn("not executable", str(caught.exception))
+
+    def test_the_command_keeps_wangs_argv_with_an_absolute_interpreter(self):
+        import os
+
+        created = self.executable(".venv-wang/bin/python")
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        try:
+            resolved = resolve_interpreter(".venv-wang/bin/python")
+        finally:
+            os.chdir(cwd)
+
+        for name, c_miss, c_false_alarm in COST_CONFIGURATIONS:
+            with self.subTest(configuration=name):
+                command = build_command(c_miss, c_false_alarm, resolved)
+                self.assertEqual(
+                    command,
+                    [str(created), "-m", "main",
+                     "--C_M", str(c_miss), "--C_FA", str(c_false_alarm)],
+                )
+                self.assertTrue(os.path.isabs(command[0]))
+
+    def test_the_probe_and_the_command_get_the_identical_string(self):
+        import os
+        import stat
+
+        # A working fake interpreter reachable by a relative path, so the
+        # resolution is what makes both usable.
+        payload = json.dumps({
+            "python": "9.9.9-shared",
+            "platform": "FakeOS", "machine": "fake64",
+            "libraries": {name: "1.0" for name in REQUIRED_WANG_RUNTIME},
+            "device": {"cuda_available": False, "selected_device": "cpu"},
+        })
+        script = self.tmp / "shared.py"
+        script.write_text(
+            "import sys\n"
+            f"sys.stdout.write({('<<<WANG_ENV_JSON>>>' + payload)!r})\n",
+            encoding="utf-8",
+        )
+        launcher = self.tmp / ".venv-wang" / "bin" / "python"
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        launcher.write_text(
+            f'#!/bin/sh\nexec {sys.executable} {script} "$@"\n', encoding="utf-8"
+        )
+        launcher.chmod(launcher.stat().st_mode | stat.S_IEXEC)
+
+        cwd = os.getcwd()
+        os.chdir(self.tmp)
+        try:
+            resolved = resolve_interpreter(".venv-wang/bin/python")
+        finally:
+            os.chdir(cwd)
+
+        environment = environment_provenance(resolved)
+        command = build_command(28, 96, resolved)
+        self.assertEqual(environment["probed_interpreter"], resolved)
+        self.assertEqual(command[0], resolved)
+        self.assertEqual(environment["probed_interpreter"], command[0])
+
+    def test_the_runner_resolves_before_it_probes_or_builds_a_command(self):
+        """Ordering is the whole guarantee, so it is asserted structurally."""
+        tree = ast.parse(
+            (PROJECT_ROOT / "scripts" / "reproduce_wang_original.py").read_text(
+                "utf-8"
+            )
+        )
+        main = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "main"
+        )
+        calls = {}
+        for node in ast.walk(main):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                calls.setdefault(node.func.id, []).append(node.lineno)
+
+        self.assertIn("resolve_interpreter", calls)
+        self.assertIn("environment_provenance", calls)
+        self.assertIn("build_command", calls)
+        resolved_at = min(calls["resolve_interpreter"])
+        self.assertLess(resolved_at, min(calls["environment_provenance"]))
+        self.assertLess(resolved_at, min(calls["build_command"]))
+
+        # One carrier, so the two cannot drift apart.
+        script = (PROJECT_ROOT / "scripts" / "reproduce_wang_original.py").read_text(
+            "utf-8"
+        )
+        self.assertIn("args.python = resolve_interpreter(args.python)", script)
+        self.assertIn("environment_provenance(args.python)", script)
+
+    def test_the_runner_aborts_on_an_unresolvable_interpreter(self):
+        """End to end: no checkout work, no probe, no model -- just a refusal."""
+        completed = subprocess.run(
+            [sys.executable, "scripts/reproduce_wang_original.py",
+             "--python", str(self.tmp / "absent-python"), "--dry-run"],
+            cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        self.assertIn("ABORTED", completed.stdout)
+        self.assertIn("not an existing file", completed.stdout)
+        # It refused before doing anything else at all.
+        self.assertNotIn("released data fingerprints", completed.stdout)
+
+    def test_cwd_for_wangs_process_is_still_wangs_checkout(self):
+        script = (PROJECT_ROOT / "scripts" / "reproduce_wang_original.py").read_text(
+            "utf-8"
+        )
+        self.assertIn("cwd=args.wang_checkout", script)
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,7 @@ from src.wang_original import (  # noqa: E402
     OurGate1Unreadable,
     WangCheckoutInvalid,
     WangEnvironmentUnusable,
+    WangInterpreterUnresolvable,
     WangOutputUnparsed,
     build_command,
     comparison,
@@ -50,6 +51,7 @@ from src.wang_original import (  # noqa: E402
     parse_histograms,
     parse_metrics,
     released_data_fingerprint,
+    resolve_interpreter,
     run_label,
     run_succeeded,
     verify_checkout,
@@ -85,7 +87,11 @@ def parse_args():
     parser.add_argument(
         "--python", default=sys.executable,
         help="Interpreter used to run Wang's main.py. Point this at the "
-             "separate Wang environment, not our project venv.",
+             "separate Wang environment, not our project venv. A relative "
+             "path such as .venv-wang/bin/python is read relative to the "
+             "directory you run this from and resolved to an absolute path "
+             "before anything uses it; a bare name such as python3 is "
+             "looked up on PATH.",
     )
     parser.add_argument(
         "--config", action="append", default=None, metavar="NAME",
@@ -220,6 +226,20 @@ def run_configuration(config_name, c_miss, c_false_alarm, args, output_dir, devi
 
 def main():
     args = parse_args()
+
+    # Resolved ONCE, here, before anything else touches it. Wang's main.py is
+    # launched with cwd set to Wang's checkout, so a relative interpreter path
+    # would name a different (nonexistent) file at run time than it did at probe
+    # time. Writing the absolute path back onto args.python means the probe and
+    # the run cannot diverge: there is only one field, and it is already
+    # absolute.
+    requested_python = args.python
+    try:
+        args.python = resolve_interpreter(args.python)
+    except WangInterpreterUnresolvable as exc:
+        print(f"ABORTED: {exc}")
+        return 1
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     configurations = selected_configurations(args)
@@ -232,6 +252,9 @@ def main():
     print(f"  checkout:        {args.wang_checkout}   (never modified)")
     print(f"  output:          {output_dir}")
     print(f"  interpreter:     {args.python}")
+    if args.python != requested_python:
+        print(f"    (requested {requested_python!r}, resolved before the "
+              f"cwd change to Wang's checkout)")
 
     if args.clone:
         clone_pinned(args.wang_checkout)
@@ -290,6 +313,14 @@ def main():
         "released_data_fingerprint": fingerprint,
         "nbc_counts": counts,
         "environment": environment,
+        "interpreter_requested": requested_python,
+        "interpreter_resolved": args.python,
+        "interpreter_note": (
+            "--python is resolved to an absolute path before the environment "
+            "probe and before Wang is launched, because Wang runs with cwd "
+            "set to its own checkout. The probe and every configuration use "
+            "this one resolved string."
+        ),
         "configurations": [
             {
                 "name": name, "c_miss": c_miss, "c_false_alarm": c_false_alarm,
