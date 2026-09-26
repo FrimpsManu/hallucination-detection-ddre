@@ -17,6 +17,7 @@ environment with no torch installed.
 import hashlib
 import os
 import platform
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -143,17 +144,54 @@ def select_device(torch_module=None):
     return "cpu"
 
 
-def device_state():
-    """Device and accelerator identity, including the exact GPU."""
+def device_matches(selected_device, model_device):
+    """Does a model's actual device match the backend that was selected?
+
+    ``torch`` reports an indexed device (``cuda:0``, ``mps:0``) while
+    :func:`select_device` returns a bare backend name, so only the backend
+    component is compared. ``None`` means the question does not apply -- no
+    model was loaded, or no device was explicitly selected -- and is deliberately
+    distinct from ``False``.
+    """
+    if selected_device is None or model_device is None:
+        return None
+    return str(model_device).split(":")[0] == str(selected_device).split(":")[0]
+
+
+def device_state(selected_device=None):
+    """Device and accelerator identity, including the exact GPU.
+
+    ``selected_device`` is a narrow, opt-in override. Left ``None`` -- the
+    default, and what every existing caller passes -- the reported
+    ``selected_device`` is the historical cuda-or-cpu expression, so those
+    callers record exactly what they recorded before. A caller that places its
+    model with :func:`select_device` passes the string it actually used, so the
+    provenance states the backend the arithmetic really ran on rather than a
+    guess this function makes on its behalf.
+
+    Changing the default globally would be worse than leaving it: reporting
+    ``mps`` here while a caller still places its model on the CPU would write a
+    false device into that caller's provenance. The override moves with the
+    placement, one caller at a time.
+    """
     try:
         import torch
     except Exception:
         return {"available": False, "note": "torch is not importable"}
 
+    # The historical default, preserved exactly for callers that pass nothing.
+    default_selected = "cuda" if torch.cuda.is_available() else "cpu"
     state = {
         "available": True,
         "cuda_available": bool(torch.cuda.is_available()),
-        "selected_device": "cuda" if torch.cuda.is_available() else "cpu",
+        "mps_available": mps_available(torch),
+        "selected_device": (
+            default_selected if selected_device is None else str(selected_device)
+        ),
+        "selected_device_source": (
+            "device_state_default" if selected_device is None else "caller"
+        ),
+        "device_state_default": default_selected,
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "torch_cuda_version": getattr(torch.version, "cuda", None),
         "gpu_name": None,
@@ -285,6 +323,130 @@ def tokenizer_emission_probe(tokenizer, premise=PROBE_PREMISE, hypothesis=PROBE_
 # Checkpoint identity
 # --------------------------------------------------------------------------
 
+# A Hugging Face revision as it appears in the hub cache layout:
+#   <cache>/models--<org>--<name>/snapshots/<40-hex-revision>/<file>
+_HF_REVISION = re.compile(r"\A[0-9a-f]{40}\Z")
+
+# Tokenizer attributes that name a concrete file the tokenizer was loaded from.
+_TOKENIZER_FILE_ATTRIBUTES = (
+    "vocab_file",
+    "merges_file",
+    "tokenizer_file",
+    "spm_file",
+)
+
+
+def hub_repo_dir_name(model_name):
+    """The hub cache directory name for a repo id, e.g. ``models--org--name``."""
+    return "models--" + str(model_name).replace("/", "--")
+
+
+def snapshot_revision_from_path(path, repo_dir_name=None):
+    """Extract the revision from ``.../<repo>/snapshots/<40-hex>/...``.
+
+    The path is inspected EXACTLY as the tokenizer reported it and is never
+    resolved: inside the hub cache a snapshot entry is a symlink into
+    ``blobs/<sha256>``, so resolving it would discard the very component being
+    read. ``repo_dir_name``, when given, must be the directory immediately
+    above ``snapshots``, so a file belonging to a different model's snapshot
+    cannot establish this model's revision.
+
+    Returns the lowercase 40-character revision, or ``None``.
+    """
+    if not path:
+        return None
+    parts = Path(str(path)).parts
+    for index, part in enumerate(parts):
+        if part != "snapshots" or index + 1 >= len(parts):
+            continue
+        candidate = parts[index + 1].lower()
+        if not _HF_REVISION.match(candidate):
+            continue
+        if repo_dir_name is not None:
+            if index == 0 or parts[index - 1] != repo_dir_name:
+                continue
+        return candidate
+    return None
+
+
+def tokenizer_source_paths(tokenizer):
+    """Concrete on-disk files a tokenizer reports having been loaded from.
+
+    Covers the named file attributes plus any path-like ``init_kwargs`` entry,
+    because which of them is populated varies by tokenizer class and by
+    transformers version.
+    """
+    candidates = []
+    for attribute in _TOKENIZER_FILE_ATTRIBUTES:
+        value = getattr(tokenizer, attribute, None)
+        if isinstance(value, str) and value:
+            candidates.append(value)
+
+    init_kwargs = getattr(tokenizer, "init_kwargs", None)
+    if isinstance(init_kwargs, dict):
+        for key, value in init_kwargs.items():
+            if not isinstance(value, str) or not value:
+                continue
+            if str(key).endswith("_file") or os.sep in value or "/" in value:
+                candidates.append(value)
+
+    seen = set()
+    ordered = []
+    for value in candidates:
+        if value not in seen:
+            seen.add(value)
+            ordered.append(value)
+    return ordered
+
+
+def infer_tokenizer_commit_from_paths(tokenizer, repo_dir_name, path_exists=None):
+    """Infer the tokenizer's revision from the snapshot it was loaded from.
+
+    Used ONLY when the tokenizer object carries no ``_commit_hash``. Some
+    transformers versions leave ``_commit_hash`` and
+    ``init_kwargs["_commit_hash"]`` at ``None`` even when ``from_pretrained``
+    was given an explicit ``revision=`` and the files demonstrably came from
+    that snapshot directory.
+
+    Fails closed. A revision is returned only when at least one tokenizer
+    source file exists under ``<repo_dir_name>/snapshots/<40-hex>/`` and every
+    such file agrees on the revision. Conflicting revisions, or files outside a
+    snapshot, yield ``None`` -- the provenance guard then fails as before.
+
+    Nothing is invented: the returned value is a path component, read verbatim.
+
+    Returns ``(revision_or_None, evidence_paths, note_or_None)``.
+    """
+    exists = (lambda candidate: Path(candidate).exists()) if path_exists is None else path_exists
+
+    paths = tokenizer_source_paths(tokenizer)
+    if not paths:
+        return None, [], "the tokenizer reports no source file paths"
+
+    by_revision = {}
+    for candidate in paths:
+        revision = snapshot_revision_from_path(candidate, repo_dir_name)
+        if revision is None:
+            continue
+        if not exists(candidate):
+            continue
+        by_revision.setdefault(revision, []).append(candidate)
+
+    if not by_revision:
+        return None, [], (
+            "no existing tokenizer source file lies under "
+            f"{repo_dir_name}/snapshots/<revision>/; inspected: {paths}"
+        )
+    if len(by_revision) > 1:
+        return None, [], (
+            "tokenizer source files disagree on the snapshot revision "
+            f"({sorted(by_revision)}); refusing to guess"
+        )
+
+    revision, evidence = next(iter(by_revision.items()))
+    return revision, evidence, None
+
+
 def _sha256_file(path, size_limit, force):
     size = path.stat().st_size
     entry = {"name": path.name, "size_bytes": size, "sha256": None}
@@ -319,6 +481,8 @@ def checkpoint_identity(
         "model_name": model_name,
         "model_config_commit_hash": None,
         "tokenizer_commit_hash": None,
+        "tokenizer_commit_hash_source": None,
+        "tokenizer_commit_hash_evidence": [],
         "hub_cache_dir": None,
         "resolved_revision": None,
         "snapshot_dir": None,
@@ -331,7 +495,42 @@ def checkpoint_identity(
             getattr(model, "config", None), "_commit_hash", None
         )
     if tokenizer is not None:
-        identity["tokenizer_commit_hash"] = getattr(tokenizer, "_commit_hash", None)
+        # The tokenizer object is authoritative when it carries the hash.
+        object_hash = getattr(tokenizer, "_commit_hash", None)
+        if object_hash is None:
+            init_kwargs = getattr(tokenizer, "init_kwargs", None)
+            if isinstance(init_kwargs, dict):
+                object_hash = init_kwargs.get("_commit_hash")
+        if object_hash is not None:
+            identity["tokenizer_commit_hash"] = object_hash
+            identity["tokenizer_commit_hash_source"] = "tokenizer_object"
+        else:
+            # Observed on transformers 5.17.0: from_pretrained(..., revision=...)
+            # loads from the pinned snapshot yet leaves both _commit_hash and
+            # init_kwargs["_commit_hash"] at None. The files still record which
+            # snapshot they came from, so the revision is read from their paths
+            # rather than left unknown. Fails closed on ambiguity.
+            revision, evidence, note = infer_tokenizer_commit_from_paths(
+                tokenizer, hub_repo_dir_name(model_name)
+            )
+            if revision is not None:
+                identity["tokenizer_commit_hash"] = revision
+                identity["tokenizer_commit_hash_source"] = "huggingface_snapshot_path"
+                identity["tokenizer_commit_hash_evidence"] = list(evidence)
+                identity["notes"].append(
+                    "tokenizer._commit_hash was absent; the revision was read "
+                    f"from the snapshot path of {len(evidence)} tokenizer "
+                    "source file(s). The value is a path component, not an "
+                    "inferred or computed hash."
+                )
+            else:
+                identity["tokenizer_commit_hash_source"] = None
+                identity["notes"].append(
+                    "tokenizer._commit_hash was absent and the revision could "
+                    f"not be established from tokenizer source paths: {note}. "
+                    "tokenizer_commit_hash stays None and the provenance guard "
+                    "fails closed."
+                )
 
     try:
         from huggingface_hub import constants as hub_constants
@@ -404,12 +603,18 @@ def collect_live_environment(
     repo_root=None,
     score_version=None,
     hash_all=False,
+    selected_device=None,
 ):
-    """Full live snapshot, with every model/tokenizer section optional."""
+    """Full live snapshot, with every model/tokenizer section optional.
+
+    ``selected_device`` is passed straight through to :func:`device_state`, and
+    is additionally cross-checked against the model's actual device so the
+    snapshot records whether the recorded backend is the one the weights are on.
+    """
     snapshot = {
         "python": python_state(),
         "libraries": library_versions(),
-        "device": device_state(),
+        "device": device_state(selected_device),
         "git": git_state(repo_root),
         "score_version": score_version,
         "model": None,
@@ -426,4 +631,14 @@ def collect_live_environment(
         snapshot["checkpoint_identity"] = checkpoint_identity(
             model_name, model=model, tokenizer=tokenizer, hash_all=hash_all
         )
+
+    # Whether the device the snapshot reports is the device the weights are on.
+    # Recorded rather than asserted: this module only observes, and a caller
+    # that wants to abort on a mismatch can read ``matches``.
+    model_device = (snapshot.get("model") or {}).get("device")
+    snapshot["device_placement"] = {
+        "selected_device": selected_device,
+        "model_device": model_device,
+        "matches": device_matches(selected_device, model_device),
+    }
     return snapshot
