@@ -179,32 +179,36 @@ class TestNothingFrozenWasTouched(unittest.TestCase):
             source,
         )
 
-    def test_no_other_inference_script_was_repointed_yet(self):
-        # D-03 and the cache-completion runner keep their existing cuda/cpu
-        # selection, so they continue to RECORD the backend they actually use.
-        # Repointing them is a separate, later change.
-        for script in (
-            "diagnose_ddre_ratio_support.py",
-            "complete_nbc_cache.py",
-        ):
-            source = (PROJECT_ROOT / "scripts" / script).read_text(encoding="utf-8")
-            with self.subTest(script=script):
-                self.assertNotIn("select_device", source)
-                self.assertIn(
-                    'torch.device("cuda" if torch.cuda.is_available() else "cpu")',
-                    source,
-                )
+    def test_scripts_not_yet_repointed_keep_their_cuda_or_cpu_selection(self):
+        # The cache-completion runner still selects cuda-or-cpu, so it continues
+        # to RECORD the backend it actually uses. Repointing it is a separate,
+        # later change. D-03 and the checkpoint-provenance diagnostic WERE
+        # repointed; see tests/test_d03_device_and_checkpoint_provenance.py.
+        source = (PROJECT_ROOT / "scripts" / "complete_nbc_cache.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("select_device", source)
+        self.assertIn(
+            'torch.device("cuda" if torch.cuda.is_available() else "cpu")',
+            source,
+        )
 
-    def test_device_state_still_reports_what_those_scripts_select(self):
-        # device_state() feeds collect_live_environment for six scripts. It is
-        # deliberately NOT changed: reporting "mps" there while those scripts
-        # still select cpu would put a false device into their provenance.
+    def test_device_state_default_is_unchanged_for_callers_that_pass_nothing(self):
+        # device_state() feeds collect_live_environment for several scripts.
+        # Its DEFAULT is deliberately still cuda-or-cpu: reporting "mps" for a
+        # caller that still places its model on the CPU would put a false device
+        # into that caller's provenance. Truthfulness moves one caller at a time,
+        # via the explicit override, not by changing this default underneath them.
         source = (PROJECT_ROOT / "src" / "diagnostic_probe.py").read_text(
             encoding="utf-8"
         )
         state = source[source.index("def device_state("):]
         self.assertIn(
-            '"selected_device": "cuda" if torch.cuda.is_available() else "cpu"',
+            'default_selected = "cuda" if torch.cuda.is_available() else "cpu"',
+            state,
+        )
+        self.assertIn(
+            '"selected_device": (\n            default_selected if selected_device is None else str(selected_device)\n        )',
             state,
         )
 

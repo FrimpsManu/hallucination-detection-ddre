@@ -61,6 +61,69 @@ Batch size 1 is deliberate: Wang's released scorer evaluates one pair at a time,
 and the formal v2 provenance machinery already treats batch 1 as the canonical
 Wang-fidelity path. **GPU batch 8 is not substituted**, and a test asserts it.
 
+### Device: selected, then recorded
+
+The runner selects its backend with the shared `select_device` helper --
+**CUDA -> MPS -> CPU** -- and passes the string it selected into the live
+snapshot, so `device.selected_device` is the backend the weights are actually
+on rather than a guess made on the runner's behalf.
+
+This is a correctness requirement, not a speed one. The formal v2 Gate run
+recorded `device: "mps"`. The runner previously selected `cuda if available else
+cpu`, which on Apple silicon placed the model on the CPU *and* reported `"cpu"`,
+so `check_runtime_preconditions` compared a reference of `mps` against an
+observed `cpu` and **D-03 aborted at the runtime provenance gate before scoring
+anything**.
+
+The snapshot additionally records `device_placement.matches`, comparing the
+selected backend against the model's actual device, and the runner aborts when
+they disagree. Recording a device the arithmetic did not run on is the specific
+failure this prevents.
+
+The backend is not part of the estimand: it decides only where the arithmetic
+runs, not the scoring mathematics, the score version, host-side scaling,
+truncation or any frozen protocol value. The **398-pair exact-equality probe**
+is what empirically establishes that scores produced now are compatible with the
+frozen cache, on whatever backend, and it is unchanged.
+
+`device_state()`'s default is deliberately still `cuda`-or-`cpu`. Callers that
+have not been repointed continue to place their model exactly as before, and
+reporting `mps` for them would write a false device into their provenance.
+Truthfulness moves one caller at a time, with the placement.
+
+### Tokenizer revision: object first, snapshot path only as a fallback
+
+`checkpoint_identity()` takes `tokenizer._commit_hash` when the tokenizer object
+carries it, and records `tokenizer_commit_hash_source: "tokenizer_object"`.
+
+Observed on transformers 5.17.0: `from_pretrained(..., revision=<sha>)` loads
+the tokenizer from `snapshots/<sha>/` yet leaves both `_commit_hash` and
+`init_kwargs["_commit_hash"]` at `None`. The runtime guard then failed closed on
+a tokenizer that had demonstrably been loaded from the pinned snapshot.
+
+Where the object carries nothing, the revision is therefore read from the
+tokenizer's own source-file paths, and only under strict conditions:
+
+* the file must lie under `models--<repo>/snapshots/<40-hex>/`, with the repo
+  directory matching **this** model, so another model's snapshot cannot speak
+  for it;
+* the file must exist;
+* every such file must agree on the revision.
+
+Anything else — no paths, no snapshot, a local checkout, or two files
+disagreeing — leaves `tokenizer_commit_hash` at `None`, and the guard fails
+closed exactly as before. `tokenizer_commit_hash_source` is then `null` and the
+reason is recorded in `notes`.
+
+The path is inspected **as reported and is never resolved**: inside the hub
+cache a snapshot entry is a symlink into `blobs/<sha256>`, so resolving it would
+discard the revision component being read. The recorded value is that path
+component verbatim — no hash is computed, inferred or invented.
+
+`check_runtime_preconditions` is unchanged. `tokenizer_commit_hash` is not
+optional, no tolerance was introduced, and the 398-pair exact float-equality
+probe is untouched.
+
 Required before any scoring: the formal provenance artifact, the
 checkpoint-provenance supplement, a resolved revision present *before*
 `from_pretrained`, the runtime provenance checks, the fixed **398-pair**

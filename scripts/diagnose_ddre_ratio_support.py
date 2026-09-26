@@ -396,24 +396,41 @@ def main():
     revision = reference.get("resolved_revision")
     print(f"\n  pinning checkpoint revision: {revision!r}")
 
-    import torch  # noqa: F401
+    import torch
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-    from src.diagnostic_probe import collect_live_environment
+    from src.diagnostic_probe import collect_live_environment, select_device
 
     load_kwargs = {"revision": revision} if revision else {}
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, **load_kwargs)
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name, **load_kwargs
     )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # CUDA -> MPS -> CPU. On Apple silicon the previous cuda-or-cpu expression
+    # selected the CPU, which is both slow and -- because the formal v2 Gate run
+    # recorded "mps" -- a device the runtime provenance gate would reject. The
+    # selected string is passed to the snapshot so the recorded device is the
+    # device the weights are actually on.
+    selected_device = select_device(torch)
+    device = torch.device(selected_device)
     model = model.to(device)
     model.eval()
+    print(f"  device: {selected_device}")
 
     observed = collect_live_environment(
         model_name=args.model_name, model=model, tokenizer=tokenizer,
         repo_root=PROJECT_ROOT, score_version=SCORE_VERSION,
+        selected_device=selected_device,
     )
+    placement = observed.get("device_placement") or {}
+    if placement.get("matches") is not True:
+        print(
+            "\nABORTED: the model is on "
+            f"{placement.get('model_device')!r} but the run selected "
+            f"{placement.get('selected_device')!r}. Provenance would record a "
+            "device the arithmetic did not run on. Nothing scored."
+        )
+        return 1
     guard = guard_report(
         static_checks + check_runtime_preconditions(reference, observed),
         reference_path=args.formal_provenance,
