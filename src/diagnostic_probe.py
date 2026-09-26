@@ -143,17 +143,54 @@ def select_device(torch_module=None):
     return "cpu"
 
 
-def device_state():
-    """Device and accelerator identity, including the exact GPU."""
+def device_matches(selected_device, model_device):
+    """Does a model's actual device match the backend that was selected?
+
+    ``torch`` reports an indexed device (``cuda:0``, ``mps:0``) while
+    :func:`select_device` returns a bare backend name, so only the backend
+    component is compared. ``None`` means the question does not apply -- no
+    model was loaded, or no device was explicitly selected -- and is deliberately
+    distinct from ``False``.
+    """
+    if selected_device is None or model_device is None:
+        return None
+    return str(model_device).split(":")[0] == str(selected_device).split(":")[0]
+
+
+def device_state(selected_device=None):
+    """Device and accelerator identity, including the exact GPU.
+
+    ``selected_device`` is a narrow, opt-in override. Left ``None`` -- the
+    default, and what every existing caller passes -- the reported
+    ``selected_device`` is the historical cuda-or-cpu expression, so those
+    callers record exactly what they recorded before. A caller that places its
+    model with :func:`select_device` passes the string it actually used, so the
+    provenance states the backend the arithmetic really ran on rather than a
+    guess this function makes on its behalf.
+
+    Changing the default globally would be worse than leaving it: reporting
+    ``mps`` here while a caller still places its model on the CPU would write a
+    false device into that caller's provenance. The override moves with the
+    placement, one caller at a time.
+    """
     try:
         import torch
     except Exception:
         return {"available": False, "note": "torch is not importable"}
 
+    # The historical default, preserved exactly for callers that pass nothing.
+    default_selected = "cuda" if torch.cuda.is_available() else "cpu"
     state = {
         "available": True,
         "cuda_available": bool(torch.cuda.is_available()),
-        "selected_device": "cuda" if torch.cuda.is_available() else "cpu",
+        "mps_available": mps_available(torch),
+        "selected_device": (
+            default_selected if selected_device is None else str(selected_device)
+        ),
+        "selected_device_source": (
+            "device_state_default" if selected_device is None else "caller"
+        ),
+        "device_state_default": default_selected,
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "torch_cuda_version": getattr(torch.version, "cuda", None),
         "gpu_name": None,
@@ -404,12 +441,18 @@ def collect_live_environment(
     repo_root=None,
     score_version=None,
     hash_all=False,
+    selected_device=None,
 ):
-    """Full live snapshot, with every model/tokenizer section optional."""
+    """Full live snapshot, with every model/tokenizer section optional.
+
+    ``selected_device`` is passed straight through to :func:`device_state`, and
+    is additionally cross-checked against the model's actual device so the
+    snapshot records whether the recorded backend is the one the weights are on.
+    """
     snapshot = {
         "python": python_state(),
         "libraries": library_versions(),
-        "device": device_state(),
+        "device": device_state(selected_device),
         "git": git_state(repo_root),
         "score_version": score_version,
         "model": None,
@@ -426,4 +469,14 @@ def collect_live_environment(
         snapshot["checkpoint_identity"] = checkpoint_identity(
             model_name, model=model, tokenizer=tokenizer, hash_all=hash_all
         )
+
+    # Whether the device the snapshot reports is the device the weights are on.
+    # Recorded rather than asserted: this module only observes, and a caller
+    # that wants to abort on a mismatch can read ``matches``.
+    model_device = (snapshot.get("model") or {}).get("device")
+    snapshot["device_placement"] = {
+        "selected_device": selected_device,
+        "model_device": model_device,
+        "matches": device_matches(selected_device, model_device),
+    }
     return snapshot
