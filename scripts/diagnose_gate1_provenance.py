@@ -27,7 +27,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.diagnostic_probe import collect_live_environment  # noqa: E402
+from src.diagnostic_probe import (  # noqa: E402
+    collect_live_environment,
+    select_device,
+)
 from src.scoring_diagnostics import token_type_id_assessment  # noqa: E402
 
 
@@ -45,6 +48,7 @@ REPORT_FIELDS = (
     ("torch_version", "provenance.libraries.torch"),
     ("transformers_version", "provenance.libraries.transformers"),
     ("tokenizers_version", None),
+    ("sentencepiece_version", None),
     ("numpy_version", "provenance.libraries.numpy"),
     ("scipy_version", "provenance.libraries.scipy"),
     ("sklearn_version", "provenance.libraries.sklearn"),
@@ -63,6 +67,14 @@ REPORT_FIELDS = (
     ("git_branch", "provenance.repository.branch"),
     ("git_dirty", "provenance.repository.dirty"),
     ("nli_model_name", "provenance.nli_model.model_name"),
+    # Checkpoint identity. The formal v2 Gate report records none of these --
+    # that is exactly why this diagnostic exists -- so their report path is
+    # None and they appear in fields_not_recorded_in_report. Supplying them
+    # live cannot establish that the historical cache was produced at this
+    # revision; see checkpoint_identity_limitation below.
+    ("resolved_revision", None),
+    ("model_config_commit_hash", None),
+    ("tokenizer_commit_hash", None),
     ("wang_source_commit", "provenance.wang_data.source_commit"),
     ("nbc_histogram_positive", "nbc_histograms_laplace_smoothed.positive"),
     ("nbc_histogram_negative", "nbc_histograms_laplace_smoothed.negative"),
@@ -142,12 +154,14 @@ def live_fields(snapshot):
     libraries = snapshot.get("libraries") or {}
     device = snapshot.get("device") or {}
     git = snapshot.get("git") or {}
+    checkpoint = snapshot.get("checkpoint_identity") or {}
     return {
         "python_version": (snapshot.get("python") or {}).get("version"),
         "python_platform": (snapshot.get("python") or {}).get("platform"),
         "torch_version": libraries.get("torch"),
         "transformers_version": libraries.get("transformers"),
         "tokenizers_version": libraries.get("tokenizers"),
+        "sentencepiece_version": libraries.get("sentencepiece"),
         "numpy_version": libraries.get("numpy"),
         "scipy_version": libraries.get("scipy"),
         "sklearn_version": libraries.get("sklearn"),
@@ -165,7 +179,15 @@ def live_fields(snapshot):
         "git_commit": git.get("commit"),
         "git_branch": git.get("branch"),
         "git_dirty": git.get("dirty"),
-        "nli_model_name": (snapshot.get("checkpoint_identity") or {}).get("model_name"),
+        "nli_model_name": checkpoint.get("model_name"),
+        "resolved_revision": checkpoint.get("resolved_revision"),
+        "model_config_commit_hash": (
+            model.get("config_commit_hash")
+            or checkpoint.get("model_config_commit_hash")
+        ),
+        "tokenizer_commit_hash": (
+            tokenizer.get("commit_hash") or checkpoint.get("tokenizer_commit_hash")
+        ),
         "wang_source_commit": None,
         "nbc_histogram_positive": None,
         "nbc_histogram_negative": None,
@@ -212,18 +234,32 @@ def render(value):
 
 
 def build_scorer_environment(model_name, load_model):
-    """Load tokenizer (and optionally model) purely to read their metadata."""
+    """Load tokenizer (and optionally model) purely to read their metadata.
+
+    Returns ``(tokenizer, model, selected_device)``. The device is chosen by the
+    shared CUDA -> MPS -> CPU selector and returned so the snapshot records the
+    backend the weights are actually on; on Apple silicon the previous
+    cuda-or-cpu expression placed the model on the CPU and then reported "cpu"
+    for a machine whose accelerator is Metal.
+
+    When no model is loaded there is no placement, so ``selected_device`` is
+    ``None`` and :func:`device_state` falls back to its historical default
+    rather than claiming a backend nothing ran on.
+    """
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = None
+    selected_device = None
     if load_model:
         import torch
         from transformers import AutoModelForSequenceClassification
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = AutoModelForSequenceClassification.from_pretrained(model_name).to(device)
-    return tokenizer, model
+        selected_device = select_device(torch)
+        model = AutoModelForSequenceClassification.from_pretrained(model_name).to(
+            torch.device(selected_device)
+        )
+    return tokenizer, model, selected_device
 
 
 def main():
@@ -246,7 +282,7 @@ def main():
         try:
             from src.utils import SCORE_VERSION
 
-            tokenizer, model = build_scorer_environment(
+            tokenizer, model, selected_device = build_scorer_environment(
                 args.model_name, load_model=not args.no_load_model
             )
             snapshot = collect_live_environment(
@@ -256,6 +292,7 @@ def main():
                 repo_root=PROJECT_ROOT,
                 score_version=SCORE_VERSION,
                 hash_all=args.hash_weights,
+                selected_device=selected_device,
             )
             live = live_fields(snapshot)
         except Exception as exc:  # noqa: BLE001 - a failed probe must still report
@@ -273,6 +310,33 @@ def main():
 
     comparison = compare_environments(report_fields, live) if live else None
 
+    # The supplement can pin a revision for FUTURE runs. It cannot reach
+    # backwards. The formal v2 Gate report records no resolved revision, and no
+    # artifact ever will, so checkpoint identity with the historical v2 cache is
+    # unestablishable -- not merely unestablished. This block states that in the
+    # artifact itself so a later reader cannot mistake a live revision for
+    # evidence about the cache.
+    supplement_revision = (live or {}).get("resolved_revision")
+    checkpoint_identity_limitation = {
+        "checkpoint_identity_established": False,
+        "supplement_only": True,
+        "live_resolved_revision": supplement_revision,
+        "revision_recorded_by_formal_gate_report": report_fields.get(
+            "resolved_revision"
+        ),
+        "statement": (
+            "The resolved Hugging Face revision recorded here describes the "
+            "environment of THIS diagnostic run only. The formal v2 Gate report, "
+            "the MPS preflight and the Wang probe record no resolved revision, so "
+            "NO ARTIFACT ESTABLISHES that the frozen v2 NLI cache was produced at "
+            "this or any other revision. Exact historical checkpoint identity "
+            "cannot be established retrospectively. Pinning this revision makes "
+            "future runs internally consistent and reproducible, which is "
+            "strictly better than resolving against moving Hugging Face main, but "
+            "it is not proof of identity and must never be reported as one."
+        ),
+    }
+
     result = {
         "step": "0-provenance",
         "purpose": (
@@ -288,6 +352,7 @@ def main():
         "live_probe_error": live_error,
         "environment_comparison": comparison,
         "token_type_id_assessment": token_type,
+        "checkpoint_identity_limitation": checkpoint_identity_limitation,
     }
 
     with output_path.open("w", encoding="utf-8") as handle:

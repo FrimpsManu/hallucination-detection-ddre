@@ -61,6 +61,36 @@ Batch size 1 is deliberate: Wang's released scorer evaluates one pair at a time,
 and the formal v2 provenance machinery already treats batch 1 as the canonical
 Wang-fidelity path. **GPU batch 8 is not substituted**, and a test asserts it.
 
+### Device: selected, then recorded
+
+The runner selects its backend with the shared `select_device` helper --
+**CUDA -> MPS -> CPU** -- and passes the string it selected into the live
+snapshot, so `device.selected_device` is the backend the weights are actually
+on rather than a guess made on the runner's behalf.
+
+This is a correctness requirement, not a speed one. The formal v2 Gate run
+recorded `device: "mps"`. The runner previously selected `cuda if available else
+cpu`, which on Apple silicon placed the model on the CPU *and* reported `"cpu"`,
+so `check_runtime_preconditions` compared a reference of `mps` against an
+observed `cpu` and **D-03 aborted at the runtime provenance gate before scoring
+anything**.
+
+The snapshot additionally records `device_placement.matches`, comparing the
+selected backend against the model's actual device, and the runner aborts when
+they disagree. Recording a device the arithmetic did not run on is the specific
+failure this prevents.
+
+The backend is not part of the estimand: it decides only where the arithmetic
+runs, not the scoring mathematics, the score version, host-side scaling,
+truncation or any frozen protocol value. The **398-pair exact-equality probe**
+is what empirically establishes that scores produced now are compatible with the
+frozen cache, on whatever backend, and it is unchanged.
+
+`device_state()`'s default is deliberately still `cuda`-or-`cpu`. Callers that
+have not been repointed continue to place their model exactly as before, and
+reporting `mps` for them would write a false device into their provenance.
+Truthfulness moves one caller at a time, with the placement.
+
 Required before any scoring: the formal provenance artifact, the
 checkpoint-provenance supplement, a resolved revision present *before*
 `from_pretrained`, the runtime provenance checks, the fixed **398-pair**
