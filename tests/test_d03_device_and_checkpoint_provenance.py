@@ -23,13 +23,24 @@ Nothing here touches the scoring mathematics, and the last class asserts that.
 
 import ast
 import importlib.machinery
+import os
 import sys
+import tempfile
 import types
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
 
-from src.diagnostic_probe import collect_live_environment, device_matches, device_state
+from src.diagnostic_probe import (
+    checkpoint_identity,
+    collect_live_environment,
+    device_matches,
+    device_state,
+    hub_repo_dir_name,
+    infer_tokenizer_commit_from_paths,
+    snapshot_revision_from_path,
+    tokenizer_source_paths,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -463,3 +474,260 @@ class TestNoScientificConstantChanged(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------
+# Tokenizer commit hash: object first, snapshot path only as a fallback.
+# --------------------------------------------------------------------------
+
+REV_A = "b3546ea6b0346eb6f8d5d68b13c7dc6d0376b3d7"
+REV_B = "0123456789abcdef0123456789abcdef01234567"
+MODEL = "MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
+REPO_DIR = "models--MoritzLaurer--DeBERTa-v3-large-mnli-fever-anli-ling-wanli"
+
+
+class FakeTokenizer:
+    """Only the surface checkpoint_identity and tokenizer_state read."""
+
+    def __init__(self, commit_hash=None, init_kwargs=None, **file_attributes):
+        self._commit_hash = commit_hash
+        self.init_kwargs = {} if init_kwargs is None else dict(init_kwargs)
+        for name, value in file_attributes.items():
+            setattr(self, name, value)
+
+
+def build_hub_cache(tmp, revisions, repo_dir=REPO_DIR, filename="spm.model"):
+    """A realistic hub cache: snapshot entries are SYMLINKS into blobs/.
+
+    This layout is the reason the revision must be read from the path as
+    given. Resolving a snapshot entry lands in ``blobs/<sha256>``, which
+    carries no revision at all.
+    """
+    root = Path(tmp) / repo_dir
+    (root / "blobs").mkdir(parents=True, exist_ok=True)
+    made = {}
+    for index, revision in enumerate(revisions):
+        blob = root / "blobs" / f"deadbeef{index:04d}"
+        blob.write_bytes(b"spm")
+        snapshot = root / "snapshots" / revision
+        snapshot.mkdir(parents=True, exist_ok=True)
+        link = snapshot / filename
+        if not link.exists():
+            os.symlink(blob, link)
+        made[revision] = str(link)
+    return made
+
+
+class TestSnapshotRevisionFromPath(unittest.TestCase):
+    def test_extracts_the_revision(self):
+        path = f"/home/u/.cache/huggingface/hub/{REPO_DIR}/snapshots/{REV_A}/spm.model"
+        self.assertEqual(snapshot_revision_from_path(path, REPO_DIR), REV_A)
+
+    def test_requires_the_repo_directory_to_match(self):
+        # A file from a DIFFERENT model's snapshot must not establish this
+        # model's revision.
+        path = f"/hub/models--other--model/snapshots/{REV_A}/spm.model"
+        self.assertIsNone(snapshot_revision_from_path(path, REPO_DIR))
+        self.assertEqual(snapshot_revision_from_path(path), REV_A)
+
+    def test_rejects_anything_that_is_not_a_40_hex_component(self):
+        for bad in ("main", "refs", REV_A[:39], REV_A + "0", "z" * 40, ""):
+            with self.subTest(bad=bad):
+                path = f"/hub/{REPO_DIR}/snapshots/{bad}/spm.model"
+                self.assertIsNone(snapshot_revision_from_path(path, REPO_DIR))
+
+    def test_ordinary_paths_establish_nothing(self):
+        for path in (
+            "/home/u/models/deberta/spm.model",
+            "./spm.model",
+            "/tmp/spm.model",
+            f"/hub/{REPO_DIR}/blobs/abcdef",
+            "",
+            None,
+        ):
+            with self.subTest(path=path):
+                self.assertIsNone(snapshot_revision_from_path(path, REPO_DIR))
+
+    def test_revision_is_normalised_to_lowercase(self):
+        path = f"/hub/{REPO_DIR}/snapshots/{REV_A.upper()}/spm.model"
+        self.assertEqual(snapshot_revision_from_path(path, REPO_DIR), REV_A)
+
+    def test_repo_dir_name_is_derived_from_the_repo_id(self):
+        self.assertEqual(hub_repo_dir_name(MODEL), REPO_DIR)
+
+
+class TestTokenizerSourcePaths(unittest.TestCase):
+    def test_named_file_attributes_are_collected(self):
+        tok = FakeTokenizer(vocab_file="/a/spm.model", tokenizer_file="/a/tokenizer.json")
+        self.assertEqual(
+            tokenizer_source_paths(tok), ["/a/spm.model", "/a/tokenizer.json"]
+        )
+
+    def test_path_like_init_kwargs_are_collected(self):
+        tok = FakeTokenizer(init_kwargs={"vocab_file": "/a/spm.model", "do_lower_case": "False"})
+        self.assertIn("/a/spm.model", tokenizer_source_paths(tok))
+        self.assertNotIn("False", tokenizer_source_paths(tok))
+
+    def test_duplicates_are_collapsed_and_order_kept(self):
+        tok = FakeTokenizer(vocab_file="/a/spm.model", init_kwargs={"vocab_file": "/a/spm.model"})
+        self.assertEqual(tokenizer_source_paths(tok), ["/a/spm.model"])
+
+    def test_a_tokenizer_with_no_paths_yields_nothing(self):
+        self.assertEqual(tokenizer_source_paths(FakeTokenizer()), [])
+
+
+class TestInferTokenizerCommitFromPaths(unittest.TestCase):
+    def test_one_existing_snapshot_file_establishes_that_revision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            made = build_hub_cache(tmp, [REV_A])
+            tok = FakeTokenizer(vocab_file=made[REV_A])
+            revision, evidence, note = infer_tokenizer_commit_from_paths(tok, REPO_DIR)
+        self.assertEqual(revision, REV_A)
+        self.assertEqual(evidence, [made[REV_A]])
+        self.assertIsNone(note)
+
+    def test_the_snapshot_entry_is_a_symlink_into_blobs(self):
+        # Guards the core reason this is path-based: resolving the entry
+        # discards the revision entirely.
+        with tempfile.TemporaryDirectory() as tmp:
+            made = build_hub_cache(tmp, [REV_A])
+            link = Path(made[REV_A])
+            self.assertTrue(link.is_symlink())
+            self.assertIn("blobs", str(link.resolve()))
+            self.assertIsNone(snapshot_revision_from_path(link.resolve(), REPO_DIR))
+            self.assertEqual(snapshot_revision_from_path(link, REPO_DIR), REV_A)
+
+    def test_conflicting_revisions_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            made = build_hub_cache(tmp, [REV_A, REV_B])
+            tok = FakeTokenizer(vocab_file=made[REV_A], tokenizer_file=made[REV_B])
+            revision, evidence, note = infer_tokenizer_commit_from_paths(tok, REPO_DIR)
+        self.assertIsNone(revision)
+        self.assertEqual(evidence, [])
+        self.assertIn("disagree", note)
+
+    def test_a_path_that_does_not_exist_establishes_nothing(self):
+        tok = FakeTokenizer(vocab_file=f"/nope/{REPO_DIR}/snapshots/{REV_A}/spm.model")
+        revision, evidence, note = infer_tokenizer_commit_from_paths(tok, REPO_DIR)
+        self.assertIsNone(revision)
+        self.assertIn("no existing tokenizer source file", note)
+
+    def test_a_non_snapshot_path_establishes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "spm.model"
+            local.write_bytes(b"spm")
+            tok = FakeTokenizer(vocab_file=str(local))
+            revision, _, note = infer_tokenizer_commit_from_paths(tok, REPO_DIR)
+        self.assertIsNone(revision)
+        self.assertIn("no existing tokenizer source file", note)
+
+    def test_another_models_snapshot_establishes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            made = build_hub_cache(tmp, [REV_A], repo_dir="models--someone--else")
+            tok = FakeTokenizer(vocab_file=made[REV_A])
+            revision, _, note = infer_tokenizer_commit_from_paths(tok, REPO_DIR)
+        self.assertIsNone(revision)
+        self.assertIn("no existing tokenizer source file", note)
+
+    def test_no_paths_at_all_is_reported(self):
+        revision, _, note = infer_tokenizer_commit_from_paths(FakeTokenizer(), REPO_DIR)
+        self.assertIsNone(revision)
+        self.assertIn("no source file paths", note)
+
+
+class TestCheckpointIdentityTokenizerHash(unittest.TestCase):
+    def test_the_tokenizer_object_hash_wins_when_present(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            made = build_hub_cache(tmp, [REV_B])
+            tok = FakeTokenizer(commit_hash=REV_A, vocab_file=made[REV_B])
+            identity = checkpoint_identity(MODEL, tokenizer=tok)
+        self.assertEqual(identity["tokenizer_commit_hash"], REV_A)
+        self.assertEqual(identity["tokenizer_commit_hash_source"], "tokenizer_object")
+        self.assertEqual(identity["tokenizer_commit_hash_evidence"], [])
+
+    def test_init_kwargs_commit_hash_is_used_before_any_path(self):
+        tok = FakeTokenizer(init_kwargs={"_commit_hash": REV_A})
+        identity = checkpoint_identity(MODEL, tokenizer=tok)
+        self.assertEqual(identity["tokenizer_commit_hash"], REV_A)
+        self.assertEqual(identity["tokenizer_commit_hash_source"], "tokenizer_object")
+
+    def test_absent_hash_falls_back_to_the_snapshot_path(self):
+        # The reported transformers 5.17.0 behaviour.
+        with tempfile.TemporaryDirectory() as tmp:
+            made = build_hub_cache(tmp, [REV_A])
+            tok = FakeTokenizer(
+                commit_hash=None,
+                init_kwargs={"_commit_hash": None, "vocab_file": made[REV_A]},
+                vocab_file=made[REV_A],
+            )
+            identity = checkpoint_identity(MODEL, tokenizer=tok)
+        self.assertEqual(identity["tokenizer_commit_hash"], REV_A)
+        self.assertEqual(
+            identity["tokenizer_commit_hash_source"], "huggingface_snapshot_path"
+        )
+        self.assertEqual(identity["tokenizer_commit_hash_evidence"], [made[REV_A]])
+        self.assertTrue(
+            any("path component" in n for n in identity["notes"]),
+            identity["notes"],
+        )
+
+    def test_the_inferred_value_equals_the_snapshot_directory_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            made = build_hub_cache(tmp, [REV_A])
+            tok = FakeTokenizer(vocab_file=made[REV_A])
+            identity = checkpoint_identity(MODEL, tokenizer=tok)
+        self.assertEqual(identity["tokenizer_commit_hash"], Path(made[REV_A]).parent.name)
+
+    def test_ambiguity_leaves_the_hash_none_and_says_why(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            made = build_hub_cache(tmp, [REV_A, REV_B])
+            tok = FakeTokenizer(vocab_file=made[REV_A], tokenizer_file=made[REV_B])
+            identity = checkpoint_identity(MODEL, tokenizer=tok)
+        self.assertIsNone(identity["tokenizer_commit_hash"])
+        self.assertIsNone(identity["tokenizer_commit_hash_source"])
+        self.assertTrue(any("fails closed" in n for n in identity["notes"]))
+
+    def test_a_local_checkout_still_establishes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "spm.model"
+            local.write_bytes(b"spm")
+            identity = checkpoint_identity(MODEL, tokenizer=FakeTokenizer(vocab_file=str(local)))
+        self.assertIsNone(identity["tokenizer_commit_hash"])
+        self.assertIsNone(identity["tokenizer_commit_hash_source"])
+
+    def test_no_tokenizer_means_no_claim_either_way(self):
+        identity = checkpoint_identity(MODEL)
+        self.assertIsNone(identity["tokenizer_commit_hash"])
+        self.assertIsNone(identity["tokenizer_commit_hash_source"])
+        self.assertEqual(identity["tokenizer_commit_hash_evidence"], [])
+
+
+class TestRuntimeGuardStillCompares(unittest.TestCase):
+    """The guard is untouched: it still demands an exact match, closed."""
+
+    def test_guard_source_has_no_tokenizer_exemption(self):
+        source = (PROJECT_ROOT / "src" / "provenance_guard.py").read_text(encoding="utf-8")
+        self.assertIn('"tokenizer_commit_hash"', source)
+        for banned in ("advisory=True  # tokenizer", "skip_tokenizer", "tokenizer_optional"):
+            self.assertNotIn(banned, source)
+
+    def test_a_none_tokenizer_hash_still_fails_the_guard(self):
+        from src.provenance_guard import check_runtime_preconditions
+
+        observed = {"checkpoint_identity": {"tokenizer_commit_hash": None},
+                    "tokenizer": {"commit_hash": None}}
+        checks = check_runtime_preconditions({"tokenizer_commit_hash": REV_A}, observed)
+        entry = next(c for c in checks if c["name"] == "tokenizer_commit_hash")
+        self.assertEqual(entry["status"], "FAIL")
+
+    def test_a_path_inferred_hash_satisfies_the_guard_without_relaxing_it(self):
+        from src.provenance_guard import check_runtime_preconditions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            made = build_hub_cache(tmp, [REV_A])
+            identity = checkpoint_identity(MODEL, tokenizer=FakeTokenizer(vocab_file=made[REV_A]))
+        observed = {"checkpoint_identity": identity, "tokenizer": {"commit_hash": None}}
+        checks = check_runtime_preconditions({"tokenizer_commit_hash": REV_A}, observed)
+        entry = next(c for c in checks if c["name"] == "tokenizer_commit_hash")
+        self.assertEqual(entry["status"], "PASS")
+        self.assertEqual(entry["observed"], REV_A)

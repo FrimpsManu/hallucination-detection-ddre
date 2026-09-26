@@ -91,6 +91,39 @@ have not been repointed continue to place their model exactly as before, and
 reporting `mps` for them would write a false device into their provenance.
 Truthfulness moves one caller at a time, with the placement.
 
+### Tokenizer revision: object first, snapshot path only as a fallback
+
+`checkpoint_identity()` takes `tokenizer._commit_hash` when the tokenizer object
+carries it, and records `tokenizer_commit_hash_source: "tokenizer_object"`.
+
+Observed on transformers 5.17.0: `from_pretrained(..., revision=<sha>)` loads
+the tokenizer from `snapshots/<sha>/` yet leaves both `_commit_hash` and
+`init_kwargs["_commit_hash"]` at `None`. The runtime guard then failed closed on
+a tokenizer that had demonstrably been loaded from the pinned snapshot.
+
+Where the object carries nothing, the revision is therefore read from the
+tokenizer's own source-file paths, and only under strict conditions:
+
+* the file must lie under `models--<repo>/snapshots/<40-hex>/`, with the repo
+  directory matching **this** model, so another model's snapshot cannot speak
+  for it;
+* the file must exist;
+* every such file must agree on the revision.
+
+Anything else — no paths, no snapshot, a local checkout, or two files
+disagreeing — leaves `tokenizer_commit_hash` at `None`, and the guard fails
+closed exactly as before. `tokenizer_commit_hash_source` is then `null` and the
+reason is recorded in `notes`.
+
+The path is inspected **as reported and is never resolved**: inside the hub
+cache a snapshot entry is a symlink into `blobs/<sha256>`, so resolving it would
+discard the revision component being read. The recorded value is that path
+component verbatim — no hash is computed, inferred or invented.
+
+`check_runtime_preconditions` is unchanged. `tokenizer_commit_hash` is not
+optional, no tolerance was introduced, and the 398-pair exact float-equality
+probe is untouched.
+
 Required before any scoring: the formal provenance artifact, the
 checkpoint-provenance supplement, a resolved revision present *before*
 `from_pretrained`, the runtime provenance checks, the fixed **398-pair**
