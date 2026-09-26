@@ -92,8 +92,15 @@ def extract_reference(payload):
 
     Accepts the shapes this repository actually writes: the Step 2 scoring-path
     report, a raw ``collect_live_environment`` snapshot, the Gate 1 reproduction
-    report's ``provenance`` block, and a previous cache-completion report.
-    Missing fields come back as ``None`` and are treated as failures downstream.
+    report's ``provenance`` block, a previous cache-completion report, and the
+    checkpoint-provenance supplement from ``scripts/diagnose_gate1_provenance.py``,
+    which nests the same values under ``live_environment`` (the raw snapshot) and
+    ``live_fields`` (its flattened view).
+
+    The ``live_*`` paths are appended to each candidate list rather than inserted,
+    so precedence for every shape already accepted is unchanged. Missing fields
+    come back as ``None`` and are treated as failures downstream: nothing here is
+    made optional.
     """
     reference = {
         "model_name": _first(
@@ -103,6 +110,8 @@ def extract_reference(payload):
             "environment.checkpoint_identity.model_name",
             "provenance.nli_model.model_name",
             "nli_model.model_name",
+            "live_environment.checkpoint_identity.model_name",
+            "live_fields.nli_model_name",
         ),
         "resolved_revision": _first(
             payload,
@@ -110,6 +119,8 @@ def extract_reference(payload):
             "checkpoint_identity.resolved_revision",
             "environment.checkpoint_identity.resolved_revision",
             "primary.verdict.environment.checkpoint_identity.resolved_revision",
+            "live_environment.checkpoint_identity.resolved_revision",
+            "live_fields.resolved_revision",
         ),
         "model_config_commit_hash": _first(
             payload,
@@ -117,6 +128,9 @@ def extract_reference(payload):
             "environment.checkpoint_identity.model_config_commit_hash",
             "model.config_commit_hash",
             "environment.model.config_commit_hash",
+            "live_environment.checkpoint_identity.model_config_commit_hash",
+            "live_environment.model.config_commit_hash",
+            "live_fields.model_config_commit_hash",
         ),
         "tokenizer_commit_hash": _first(
             payload,
@@ -124,6 +138,9 @@ def extract_reference(payload):
             "environment.checkpoint_identity.tokenizer_commit_hash",
             "tokenizer.commit_hash",
             "environment.tokenizer.commit_hash",
+            "live_environment.checkpoint_identity.tokenizer_commit_hash",
+            "live_environment.tokenizer.commit_hash",
+            "live_fields.tokenizer_commit_hash",
         ),
         "score_version": _first(
             payload,
@@ -131,6 +148,8 @@ def extract_reference(payload):
             "environment.score_version",
             "provenance.runtime.score_version",
             "environment_summary.score_version",
+            "live_environment.score_version",
+            "live_fields.score_version",
         ),
         "wang_source_commit": _first(
             payload,
@@ -149,12 +168,16 @@ def extract_reference(payload):
             "environment_summary.model_dtype",
             "model.dtype",
             "environment.model.dtype",
+            "live_environment.model.dtype",
+            "live_fields.model_dtype",
         ),
         "tokenizer_model_max_length": _first(
             payload,
             "tokenizer.model_max_length",
             "environment.tokenizer.model_max_length",
             "provenance.nli_model.tokenizer_model_max_length",
+            "live_environment.tokenizer.model_max_length",
+            "live_fields.tokenizer_model_max_length",
         ),
         "device": _first(
             payload,
@@ -162,24 +185,36 @@ def extract_reference(payload):
             "device.selected_device",
             "environment.device.selected_device",
             "provenance.runtime.device",
+            "live_environment.device.selected_device",
+            "live_fields.device",
         ),
         "gpu_name": _first(
             payload,
             "environment_summary.gpu_name",
             "device.gpu_name",
             "environment.device.gpu_name",
+            "live_environment.device.gpu_name",
         ),
         "libraries": dict(
             _first(
-                payload, "libraries", "environment.libraries", "provenance.libraries"
+                payload,
+                "libraries",
+                "environment.libraries",
+                "provenance.libraries",
+                "live_environment.libraries",
             )
             or {}
         ),
     }
-    # The Step 2 summary flattens library versions; fall back to those.
+    # The Step 2 summary and the checkpoint-provenance supplement's live_fields
+    # both flatten library versions as "<name>_version"; fall back to those.
     for name in SCORE_AFFECTING_LIBRARIES + ADVISORY_LIBRARIES:
         if reference["libraries"].get(name) is None:
-            flat = _first(payload, f"environment_summary.{name}_version")
+            flat = _first(
+                payload,
+                f"environment_summary.{name}_version",
+                f"live_fields.{name}_version",
+            )
             if flat is not None:
                 reference["libraries"][name] = flat
     return reference
