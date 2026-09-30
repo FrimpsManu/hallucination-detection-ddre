@@ -38,6 +38,19 @@ class MissingDocumentScore(LookupError):
         self.total_spans = total_spans
 
 
+class MissingPairScore(LookupError):
+    """A premise/hypothesis score required by the replay is absent from the cache."""
+
+    def __init__(self, index, total, hypothesis):
+        super().__init__(
+            f"pair {index + 1}/{total} (hypothesis {hypothesis[:60]!r}) is not "
+            "in the cache"
+        )
+        self.index = index
+        self.total = total
+        self.hypothesis = hypothesis
+
+
 class CachedDocumentScorer:
     """Serve Wang's max-over-spans document score from a cache, never a model.
 
@@ -114,6 +127,37 @@ class CachedDocumentScorer:
         result = (max(scores), len(segments))
         self._document_cache[memo_key] = result
         return result
+
+    def score_pairs(
+        self,
+        pairs,
+        *,
+        use_cache=True,
+        write_cache=True,
+        show_progress=False,
+        description="NLI inference",
+    ):
+        """Replay recorded premise/hypothesis scores, in order.
+
+        Signature matches ``EntailmentScorer.score_pairs`` so callers that
+        reconstruct the NBC training scores need no change.
+        ``use_cache``/``write_cache``/``show_progress``/``description`` are
+        accepted and ignored: this scorer is cache-only by construction, never
+        writes, and has nothing to report progress about.
+
+        Fails closed. A pair the recorded run never scored raises
+        :class:`MissingPairScore` rather than being defaulted or skipped -- a
+        reconstruction that quietly invented a training score would not be a
+        reconstruction.
+        """
+        scores = []
+        total = len(pairs)
+        for index, (premise, hypothesis) in enumerate(pairs):
+            score = self._span_score(premise, hypothesis)
+            if score is None:
+                raise MissingPairScore(index, total, str(hypothesis))
+            scores.append(float(score))
+        return scores
 
     def cache_rows(self):
         row = self._connection.execute("SELECT COUNT(*) FROM nli_scores").fetchone()
