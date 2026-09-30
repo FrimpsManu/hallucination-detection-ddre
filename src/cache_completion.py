@@ -61,6 +61,7 @@ testable without torch or a model.
 import hashlib
 import shutil
 import sqlite3
+import stat
 from pathlib import Path
 
 # The three CM=14/CFA=24 placements the formal v2 run could not evaluate,
@@ -126,6 +127,11 @@ def assert_copy_faithful(cache_identity):
         )
 
 
+def _permission_bits(path):
+    """The file's permission bits as an octal string, e.g. ``0o444``."""
+    return oct(stat.S_IMODE(Path(path).stat().st_mode))
+
+
 def prepare_derived_cache(
     source, destination, *, allow_in_place=False, overwrite=False
 ):
@@ -178,6 +184,13 @@ def prepare_derived_cache(
                 "No copy was made: --unsafe-allow-in-place is set and the "
                 "destination is the source file."
             ),
+            # The destination IS the source, which is never chmod'ed. These
+            # report the observed mode without changing it.
+            "destination_mode_after_copy": _permission_bits(source_path),
+            "destination_mode_after_writable": _permission_bits(source_path),
+            "destination_owner_writable": bool(
+                source_path.stat().st_mode & stat.S_IWUSR
+            ),
             "warning": (
                 "UNSAFE: writing in place into the source cache. This modifies a "
                 "formal artifact and must never be used for a formal result."
@@ -194,8 +207,39 @@ def prepare_derived_cache(
     destination_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_path, destination_path)
 
+    # Fidelity is established FIRST, from digest and row count alone, before any
+    # permission bit is touched. copy_faithful therefore means exactly what it
+    # meant before: the bytes and rows match the source immediately after the
+    # copy.
     destination_sha = sha256_file(destination_path)
     destination_rows = cache_row_count(destination_path)
+    copy_faithful = (
+        destination_sha == source_sha_before and destination_rows == source_rows
+    )
+
+    # shutil.copy2 preserves the source's permission bits, and the formal Gate 1
+    # cache is deliberately 0444. The derived copy was therefore read-only too,
+    # and the first new validation-cache INSERT failed with "attempt to write a
+    # readonly database" -- after the provenance guard, the 398-pair exact
+    # compatibility probe and the source binding had all already passed.
+    #
+    # Only the OWNER-WRITE bit is added, only to the copy, and only once the
+    # copy has been shown faithful. The source is never chmod'ed: it stays the
+    # immutable artifact the whole protocol depends on. An unfaithful copy is
+    # left read-only because the caller discards it rather than extending it.
+    mode_after_copy = destination_path.stat().st_mode
+    mode_after_writable = mode_after_copy
+    if copy_faithful:
+        destination_path.chmod(mode_after_copy | stat.S_IWUSR)
+        mode_after_writable = destination_path.stat().st_mode
+        if not bool(mode_after_writable & stat.S_IWUSR):
+            raise DerivedCacheNotWritable(
+                f"the derived cache {destination_path} could not be made "
+                f"owner-writable (mode is {oct(stat.S_IMODE(mode_after_writable))} "
+                f"after chmod). Scoring would fail on the first INSERT with "
+                "'attempt to write a readonly database', so this fails closed "
+                "here instead. The source cache was not modified."
+            )
 
     return {
         "in_place": False,
@@ -206,12 +250,17 @@ def prepare_derived_cache(
         "destination_sha256_after_copy": destination_sha,
         "destination_rows_after_copy": destination_rows,
         "copied": True,
-        "copy_faithful": destination_sha == source_sha_before
-        and destination_rows == source_rows,
+        "copy_faithful": copy_faithful,
+        # Permission transition of the DERIVED file only. Recorded so the
+        # artifact shows that the copy arrived read-only (inherited from the
+        # immutable source) and was made owner-writable afterwards.
+        "destination_mode_after_copy": oct(stat.S_IMODE(mode_after_copy)),
+        "destination_mode_after_writable": oct(stat.S_IMODE(mode_after_writable)),
+        "destination_owner_writable": bool(mode_after_writable & stat.S_IWUSR),
         "copy_faithful_note": (
             "The derived cache is byte-identical to the source immediately "
             "after the copy."
-            if destination_sha == source_sha_before and destination_rows == source_rows
+            if copy_faithful
             else (
                 "THE COPY IS NOT FAITHFUL. The derived cache differs from the "
                 "source in digest or row count immediately after copying, before "
@@ -223,6 +272,15 @@ def prepare_derived_cache(
         ),
         "warning": None,
     }
+
+
+class DerivedCacheNotWritable(UnsafeCacheTarget):
+    """The derived copy could not be made owner-writable.
+
+    Subclasses :class:`UnsafeCacheTarget` so the existing fail-closed handler in
+    scripts/diagnose_ddre_ratio_support.py catches it and aborts before any
+    scoring, without that script needing to change.
+    """
 
 
 class CompatibilitySourceMismatch(RuntimeError):
