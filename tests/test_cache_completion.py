@@ -10,16 +10,22 @@ number of evaluations performed and the number of rows the cache gained measure
 the same quantity two ways, and a disagreement means a write did not land.
 """
 
+import shutil
 import sqlite3
+import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from src import cache_completion
 
 from src.cache_completion import (
     INCOMPLETE_PRIMARY_PLACEMENTS,
     PRIMARY_CONFIGURATION,
     WANG_BATCH_SIZE,
     CompatibilitySourceMismatch,
+    DerivedCacheNotWritable,
     SpanCountingMixin,
     UnfaithfulDerivedCache,
     UnsafeCacheTarget,
@@ -877,3 +883,227 @@ class TestReportCarriesCacheIdentity(DerivedCacheTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------
+# The derived copy must be writable.
+#
+# The formal Gate 1 cache is deliberately mode 0444. shutil.copy2 preserves
+# permission bits, so the derived copy was read-only too. The formal D-03 run
+# cleared the provenance guard, the 398/398 exact compatibility probe and the
+# source binding, then died on the first new validation-cache INSERT with
+# sqlite3.OperationalError: attempt to write a readonly database.
+#
+# These tests reproduce that exact sequence: a 0444 source, a real copy, and a
+# real INSERT into the copy.
+# --------------------------------------------------------------------------
+
+READ_ONLY = 0o444
+
+
+class ReadOnlySourceTestCase(unittest.TestCase):
+    """A source cache that is immutable exactly as the formal artifact is."""
+
+    def setUp(self):
+        self._tempdir = tempfile.TemporaryDirectory(prefix="readonly-source-")
+        self.root = Path(self._tempdir.name)
+        self.source = self.root / "formal_v2.sqlite"
+        self.destination = self.root / "formal_v2_nbc_complete.sqlite"
+        build_cache(self.source, rows=7)
+        self.source_sha_before = sha256_file(self.source)
+        self.source.chmod(READ_ONLY)
+        self.assertEqual(stat.S_IMODE(self.source.stat().st_mode), READ_ONLY)
+
+    def tearDown(self):
+        # Restore write permission so the temporary directory can be removed.
+        for path in (self.source, self.destination):
+            if path.exists():
+                path.chmod(0o644)
+        self._tempdir.cleanup()
+
+
+class TestDerivedCacheBecomesWritable(ReadOnlySourceTestCase):
+    def test_the_source_stays_read_only(self):
+        prepare_derived_cache(self.source, self.destination)
+        self.assertEqual(stat.S_IMODE(self.source.stat().st_mode), READ_ONLY)
+
+    def test_the_source_bytes_are_unchanged(self):
+        identity = prepare_derived_cache(self.source, self.destination)
+        self.assertEqual(sha256_file(self.source), self.source_sha_before)
+        self.assertEqual(identity["source_sha256_before"], self.source_sha_before)
+        self.assertTrue(
+            verify_source_unchanged(self.source, self.source_sha_before)["unchanged"]
+        )
+
+    def test_the_copy_is_still_faithful(self):
+        identity = prepare_derived_cache(self.source, self.destination)
+        self.assertTrue(identity["copied"])
+        self.assertTrue(identity["copy_faithful"])
+        self.assertEqual(identity["destination_sha256_after_copy"], self.source_sha_before)
+        self.assertEqual(identity["destination_rows_after_copy"], 7)
+
+    def test_the_copy_arrives_read_only_and_is_made_writable(self):
+        identity = prepare_derived_cache(self.source, self.destination)
+        # copy2 inherited 0444 from the immutable source...
+        self.assertEqual(identity["destination_mode_after_copy"], oct(READ_ONLY))
+        # ...and the owner-write bit was added afterwards.
+        self.assertTrue(identity["destination_owner_writable"])
+        self.assertTrue(
+            bool(self.destination.stat().st_mode & stat.S_IWUSR)
+        )
+        self.assertEqual(
+            identity["destination_mode_after_writable"], oct(READ_ONLY | stat.S_IWUSR)
+        )
+
+    def test_only_the_owner_write_bit_is_added(self):
+        identity = prepare_derived_cache(self.source, self.destination)
+        before = int(identity["destination_mode_after_copy"], 8)
+        after = int(identity["destination_mode_after_writable"], 8)
+        self.assertEqual(after, before | stat.S_IWUSR)
+        # Every other bit is preserved exactly.
+        self.assertEqual(after & ~stat.S_IWUSR, before & ~stat.S_IWUSR)
+
+    def test_the_derived_cache_accepts_a_real_insert(self):
+        # The failure this whole change exists to prevent.
+        #
+        # Caveat for anyone reading a CI log: root bypasses file permission
+        # bits, so under a root test runner this INSERT succeeds even against
+        # the unfixed copy and this assertion alone proves nothing. The
+        # permission-bit assertions above are the root-proof ones and are what
+        # actually fail without the fix. This test is end-to-end evidence on a
+        # normal user account, which is where D-03 runs.
+        prepare_derived_cache(self.source, self.destination)
+        append_row(self.destination, key="new-validation-score")
+        self.assertEqual(cache_row_count(self.destination), 8)
+
+    def test_the_source_does_not_receive_the_inserted_row(self):
+        identity = prepare_derived_cache(self.source, self.destination)
+        append_row(self.destination, key="new-validation-score")
+        self.assertEqual(cache_row_count(self.source), 7)
+        self.assertEqual(sha256_file(self.source), self.source_sha_before)
+        self.assertTrue(
+            verify_source_unchanged(self.source, identity["source_sha256_before"])[
+                "unchanged"
+            ]
+        )
+
+    def test_a_writable_source_still_yields_a_writable_copy(self):
+        # The fix must not depend on the source being read-only.
+        self.source.chmod(0o644)
+        identity = prepare_derived_cache(self.source, self.destination)
+        self.assertTrue(identity["copy_faithful"])
+        self.assertTrue(identity["destination_owner_writable"])
+        append_row(self.destination)
+        self.assertEqual(cache_row_count(self.destination), 8)
+
+
+class TestPermissionChangeDoesNotAlterContent(ReadOnlySourceTestCase):
+    """Requirement: chmod must not move the digest, the rows, or the verdict."""
+
+    def test_digest_and_rows_match_the_source_after_the_chmod(self):
+        identity = prepare_derived_cache(self.source, self.destination)
+        # Recomputed AFTER the permission change, not the recorded values.
+        self.assertEqual(sha256_file(self.destination), self.source_sha_before)
+        self.assertEqual(cache_row_count(self.destination), 7)
+        self.assertEqual(
+            identity["destination_sha256_after_copy"], sha256_file(self.destination)
+        )
+        self.assertTrue(identity["copy_faithful"])
+
+    def test_the_faithful_copy_gate_still_passes(self):
+        identity = prepare_derived_cache(self.source, self.destination)
+        assert_copy_faithful(identity)  # must not raise
+        self.assertIn("byte-identical", identity["copy_faithful_note"])
+
+
+class TestExistingGuardsUnchangedOnAReadOnlySource(ReadOnlySourceTestCase):
+    def test_source_equal_to_destination_is_still_refused(self):
+        with self.assertRaises(UnsafeCacheTarget) as caught:
+            prepare_derived_cache(self.source, self.source)
+        self.assertIn("immutable artifact", str(caught.exception))
+
+    def test_an_existing_destination_is_still_refused_without_overwrite(self):
+        prepare_derived_cache(self.source, self.destination)
+        with self.assertRaises(UnsafeCacheTarget):
+            prepare_derived_cache(self.source, self.destination)
+
+    def test_overwrite_still_works_and_yields_a_writable_copy(self):
+        prepare_derived_cache(self.source, self.destination)
+        append_row(self.destination)
+        self.assertEqual(cache_row_count(self.destination), 8)
+        identity = prepare_derived_cache(
+            self.source, self.destination, overwrite=True
+        )
+        self.assertTrue(identity["copy_faithful"])
+        self.assertTrue(identity["destination_owner_writable"])
+        self.assertEqual(cache_row_count(self.destination), 7)
+        append_row(self.destination)
+        self.assertEqual(cache_row_count(self.destination), 8)
+
+    def test_a_missing_source_is_still_an_error(self):
+        with self.assertRaises(FileNotFoundError):
+            prepare_derived_cache(self.root / "nope.sqlite", self.destination)
+
+    def test_in_place_never_chmods_the_source(self):
+        identity = prepare_derived_cache(
+            self.source, self.source, allow_in_place=True
+        )
+        self.assertTrue(identity["in_place"])
+        self.assertFalse(identity["copied"])
+        # The source is reported truthfully and left exactly as it was.
+        self.assertEqual(stat.S_IMODE(self.source.stat().st_mode), READ_ONLY)
+        self.assertEqual(identity["destination_mode_after_copy"], oct(READ_ONLY))
+        self.assertFalse(identity["destination_owner_writable"])
+
+
+class TestUnfaithfulCopyIsNotMadeWritable(unittest.TestCase):
+    """An unfaithful copy is discarded, not extended -- so it is left alone."""
+
+    def test_an_unfaithful_copy_stays_read_only_and_fails_the_gate(self):
+        with tempfile.TemporaryDirectory(prefix="unfaithful-") as tmp:
+            root = Path(tmp)
+            source = root / "formal_v2.sqlite"
+            destination = root / "derived.sqlite"
+            build_cache(source, rows=7)
+            source.chmod(READ_ONLY)
+
+            real_copy = shutil.copy2
+
+            def corrupting_copy(src, dst, *args, **kwargs):
+                result = real_copy(src, dst, *args, **kwargs)
+                Path(dst).chmod(0o644)
+                append_row(dst, key="corruption")
+                Path(dst).chmod(READ_ONLY)
+                return result
+
+            with mock.patch.object(cache_completion.shutil, "copy2", corrupting_copy):
+                identity = prepare_derived_cache(source, destination)
+
+            self.assertFalse(identity["copy_faithful"])
+            # Not made writable: the caller discards it rather than extending it.
+            self.assertFalse(identity["destination_owner_writable"])
+            with self.assertRaises(UnfaithfulDerivedCache):
+                assert_copy_faithful(identity)
+            # And it can still be removed by the discard path.
+            self.assertTrue(discard_invalid_derived_cache(identity)["removed"])
+            source.chmod(0o644)
+
+
+class TestFailsClosedWhenTheCopyCannotBeMadeWritable(ReadOnlySourceTestCase):
+    def test_a_chmod_that_does_not_take_raises_rather_than_proceeding(self):
+        # Scoring must never begin against a read-only derived cache.
+        with mock.patch.object(Path, "chmod", lambda self, mode: None):
+            with self.assertRaises(DerivedCacheNotWritable) as caught:
+                prepare_derived_cache(self.source, self.destination)
+        message = str(caught.exception)
+        self.assertIn("owner-writable", message)
+        self.assertIn("source cache was not modified", message)
+        # The source is untouched by the failure.
+        self.assertEqual(stat.S_IMODE(self.source.stat().st_mode), READ_ONLY)
+        self.assertEqual(sha256_file(self.source), self.source_sha_before)
+
+    def test_that_failure_is_caught_by_the_existing_unsafe_target_handler(self):
+        # scripts/diagnose_ddre_ratio_support.py catches UnsafeCacheTarget and
+        # aborts cleanly; the new exception subclasses it so that path is reused
+        # without the script changing.
+        self.assertTrue(issubclass(DerivedCacheNotWritable, UnsafeCacheTarget))
