@@ -123,14 +123,25 @@ Run on the 48 validation passages only, replayed from the D-03 derived cache
 which already scores every validation document up to max_docs = 10. **No
 inference is needed for validation selection.**
 
-**Reference:** BSE official on the same validation passages (balanced PR-AUC
-0.78778, nonfactual 0.88270, factual 0.69286, as recorded in the sensitivity
-artifact `fc5604854b18…`). The replay must reproduce those values exactly before
-any cell is selected.
+**Reference:** BSE official on the same validation passages, as stored in the
+pinned sensitivity artifact
+(SHA-256 `fc5604854b18f3e3e712fe7ef01859b58dac569e99696041713abb11daa6dcc0`),
+field `bse_official_validation`. Before any cell is selected, the replay must
+reproduce these **stored full-precision values** with exact float equality:
+
+| Field | Stored value | (rounded, for reading only) |
+|---|---|---|
+| `nonfactual.auc_pr` | `0.8827013410907382` | (0.88270) |
+| `factual.auc_pr` | `0.6928579387788498` | (0.69286) |
+| `balanced_pr_auc` | `0.787779639934794` | (0.78778) |
+
+The gate compares against the values read from the artifact, not against this
+table or any rounded number. The eligibility thresholds are those stored values
+minus 0.005.
 
 **Eligibility** (the rule that froze D): a configuration is eligible iff its
-validation nonfactual, factual and balanced PR-AUC are each ≥ the BSE value
-− 0.005.
+validation nonfactual, factual and balanced PR-AUC are each ≥ the stored BSE
+value − 0.005.
 
 **Ranking among eligible configurations** (the rule that froze D):
 
@@ -182,6 +193,10 @@ merged**. Its sole purpose is a complete replay surface for the ablation.
   pre-existing row count, added row count, environment and device, and
   completion status (complete or not, with any missing pairs listed).
 - No detector runs and no ablation metric is computed during completion.
+  Completion may inspect only score compatibility (the 398-pair probe), row and
+  pair counts, missing coverage, environment and hashes. It must not summarize
+  or inspect the distribution of newly scored held-out scores, and it must not
+  compute or inspect any ablation outcome.
 - The completed cache is hashed and frozen before cells A–D are replayed on
   held-out.
 
@@ -209,7 +224,14 @@ stopping-depth distribution.
 
 - docs(A) − docs(X) for X ∈ {B, C, D}: the savings S(X);
 - docs(C) − docs(D);
-- the ratios S(B)/S(D) and S(C)/S(D), computed within each bootstrap replicate;
+- the ratios S(B)/S(D) and S(C)/S(D), computed within each bootstrap replicate
+  b as R(b) = S_X(b) / S_D(b). **Denominator guard:** if any replicate has
+  S_D(b) ≤ 0.05 documents per sentence (zero, negative, or numerically near
+  zero), no replicate is discarded; instead that ratio's interval is marked
+  `unstable` and not reported, and the count of such replicates is reported.
+  The point-estimate ratio is still reported if the observed S(D) exceeds the
+  guard, and the component savings S(X) and S(D) and their intervals are
+  always reported;
 - balanced PR-AUC differences B − A, C − B, D − C;
 - NLI spans per sentence for the same pairs as documents.
 
@@ -221,9 +243,9 @@ interpretation below says.
 
 ## 7. Interpretation rules
 
-These are **descriptive interpretation thresholds, fixed now**. They are not
-significance tests and do not license causal or proof language. The continuous
-quantities and their intervals are always reported alongside.
+These are **predeclared exploratory interpretation rules, not confirmatory
+hypothesis tests**. They do not license causal or proof language. The
+continuous quantities and their intervals are always reported alongside.
 
 `S(X)` = documents-per-sentence saving of cell X relative to A on held-out.
 
@@ -245,12 +267,24 @@ density-ratio shape contributes beyond a global rescaling.*
 
 **D0 → D (selection history).** No binary threshold. Report the validation
 outcome directly. If D0 has no eligible configuration, that is reported as a
-finding in its own right: the original CV-selected estimator could not meet the
-validation quality constraint at any of the 32 bands, and the evaluated DDRE is
-the product of the post-D-03 selection.
+**re-derived selection-history result**, not as a new finding: the original
+CV-selected estimator could not meet the validation quality constraint at any
+of the 32 bands (as the sensitivity artifact already recorded), and the
+evaluated DDRE is the product of the post-D-03 selection.
 
-**When a cell is not evaluable** (no eligible validation configuration), every
-rule that needs it is reported as not evaluable, with the validation outcome.
+**When a cell is not evaluable** (no eligible validation configuration), only
+the rules that need it are reported as not evaluable, with the validation
+outcome. Every other rule is still evaluated. The cells each rule needs:
+
+| Rule | Needs |
+|---|---|
+| A → B | A, B, D |
+| B → C | A, C, D (the primary quantity S(C)/S(D) does not use B) |
+| C → D | C, D |
+| D0 → D | validation outcome only |
+
+For example, if B has no eligible configuration but C does, B → C and C → D are
+still evaluated.
 
 **Tuning budgets differ** (A 0, B 32, C 224, D 640). This favours the cells
 further down the table and is disclosed next to every comparison.
@@ -273,7 +307,7 @@ Stated as a number: S(B) / S(D) < 0.25. Whether it holds is reported either way.
 
 ## 9. Execution order
 
-1. Merge this document. From then on it is frozen.
+1. Merge this document. From then on it is frozen (§10).
 2. Separate PR: held-out cache-completion script (§5).
 3. Complete, record and hash the held-out cache.
 4. Implement validation selection for B, C and D0 (§4).
@@ -283,10 +317,18 @@ Stated as a number: S(B) / S(D) < 0.25. Whether it holds is reported either way.
 
 ## 10. Amendments
 
-Any change after merge goes in a dated amendment section below, with its
-reason, and only before step 6. After step 6 starts, this document is not
-changed. A run that deviates from it is reported as a deviation, not as this
-experiment.
+After this document is merged, the cells, parameter grids, eligibility
+criteria, ranking rule, metrics, hypotheses, interpretation thresholds,
+prediction and analysis rules are **frozen**.
+
+Later edits may only correct clerical errors or clarify implementation without
+changing any scientific decision rule. Each such edit goes in a dated section
+below, with its reason.
+
+Any substantive scientific change creates a new protocol version and is
+reported as a deviation from this preregistration, not as this experiment. In
+particular, validation results for B, C or D0 (steps 4–5) must not be used to
+revise this document.
 
 ## 11. Out of scope
 
