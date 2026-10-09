@@ -264,10 +264,34 @@ only the wording:
 | `NOT_SUPPORTED` | The run **addressed** the claim and the evidence did not support it. A negative result. |
 | `NOT_CONFIRMATORY` | The run **cannot address** the claim. Not a negative result, and must never be reported as one. |
 
-`NOT_CONFIRMATORY` applies if the threshold selection used the fallback, the
-validation tolerance differs from the frozen margin, the bootstrap is
-unavailable or invalid, or the run is a smoke/debug run. Every disqualifier is
-listed by name in the output.
+`NOT_CONFIRMATORY` applies if the configuration was not chosen by the
+pre-registered selection, the validation tolerance differs from the frozen
+margin, the bootstrap is unavailable or invalid, the split does not verify, or
+the run is a smoke/debug run. Every disqualifier is listed by name in the
+output.
+
+How the configuration was selected is recorded as `validation_selection`, and
+each history carries its own disqualifier text:
+
+| `validation_selection` | Confirmatory | Disqualifier |
+| --- | --- | --- |
+| `preregistered_cv` | yes | none |
+| `fallback` | no | no configuration preserved all three PR-AUCs within tolerance |
+| `post_d03_validation_sweep` | no | chosen after D-03 by a validation sweep over (sigma, lambda) and thresholds, which the frozen protocol does not cover |
+
+The legacy `validation_selection_confirmatory` boolean is still accepted and
+keeps its meaning (`True` is `preregistered_cv`, `False` is `fallback`).
+
+**Correction to the frozen held-out run.** That run (`fae3eee`, result
+SHA-256 `b5bc08cc…`) passed a bare `False`, so its artifact gives the fallback
+text as a reason, and it did not pass its verified split IDs, so it also
+reports the split as unverified. Both reasons are wrong; the status
+`NOT_CONFIRMATORY` is right. The canonical artifact is left unmodified.
+`scripts/correct_frozen_heldout_claim_reasons.py` writes a separate correction
+artifact that cites the canonical SHA, quotes the original reasons verbatim,
+regenerates only the reason fields from the saved bootstrap and split, and
+refuses to write anything if any other field of the claim assessment would
+change.
 
 **`NOT_CONFIRMATORY` is never converted into `NOT_SUPPORTED`.** They are
 different scientific statements and the code keeps them apart.
