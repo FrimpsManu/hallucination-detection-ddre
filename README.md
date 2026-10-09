@@ -1155,6 +1155,37 @@ MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli
 
 For debugging only, a smaller compatible model may be passed with `--model-name`, but **paper results should use the official large model unless the experimental protocol is intentionally changed and reported**.
 
+## Post-hoc analysis of the frozen held-out run
+
+```bash
+python scripts/analyze_frozen_heldout.py [--output-dir DIR] [--write-traces]
+```
+
+**Descriptive / post-hoc / exploratory.** The held-out set had already been
+evaluated when this analysis was designed, so nothing it reports is
+confirmatory, and its patterns are associations rather than mechanisms.
+
+The script describes the completed frozen held-out run and nothing else:
+
+- it verifies the canonical result, predictions, freeze, D-03 cache and D-03
+  report against pinned SHA-256 digests, and that the result artifact names the
+  same freeze, cache and frozen configuration, before reconstructing anything;
+- it rebuilds BSE official and the frozen DDRE from those artifacts and replays
+  them from the held-out NLI cache opened read-only. There is no model-loading
+  path, and a missing score raises instead of being computed;
+- it refuses to report anything unless the replay reproduces the canonical
+  predictions CSV exactly for every sentence and both methods;
+- every input is hashed again afterwards and must be byte-identical. The outputs
+  are new files and may not collide with an input.
+
+It reports confusion matrices and per-class recall, paired correctness,
+efficiency by gold label, joint subclaim stopping depths, the per-document
+evidence weights of both methods across the NLI score range alongside the D-03
+(sigma, lambda) direction-flip region, and the evidence trajectories of the
+sentences on which the two methods disagree. `--write-traces` additionally
+writes those trajectories in full; they are generated output and are not
+committed.
+
 ## Research status
 
 This is active research code. Numerical claims for the paper abstract should come only from a successful Wang-aligned full experiment and should be reported even if the DDRE hypothesis is not supported.

@@ -88,3 +88,7 @@ results/*.sqlite-shm
 # Debug-only smoke outputs are not publication artifacts.
 results/smoke_*.json
 results/smoke_*.csv
+
+# Full per-document trajectories from scripts/analyze_frozen_heldout.py are
+# regenerable output, not source.
+results/frozen_heldout_traces_*.json
