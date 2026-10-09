@@ -70,6 +70,10 @@ from src.paired_bootstrap import (
     validate_paired_inputs,
     validate_run_configuration,
     validate_split_identity,
+    VALIDATION_SELECTION_DISQUALIFIERS,
+    VALIDATION_SELECTION_FALLBACK,
+    VALIDATION_SELECTION_POST_D03_SWEEP,
+    VALIDATION_SELECTION_PREREGISTERED_CV,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -691,6 +695,46 @@ class TestClaimAssessment(unittest.TestCase):
         self.assertEqual(assessment["claim_status"], CLAIM_NOT_CONFIRMATORY)
         self.assertFalse(assessment["primary_claim_supported"])
         self.assertIn("fallback", " ".join(assessment["confirmatory_disqualifiers"]))
+
+    def test_the_post_d03_sweep_is_named_as_such_not_as_the_fallback(self):
+        # Regression: the frozen held-out run passed a bare False and was told
+        # it "used the fallback objective". The sweep had 102 eligible
+        # configurations; the fallback text was false for it.
+        assessment = claim(
+            validation_selection_confirmatory=None,
+            validation_selection=VALIDATION_SELECTION_POST_D03_SWEEP,
+        )
+        reasons = " ".join(assessment["confirmatory_disqualifiers"])
+        self.assertEqual(assessment["claim_status"], CLAIM_NOT_CONFIRMATORY)
+        self.assertIn("after the D-03 diagnostic", reasons)
+        self.assertNotIn("fallback", reasons)
+        self.assertEqual(assessment["validation_selection"], VALIDATION_SELECTION_POST_D03_SWEEP)
+        self.assertFalse(assessment["validation_selection_confirmatory"])
+
+    def test_only_the_preregistered_selection_is_confirmatory(self):
+        for value in VALIDATION_SELECTION_DISQUALIFIERS:
+            assessment = claim(validation_selection_confirmatory=None, validation_selection=value)
+            preregistered = value == VALIDATION_SELECTION_PREREGISTERED_CV
+            self.assertEqual(assessment["confirmatory_eligible"], preregistered)
+            self.assertEqual(assessment["validation_selection_confirmatory"], preregistered)
+
+    def test_the_legacy_boolean_keeps_its_meaning(self):
+        self.assertEqual(claim()["validation_selection"], VALIDATION_SELECTION_PREREGISTERED_CV)
+        fallback = claim(validation_selection_confirmatory=False)
+        self.assertEqual(fallback["validation_selection"], VALIDATION_SELECTION_FALLBACK)
+        self.assertIn("fallback", " ".join(fallback["confirmatory_disqualifiers"]))
+
+    def test_the_selection_history_must_be_stated_and_consistent(self):
+        with self.assertRaises(ValueError):
+            claim(validation_selection_confirmatory=None)
+        with self.assertRaises(ValueError):
+            claim(validation_selection_confirmatory=None, validation_selection="tuned")
+        with self.assertRaises(ValueError):
+            claim(validation_selection_confirmatory=True,
+                  validation_selection=VALIDATION_SELECTION_POST_D03_SWEEP)
+        agreed = claim(validation_selection_confirmatory=False,
+                       validation_selection=VALIDATION_SELECTION_POST_D03_SWEEP)
+        self.assertEqual(agreed["validation_selection"], VALIDATION_SELECTION_POST_D03_SWEEP)
 
     def test_a_different_quality_tolerance_is_not_confirmatory(self):
         assessment = claim(quality_tolerance=0.02)
