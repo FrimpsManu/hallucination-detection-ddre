@@ -690,8 +690,69 @@ class TestTheArtifactRecordsTheSelectionHistory(unittest.TestCase):
 
     def test_the_claim_is_assessed_as_non_confirmatory(self):
         """A SUPPORTED label must not be obtained by rewriting the history."""
-        self.assertIn("validation_selection_confirmatory=False", SOURCE)
+        self.assertIn("validation_selection=VALIDATION_SELECTION_POST_D03_SWEEP", SOURCE)
+        self.assertNotIn("VALIDATION_SELECTION_PREREGISTERED_CV", SOURCE)
         self.assertNotIn("validation_selection_confirmatory=True", SOURCE)
+
+    def test_the_selection_history_is_not_reported_as_the_fallback(self):
+        """The frozen config came from the post-D-03 sweep, not the fallback.
+
+        The original run passed a bare False, which assess_claim rendered as
+        "used the fallback objective" -- false for a selection with 102
+        eligible configurations.
+        """
+        self.assertNotIn("VALIDATION_SELECTION_FALLBACK", SOURCE)
+        self.assertNotIn("validation_selection_confirmatory=False", SOURCE)
+
+    def test_the_verified_split_is_passed_to_the_claim_assessment(self):
+        """frozen_split verifies the split; assess_claim must be told so."""
+        call = SOURCE[SOURCE.index("claim = assess_claim("):]
+        call = call[: call.index("\n    )\n")]
+        self.assertIn("split_metadata=claim_split_metadata(split)", call)
+        self.assertIn('expected_validation_passage_ids=split["validation_passage_ids"]', call)
+        self.assertIn('expected_test_passage_ids=split["held_out_passage_ids"]', call)
+
+    def test_claim_split_metadata_compares_the_evaluated_passages(self):
+        from src.paired_bootstrap import (
+            VALIDATION_SELECTION_POST_D03_SWEEP,
+            assess_claim,
+        )
+
+        split = {
+            "validation_fraction": EXPECTED_VALIDATION_FRACTION,
+            "split_seed": EXPECTED_SPLIT_SEED,
+            "validation_passage_ids": [1, 2],
+            "held_out_passage_ids": [3, 4, 5],
+            "observed_held_out_passage_ids": [3, 4, 5],
+        }
+        meta = MODULE.claim_split_metadata(split)
+        self.assertEqual(meta["test_passage_ids"], [3, 4, 5])
+        self.assertEqual(meta["random_state"], EXPECTED_SPLIT_SEED)
+
+        def assess(observed):
+            return assess_claim(
+                None,
+                validation_selection=VALIDATION_SELECTION_POST_D03_SWEEP,
+                quality_tolerance=0.005,
+                bootstrap_error="not needed here",
+                split_metadata=MODULE.claim_split_metadata(
+                    dict(split, observed_held_out_passage_ids=observed)
+                ),
+                expected_validation_passage_ids=split["validation_passage_ids"],
+                expected_test_passage_ids=split["held_out_passage_ids"],
+            )
+
+        verified = assess([3, 4, 5])
+        self.assertTrue(verified["split_matches_frozen"])
+        self.assertEqual(verified["split_mismatches"], [])
+        reasons = " ".join(verified["confirmatory_disqualifiers"])
+        self.assertIn("after the D-03 diagnostic", reasons)
+        self.assertNotIn("fallback", reasons)
+        self.assertNotIn("split was not verified", reasons)
+        self.assertEqual(verified["claim_status"], "NOT_CONFIRMATORY")
+
+        drifted = assess([3, 4, 6])
+        self.assertFalse(drifted["split_matches_frozen"])
 
     def test_the_two_primary_methods_are_bse_official_and_frozen_ddre(self):
         self.assertIn(
