@@ -203,12 +203,13 @@ estimator the original procedure chose.
 **Taken together.** Along the chain A → B → C → D, the observed document saving
 of 1.317 per sentence splits as +0.441 more for the band rule, 1.197 fewer for
 scaling the evidence, and 0.561 fewer for the uLSIF shape. The band rule alone
-increases work; most of the reduction is associated with how much negative
-evidence each document carries, and the learned continuous shape adds a further
-reduction beyond what a single global scale achieves. The same chain shows a
+increases work. Along this particular A → B → C → D path, the largest positive
+reduction comes from strengthening evidence magnitude, while the learned
+continuous shape provides a further reduction beyond global scaling. The same chain shows a
 monotone shift in threshold-level behaviour: factual recall 0.600 → 0.592 →
-0.544 → 0.482 and nonfactual recall 0.893 → 0.895 → 0.914 → 0.943. Earlier
-stopping on this benchmark goes with more sentences called hallucinated.
+0.544 → 0.482 and nonfactual recall 0.893 → 0.895 → 0.914 → 0.943. Across the
+evaluated cells, the shift toward lower retrieval in C and D coincides with
+more sentences being classified as hallucinated and lower factual recall.
 
 ---
 
