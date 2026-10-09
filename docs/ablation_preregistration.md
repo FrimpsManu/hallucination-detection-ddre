@@ -223,6 +223,7 @@ stopping-depth distribution.
 (passage unit, 10,000 resamples, seed 42, 95% percentile intervals), for:
 
 - docs(A) − docs(X) for X ∈ {B, C, D}: the savings S(X);
+- docs(B) − docs(C): the direct B → C effect;
 - docs(C) − docs(D);
 - the ratios S(B)/S(D) and S(C)/S(D), computed within each bootstrap replicate
   b as R(b) = S_X(b) / S_D(b). **Denominator guard:** if any replicate has
@@ -254,10 +255,17 @@ If S(B) ≥ 0.5 × S(D): *the stopping-rule change accounts for a substantial
 share of DDRE's observed saving, and most of the saving cannot be attributed
 solely to the DDRE evidence model.*
 
-**B → C (evidence magnitude).** Primary quantity: S(C) / S(D).
+**B → C (evidence magnitude).** Report both quantities:
+
+- **docs(B) − docs(C)**, with its paired passage-bootstrap interval: the direct
+  B → C effect, i.e. the incremental saving from globally strengthening
+  histogram evidence while keeping the histogram shape and band stopping;
+- **S(C) / S(D)**, secondary: the fraction of DDRE's total saving that the
+  scaled histogram recovers.
+
 If S(C) ≥ 0.8 × S(D) **and** C's balanced PR-AUC is within 0.01 of D's:
 *evidence that the magnitude assigned to weak evidence accounts for most of the
-efficiency behaviour, making the detailed uLSIF shape secondary.*
+observed efficiency behaviour, making the detailed uLSIF shape secondary.*
 
 **C → D (continuous shape).** Report the bootstrap interval for
 docs(C) − docs(D).
@@ -274,17 +282,20 @@ evaluated DDRE is the product of the post-D-03 selection.
 
 **When a cell is not evaluable** (no eligible validation configuration), only
 the rules that need it are reported as not evaluable, with the validation
-outcome. Every other rule is still evaluated. The cells each rule needs:
+outcome. Every other rule is still evaluated. The cells each quantity needs:
 
-| Rule | Needs |
+| Quantity | Needs |
 |---|---|
-| A → B | A, B, D |
-| B → C | A, C, D (the primary quantity S(C)/S(D) does not use B) |
-| C → D | C, D |
+| A → B: S(B) / S(D) | A, B, D |
+| B → C, direct effect: docs(B) − docs(C) | B, C |
+| C's share of DDRE's saving: S(C) / S(D), and the B → C interpretation rule | A, C, D |
+| C → D: docs(C) − docs(D) | C, D |
 | D0 → D | validation outcome only |
 
-For example, if B has no eligible configuration but C does, B → C and C → D are
-still evaluated.
+For example, if B has no eligible configuration but C does, A → B and the
+direct B → C effect are marked not evaluable, while S(C) / S(D) is still
+reported as a separate C-versus-total-DDRE quantity, and C → D is still
+evaluated.
 
 **Tuning budgets differ** (A 0, B 32, C 224, D 640). This favours the cells
 further down the table and is disclosed next to every comparison.
