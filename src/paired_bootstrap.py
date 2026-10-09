@@ -97,6 +97,62 @@ CLAIM_SUPPORTED = "SUPPORTED"
 CLAIM_NOT_SUPPORTED = "NOT_SUPPORTED"
 CLAIM_NOT_CONFIRMATORY = "NOT_CONFIRMATORY"
 
+# How the evaluated DDRE configuration was selected on validation. Only the
+# pre-registered uLSIF-CV selection is confirmatory. Each other history gets
+# its own disqualifier text: a boolean could not say WHY a run is not
+# confirmatory, and the frozen held-out run was mislabelled "fallback" because
+# of that.
+VALIDATION_SELECTION_PREREGISTERED_CV = "preregistered_cv"
+VALIDATION_SELECTION_FALLBACK = "fallback"
+VALIDATION_SELECTION_POST_D03_SWEEP = "post_d03_validation_sweep"
+VALIDATION_SELECTION_DISQUALIFIERS = {
+    VALIDATION_SELECTION_PREREGISTERED_CV: None,
+    VALIDATION_SELECTION_FALLBACK: (
+        "validation threshold selection used the fallback objective, so no "
+        "configuration preserved BSE-official nonfactual, factual and "
+        "balanced PR-AUC within tolerance"
+    ),
+    VALIDATION_SELECTION_POST_D03_SWEEP: (
+        "the DDRE configuration was selected after the D-03 diagnostic by a "
+        "validation sweep over uLSIF (sigma, lambda) pairs and stopping "
+        "thresholds, not by the pre-registered uLSIF-CV-only procedure, so the "
+        "frozen confirmatory protocol does not cover this selection"
+    ),
+}
+
+
+def resolve_validation_selection(validation_selection, validation_selection_confirmatory):
+    """One explicit selection history, from the new value or the legacy boolean.
+
+    The legacy boolean keeps its original meaning (True: pre-registered
+    selection; False: fallback), so existing callers behave exactly as before.
+    Passing both is allowed only when they agree; passing neither is refused.
+    """
+    if validation_selection is None:
+        if validation_selection_confirmatory is None:
+            raise ValueError(
+                "assess_claim needs validation_selection (or the legacy "
+                "validation_selection_confirmatory boolean)"
+            )
+        return (
+            VALIDATION_SELECTION_PREREGISTERED_CV
+            if validation_selection_confirmatory
+            else VALIDATION_SELECTION_FALLBACK
+        )
+    if validation_selection not in VALIDATION_SELECTION_DISQUALIFIERS:
+        raise ValueError(
+            f"unknown validation_selection {validation_selection!r}; expected one "
+            f"of {sorted(VALIDATION_SELECTION_DISQUALIFIERS)}"
+        )
+    if validation_selection_confirmatory is not None and bool(
+        validation_selection_confirmatory
+    ) != (validation_selection == VALIDATION_SELECTION_PREREGISTERED_CV):
+        raise ValueError(
+            f"validation_selection={validation_selection!r} contradicts "
+            f"validation_selection_confirmatory={validation_selection_confirmatory!r}"
+        )
+    return validation_selection
+
 PERFORMANCE_ENDPOINTS = (
     "nonfactual_auc_pr_delta",
     "factual_auc_pr_delta",
@@ -689,7 +745,8 @@ def confirmatory_protocol():
 def assess_claim(
     bootstrap,
     *,
-    validation_selection_confirmatory,
+    validation_selection_confirmatory=None,
+    validation_selection=None,
     quality_tolerance,
     smoke_test=False,
     bootstrap_error=None,
@@ -703,7 +760,18 @@ def assess_claim(
     ``NOT_CONFIRMATORY`` and ``NOT_SUPPORTED`` are different scientific
     statements -- "this run cannot address the claim" versus "this run addressed
     it and the evidence did not support it" -- and are never collapsed.
+
+    ``validation_selection`` names how the DDRE configuration was selected
+    (``VALIDATION_SELECTION_*``); only the pre-registered uLSIF-CV selection is
+    confirmatory, and every other history is disqualified with its own reason.
+    The legacy ``validation_selection_confirmatory`` boolean is still accepted.
     """
+    validation_selection = resolve_validation_selection(
+        validation_selection, validation_selection_confirmatory
+    )
+    selection_confirmatory = (
+        validation_selection == VALIDATION_SELECTION_PREREGISTERED_CV
+    )
     margin = CONFIRMATORY_PR_AUC_MARGIN
     tolerance_matches = quality_tolerance is not None and math.isclose(
         float(quality_tolerance), margin, rel_tol=0.0, abs_tol=1e-12
@@ -732,12 +800,8 @@ def assess_claim(
     disqualifiers = []
     if smoke_test:
         disqualifiers.append("run_mode is a smoke/debug run")
-    if not validation_selection_confirmatory:
-        disqualifiers.append(
-            "validation threshold selection used the fallback objective, so no "
-            "configuration preserved BSE-official nonfactual, factual and "
-            "balanced PR-AUC within tolerance"
-        )
+    if not selection_confirmatory:
+        disqualifiers.append(VALIDATION_SELECTION_DISQUALIFIERS[validation_selection])
     if not tolerance_matches:
         disqualifiers.append(
             f"validation quality tolerance {quality_tolerance!r} differs from the "
@@ -834,7 +898,8 @@ def assess_claim(
     return {
         "confirmatory_eligible": confirmatory_eligible,
         "confirmatory_disqualifiers": disqualifiers,
-        "validation_selection_confirmatory": bool(validation_selection_confirmatory),
+        "validation_selection": validation_selection,
+        "validation_selection_confirmatory": selection_confirmatory,
         "validation_quality_tolerance": (
             None if quality_tolerance is None else float(quality_tolerance)
         ),

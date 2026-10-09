@@ -18,8 +18,9 @@ Honesty constraints this runner enforces rather than documents:
 
 * The selection history is recorded as validation-tuned across 640
   configurations. It is NOT the original pre-registered uLSIF-CV-only
-  selection, so ``validation_selection_confirmatory`` is passed as False and a
-  resulting NOT_CONFIRMATORY status is preserved, not engineered away.
+  selection, so it is assessed as ``post_d03_validation_sweep`` (recorded as
+  ``validation_selection_confirmatory`` False) and a resulting NOT_CONFIRMATORY
+  status is preserved, not engineered away.
 * The tuning-budget asymmetry against the fixed published BSE baseline is
   written into the artifact.
 * The historical checkpoint-identity limitation is carried through from D-03
@@ -61,6 +62,7 @@ from src.hyperparameter_outcome_sensitivity import (  # noqa: E402
 )
 from src.paired_bootstrap import (  # noqa: E402
     CONFIRMATORY_PR_AUC_MARGIN,
+    VALIDATION_SELECTION_POST_D03_SWEEP,
     assess_claim,
     confirmatory_protocol,
     paired_passage_bootstrap,
@@ -282,6 +284,22 @@ def d03_checkpoint(d03_report_path):
         "checkpoint_identity_established": established,
         "checkpoint_identity_limitation": _first(report, "checkpoint_identity_note"),
         "limitation_preserved": True,
+    }
+
+
+def claim_split_metadata(split):
+    """What assess_claim compares: the passages actually evaluated on held-out.
+
+    The validation half is never evaluated here, so its recorded IDs are the
+    frozen ones. The held-out half is the set of passages the evaluated records
+    actually came from, so a drift between the records and the frozen split is
+    a disqualifier rather than something assumed away.
+    """
+    return {
+        "validation_fraction": split["validation_fraction"],
+        "random_state": split["split_seed"],
+        "validation_passage_ids": split["validation_passage_ids"],
+        "test_passage_ids": split["observed_held_out_passage_ids"],
     }
 
 
@@ -525,9 +543,11 @@ def main():
     bootstrap = paired_passage_bootstrap(ddre_obs, bse_obs)
     claim = assess_claim(
         bootstrap,
-        # This selection is NOT the pre-registered CV-only one. Saying otherwise
-        # to obtain a SUPPORTED label would be rewriting the history.
-        validation_selection_confirmatory=False,
+        # This selection is NOT the pre-registered CV-only one, and it is not
+        # the fallback either: it is the post-D-03 validation sweep. Naming it
+        # exactly is what makes the NOT_CONFIRMATORY reason true. Saying
+        # otherwise to obtain a SUPPORTED label would be rewriting the history.
+        validation_selection=VALIDATION_SELECTION_POST_D03_SWEEP,
         quality_tolerance=CONFIRMATORY_PR_AUC_MARGIN,
         run_configuration={
             "c_miss": C_MISS, "c_false_alarm": C_FALSE_ALARM,
@@ -535,10 +555,13 @@ def main():
             "validation_fraction": EXPECTED_VALIDATION_FRACTION,
             "split_seed": EXPECTED_SPLIT_SEED,
         },
-        split_metadata={
-            "validation_passage_ids": split["validation_passage_ids"],
-            "test_passage_ids": split["held_out_passage_ids"],
-        },
+        # The evaluated held-out IDs are compared against the split re-derived
+        # at the frozen fraction and seed. frozen_split already verified this;
+        # passing both here lets assess_claim record that verification instead
+        # of reporting the split as unverified.
+        split_metadata=claim_split_metadata(split),
+        expected_validation_passage_ids=split["validation_passage_ids"],
+        expected_test_passage_ids=split["held_out_passage_ids"],
     )
     asymmetry = retrieval_protocol_asymmetry(bse_obs, ddre_obs, max_docs=MAX_DOCS)
 
@@ -660,6 +683,7 @@ def print_report(bse, ddre, deltas, reductions, bootstrap, claim, asymmetry):
         )
 
     print(f"\n  claim status              {claim['claim_status']}")
+    print(f"  validation selection               {claim['validation_selection']}")
     print(f"  validation selection confirmatory  {claim['validation_selection_confirmatory']}")
     print(f"  interpretation            {claim['interpretation']}")
     print("\n  D-02 RETRIEVAL PROTOCOL ASYMMETRY (descriptive; no correction applied)")
