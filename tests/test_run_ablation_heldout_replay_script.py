@@ -146,6 +146,29 @@ def _pinned_for(module, p, path):
     return S.PREREGISTRATION_SHA256
 
 
+class TestEndOfRunCheck(unittest.TestCase):
+    def test_every_input_verified_at_start_is_rechecked_including_preregistration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = M.paths(Path(tmp))
+            p["preregistration"] = Path(tmp) / "prereg.md"
+            for name in list(M.PINNED) + ["preregistration"]:
+                p[name].write_text(name)
+            digests = {name: M.sha256_file(p[name]) for name in list(M.PINNED) + ["preregistration"]}
+            M.verify_unchanged(p, digests)
+            p["preregistration"].write_text("edited during the run")
+            with self.assertRaises(R.ReplayRefused) as ctx:
+                M.verify_unchanged(p, digests)
+            self.assertIn("preregistration", str(ctx.exception))
+
+    def test_main_rechecks_the_digests_returned_by_verify_inputs(self):
+        main = next(n for n in ast.walk(TREE) if isinstance(n, ast.FunctionDef)
+                    and n.name == "main")
+        self.assertIn("verify_unchanged(p, digests)", ast.unparse(main))
+        verify = next(n for n in ast.walk(TREE) if isinstance(n, ast.FunctionDef)
+                      and n.name == "verify_inputs")
+        self.assertIn("expected['preregistration']", ast.unparse(verify))
+
+
 class TestRunOrder(unittest.TestCase):
     def _main(self, tmp, *, dry_run, replay_rows):
         canonical = Path(tmp) / M.PINNED["canonical_predictions"][0]
