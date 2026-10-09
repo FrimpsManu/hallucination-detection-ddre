@@ -64,6 +64,10 @@ B_TO_C_SHARE = 0.8
 BALANCED_MARGIN = 0.01
 PREDICTION_SHARE = 0.25
 
+# Machine-precision allowance used ONLY to implement the inclusive "within
+# 0.01" boundary in binary floating point. Not a scientific tolerance.
+ROUNDOFF_ULPS = 4
+
 FORBIDDEN_CAUSAL_PHRASES = ("proves", "causes", "is caused by", "comes from", "explains why")
 
 
@@ -269,6 +273,20 @@ def _quantities_keys():
 
 # ---------------------------------------------------------------- interpretation
 
+def within_closed_margin(difference, *operands, margin=BALANCED_MARGIN):
+    """``difference <= margin``, with the preregistered boundary inclusive.
+
+    Numerical implementation of the closed boundary, not a tolerance change.
+    In binary floating point 0.74 - 0.73 evaluates to 0.010000000000000009, so
+    a difference that is exactly 0.01 in decimal would fail a plain ``<=``.
+    The allowance is a few units in the last place of the floats involved
+    (about 1e-16 at PR-AUC scale), i.e. pure roundoff; any difference that
+    exceeds 0.01 by more than roundoff still fails.
+    """
+    allowance = ROUNDOFF_ULPS * max(math.ulp(abs(x)) for x in (margin, *operands))
+    return difference <= margin + allowance
+
+
 def interpret(endpoints, balanced):
     """The preregistered rules (§7) and prediction (§8), evaluated mechanically.
 
@@ -281,9 +299,12 @@ def interpret(endpoints, balanced):
     s_d = endpoints["docs_S_D"]["observed"]
     cd = endpoints["docs_C_minus_D"]
     a_b = s_b >= A_TO_B_SHARE * s_d
-    b_c = (s_c >= B_TO_C_SHARE * s_d) and abs(balanced["C"] - balanced["D"]) <= BALANCED_MARGIN
+    b_c = (s_c >= B_TO_C_SHARE * s_d) and within_closed_margin(
+        abs(balanced["C"] - balanced["D"]), balanced["C"], balanced["D"])
     ci_excludes_zero = cd["ci_lower"] > 0 or cd["ci_upper"] < 0
-    c_d = ci_excludes_zero and balanced["D"] >= balanced["C"] - BALANCED_MARGIN
+    # "D's balanced PR-AUC is not lower than C's by more than 0.01".
+    c_d = ci_excludes_zero and within_closed_margin(
+        balanced["C"] - balanced["D"], balanced["C"], balanced["D"])
     ratio_b = endpoints["ratio_S_B_over_S_D"]["observed"]
     return {
         "status": STATUS,

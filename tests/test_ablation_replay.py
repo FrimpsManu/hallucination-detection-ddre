@@ -231,13 +231,33 @@ class TestInterpretation(unittest.TestCase):
                          ["A_to_B"]["condition_met"])
 
     def test_b_to_c_needs_share_and_balanced_margin(self):
-        # Plain float comparison, no epsilon: the preregistration states none.
         ok = R.interpret(endpoints(0.1, 0.8, 1.0, 0.1, 0.2), dict(BAL, C=0.735, D=0.74))
         self.assertTrue(ok["B_to_C"]["condition_met"])
         far = R.interpret(endpoints(0.1, 0.8, 1.0, 0.1, 0.2), dict(BAL, C=0.72, D=0.74))
         self.assertFalse(far["B_to_C"]["condition_met"])
         short = R.interpret(endpoints(0.1, 0.79, 1.0, 0.1, 0.2), BAL)
         self.assertFalse(short["B_to_C"]["condition_met"])
+
+    def test_margin_boundary_is_closed_in_floating_point(self):
+        # Numerical implementation of the inclusive preregistered boundary.
+        self.assertEqual(R.BALANCED_MARGIN, 0.01)
+        self.assertGreater(0.74 - 0.73, 0.01)  # the binary-float artefact
+        self.assertTrue(R.within_closed_margin(0.74 - 0.73, 0.74, 0.73))
+        self.assertFalse(R.within_closed_margin(0.7401 - 0.73, 0.7401, 0.73))
+        self.assertFalse(R.within_closed_margin(0.01 + 1e-12, 0.5, 0.49))
+
+    def test_decimal_boundary_passes_both_margin_rules(self):
+        at = dict(BAL, C=0.73, D=0.74)
+        self.assertTrue(R.interpret(endpoints(0.1, 0.8, 1.0, 0.1, 0.2), at)
+                        ["B_to_C"]["condition_met"])
+        lower = dict(BAL, C=0.74, D=0.73)  # D lower than C by exactly 0.01
+        self.assertTrue(R.interpret(endpoints(0.1, 0.5, 1.0, -0.8, -0.2), lower)
+                        ["C_to_D"]["condition_met"])
+        beyond = dict(BAL, C=0.7401, D=0.73)
+        self.assertFalse(R.interpret(endpoints(0.1, 0.5, 1.0, -0.8, -0.2), beyond)
+                         ["C_to_D"]["condition_met"])
+        self.assertFalse(R.interpret(endpoints(0.1, 0.8, 1.0, 0.1, 0.2), dict(BAL, C=0.7299, D=0.74))
+                         ["B_to_C"]["condition_met"])
 
     def test_c_to_d_needs_ci_excluding_zero(self):
         self.assertTrue(R.interpret(endpoints(0.1, 0.5, 1.0, -0.8, -0.2), BAL)
