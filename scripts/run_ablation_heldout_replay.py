@@ -100,6 +100,13 @@ def verify_inputs(p):
     return digests
 
 
+def verify_unchanged(p, digests):
+    """Every input verified at the start, the preregistration included, is unchanged."""
+    changed = [name for name, sha in digests.items() if sha256_file(p[name]) != sha]
+    if changed:
+        raise R.ReplayRefused(f"inputs changed during the replay: {changed}")
+
+
 def held_out(data_root, canonical_result):
     records, split = frozen.frozen_split(data_root)
     for field in ("held_out_passage_ids_sha256", "validation_passage_ids_sha256"):
@@ -232,9 +239,7 @@ def main():
     balanced = {c: metrics[c]["balanced_pr_auc"] for c in R.CELLS}
     interpretation = R.interpret(bootstrap["endpoints"], balanced)
 
-    after = {name: sha256_file(p[name]) for name in PINNED}
-    if any(after[k] != digests[k] for k in PINNED):
-        raise R.ReplayRefused("a pinned input changed during the replay")
+    verify_unchanged(p, digests)
 
     result = {
         "artifact": "ablation-heldout-replay",
