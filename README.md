@@ -4,11 +4,15 @@ Research code for an in-progress paper extending Wang et al., **“Hallucination
 
 ## Research objective
 
-The objective is to develop a retrieval-aware hallucination-detection framework that **reduces computational overhead while improving factuality-detection performance** relative to Bayesian sequential estimation (BSE). The application motivation is reliable, lower-latency LLM-based enterprise customer-service systems.
+The objective is to develop a retrieval-aware hallucination-detection framework that **reduces computational overhead while maintaining factuality-detection performance** relative to Bayesian sequential estimation (BSE). The application motivation is reliable, lower-latency LLM-based enterprise customer-service systems.
 
-## Research question
+## Research questions
 
-**Can retrieval-aware direct density-ratio estimation reduce the computational cost of hallucination detection while improving factuality-detection performance compared with Bayesian sequential estimation?**
+**RQ1.** Can retrieval-aware direct density-ratio estimation reduce the computational cost of sequential hallucination detection while maintaining factuality-detection performance comparable to Bayesian sequential estimation?
+
+**RQ2.** Which part of the method produces the saving: the stopping rule, how strongly each piece of evidence is weighted, or the learned shape of the density ratio?
+
+The original question asked whether DDRE could reduce cost *while improving* detection performance. The held-out results support lower cost at comparable quality, not better quality, so RQ1 was revised after those results and RQ2 was added. Improvement remains a secondary question and is reported as found. See [`docs/ablation_results_summary.md`](docs/ablation_results_summary.md).
 
 ## Controlled comparison
 
@@ -128,13 +132,13 @@ The released Wang repository already contains the ordered web pages returned by 
 
 ## Hypothesis test
 
-The generated result file explicitly reports whether the primary hypothesis is supported on the held-out test data. The current predeclared rule requires DDRE to:
-
-1. retrieve fewer documents than `bse_official`;
-2. improve factual AUC-PR; and
-3. not reduce balanced PR-AUC.
-
-This prevents us from declaring success by selecting only favorable metrics after seeing the test results.
+The claim rule is the pre-registered conjunctive rule in
+[`docs/confirmatory_statistical_protocol.md`](docs/confirmatory_statistical_protocol.md):
+a paired passage-level bootstrap must show DDRE retrieving fewer documents than
+`bse_official`, and every PR-AUC difference must stay within the 0.005
+non-inferiority margin. The frozen held-out run met the efficiency gate but not
+the margin, and is `NOT_CONFIRMATORY` because its configuration came from a
+post-D-03 validation sweep.
 
 ## Data preparation
 
@@ -1188,4 +1192,11 @@ committed.
 
 ## Research status
 
-This is active research code. Numerical claims for the paper abstract should come only from a successful Wang-aligned full experiment and should be reported even if the DDRE hypothesis is not supported.
+- **Done on SelfCheckGPT (frozen):**
+  - the frozen held-out comparison: DDRE used 20.7% fewer documents and 22.0% fewer NLI calls than BSE, with PR-AUC differences whose intervals include zero (`NOT_CONFIRMATORY`);
+  - the descriptive post-hoc analysis;
+  - the preregistered A/B/C/D ablation.
+
+  Results are in [`docs/ablation_results_summary.md`](docs/ablation_results_summary.md). The held-out artifacts are stored locally and identified by SHA-256 in that document.
+- **Next:** a frozen-transfer generalization test on FActScore, chosen in [`docs/generalization_dataset_survey.md`](docs/generalization_dataset_survey.md). It will be preregistered before any run. After that: simple baselines, cost–quality curves and a runtime measurement.
+- Numerical claims are reported whether or not they support the hypotheses.
