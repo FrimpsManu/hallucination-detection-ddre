@@ -477,3 +477,49 @@ def format_report(gate_report):
         lines.append(f"Warned: {', '.join(gate_report['warned_metrics'])}")
     lines.append("=" * 100)
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Float32 precision check (not a formal Gate 1 run)
+# ---------------------------------------------------------------------------
+
+# Wang's released environment (conda_env.yml: transformers 4.29.2, torch
+# 2.0.1) loads the checkpoint in float32. transformers 5 loads its stored
+# float16 instead, so every formal artifact here was scored in float16. The
+# precision check reruns the gate with the weights forced to float32.
+PRECISION_CHOICES = ("checkpoint", "float32")
+PRECISION_MARKER_SUFFIX = ".dtype"
+
+
+class PrecisionCacheRefused(RuntimeError):
+    pass
+
+
+def precision_cache_guard(cache_path, dtype, default_cache_path):
+    """Refuse a float32 run that could read or write float16 cache rows.
+
+    The cache key holds the model name, score version, premise and hypothesis
+    but not the dtype. A float32 run therefore needs its own cache, marked as
+    float32 by a sidecar file written before the first score. Returns the
+    marker path, or ``None`` for the unchanged checkpoint-dtype path.
+    """
+    from pathlib import Path
+
+    if dtype == "checkpoint":
+        return None
+    if dtype not in PRECISION_CHOICES:
+        raise PrecisionCacheRefused(f"unknown dtype {dtype!r}")
+    cache = Path(cache_path)
+    if cache.resolve() == Path(default_cache_path).resolve():
+        raise PrecisionCacheRefused(
+            "a float32 run must not use the default (float16) cache; pass --cache-path"
+        )
+    marker = cache.with_name(cache.name + PRECISION_MARKER_SUFFIX)
+    if cache.exists():
+        recorded = marker.read_text().strip() if marker.exists() else None
+        if recorded != dtype:
+            raise PrecisionCacheRefused(
+                f"{cache} exists and is not marked as a {dtype} cache "
+                f"(marker: {recorded!r}); use a new path"
+            )
+    return marker
