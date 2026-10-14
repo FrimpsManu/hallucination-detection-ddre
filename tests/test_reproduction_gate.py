@@ -345,3 +345,59 @@ class TestPreconditionsGateTheVerdict(unittest.TestCase):
             evaluate_protocol_preconditions(provenance(model_name="x")),
         )
         self.assertIn("NOT A FORMAL GATE 1 RUN", format_report(report))
+
+
+class TestFloat32PrecisionCheck(unittest.TestCase):
+    """The float32 check never touches float16 cache rows and is never formal."""
+
+    def setUp(self):
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = pathlib.Path(self.tmp.name)
+        self.default = self.dir / "wang_nli_cache.sqlite"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def guard(self, cache, dtype="float32"):
+        from src.reproduction_gate import precision_cache_guard
+
+        return precision_cache_guard(cache, dtype, self.default)
+
+    def test_checkpoint_dtype_is_unchanged(self):
+        self.assertIsNone(self.guard(self.default, "checkpoint"))
+
+    def test_float32_refuses_the_default_cache(self):
+        from src.reproduction_gate import PrecisionCacheRefused
+
+        with self.assertRaises(PrecisionCacheRefused):
+            self.guard(self.default)
+
+    def test_float32_accepts_a_new_cache_and_names_its_marker(self):
+        marker = self.guard(self.dir / "fp32.sqlite")
+        self.assertEqual(marker.name, "fp32.sqlite.dtype")
+
+    def test_float32_refuses_an_existing_unmarked_or_float16_cache(self):
+        from src.reproduction_gate import PrecisionCacheRefused
+
+        cache = self.dir / "other.sqlite"
+        cache.write_bytes(b"")
+        with self.assertRaises(PrecisionCacheRefused):
+            self.guard(cache)
+        (self.dir / "other.sqlite.dtype").write_text("checkpoint\n")
+        with self.assertRaises(PrecisionCacheRefused):
+            self.guard(cache)
+
+    def test_float32_resumes_its_own_marked_cache(self):
+        cache = self.dir / "fp32.sqlite"
+        cache.write_bytes(b"")
+        (self.dir / "fp32.sqlite.dtype").write_text("float32\n")
+        self.assertIsNotNone(self.guard(cache))
+
+    def test_script_loads_float32_and_stamps_the_run_non_formal(self):
+        source = (pathlib.Path(__file__).resolve().parents[1]
+                  / "scripts" / "reproduce_wang_baseline.py").read_text()
+        self.assertIn('load_kwargs["dtype"] = torch.float32', source)
+        self.assertIn('report["formal_gate1_run"] = False', source)
+        self.assertIn('default="checkpoint"', source)
