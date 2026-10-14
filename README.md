@@ -335,8 +335,44 @@ key.
 **This is not a claim that scaling order explains every difference from Wang's
 Table 1.** It explains the A1/A3 scorer-path discrepancy that Step 2 was built
 to isolate. Whether the corrected scorer brings the full reproduction back
-within the predeclared Gate 1 tolerances is exactly what the Gate 1 rerun will
-test, and it has not been run.
+within the predeclared Gate 1 tolerances is what the Gate 1 rerun tested. That
+rerun has since been run; its outcome is below.
+
+## Gate 1 v2 outcome: corrected scorer
+
+The rerun used the corrected (`...-hostscale-v2`) scorer on all 238 passages
+(1,908 sentences), MPS, batch size 1, at repository commit `925304c` (clean
+tree). Artifact: `wang_reproduction_fidelity_v2_batch1_mps.json`, SHA-256
+`38a4a1521f89b94a2d16d2d21c2d8b18f236f86fba9ca7478612149d171a8f74`, stored
+locally under `~/ddre-artifacts/gate1-2026-09-20/` and not committed.
+
+| Metric | CM 28 / CFA 96: published → reproduced | CM 14 / CFA 24: published → reproduced |
+|---|---|---|
+| Nonfactual AUC-PR | 0.8645 → 0.8595 PASS | 0.8242 → 0.8423 WARN |
+| Factual AUC-PR | 0.6196 → 0.6253 PASS | 0.5701 → 0.5928 WARN |
+| Accuracy | 0.8239 → 0.8218 PASS | 0.8024 → 0.8082 PASS |
+| Passage Pearson | 0.8118 → 0.8080 PASS | 0.7137 → 0.7705 **FAIL** |
+| Passage Spearman | 0.7420 → 0.7259 PASS | 0.6455 → 0.7028 **FAIL** |
+| Docs per sentence | 6.22 → 6.47 PASS | 3.05 → 3.54 **FAIL** |
+
+**Overall verdict: FAIL.** The CM 28 / CFA 96 configuration reproduces within
+every PASS tolerance. The CM 14 / CFA 24 configuration does not: it retrieves
+16% more documents than published and scores higher on every quality metric.
+The cause is not established. Two open explanations are the two unreleased NBC
+examples (the sensitivity analysis below is `INCONCLUSIVE_PARTIAL_CACHE_COVERAGE`,
+0 of 97 completed placements pass) and numeric precision: this run loaded the
+checkpoint in its stored float16, while Wang's released environment
+(transformers 4.29.2, torch 2.0.1) loads it in float32. A float32 rerun has not
+been done.
+
+**Recorded retrospectively: how the FAIL was handled.** This README calls a
+Gate 1 FAIL a stop condition. Every later experiment (the frozen held-out
+comparison, the ablation and the FActScore transfer test) uses only
+CM 28 / CFA 96, the configuration that passed, and none of them uses
+CM 14 / CFA 24. That was the basis for proceeding, but no written waiver was
+recorded before the held-out run. This paragraph records it after the fact. The
+CM 14 / CFA 24 discrepancy remains unexplained and is disclosed with every
+result.
 
 ## Sensitivity analysis: the two unreleased NBC examples
 
@@ -672,7 +708,8 @@ no-op: the second pass evaluates zero spans.
 
 ## Gate 1 scoring-path diagnostics
 
-Gate 1 has been run and FAILED against the predeclared tolerances. These two
+Gate 1 failed against the predeclared tolerances; the v2 outcome above records
+the corrected-scorer result, which fails at CM 14 / CFA 24 only. These two
 scripts diagnose *why*. They are instruments: they measure and report, and they
 change nothing. No baseline behaviour, tolerance, published reference value,
 split, or cost parameter is touched by either of them, and nothing in the normal
