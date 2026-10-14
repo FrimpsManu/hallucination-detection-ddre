@@ -57,9 +57,11 @@ PINNED_RELEASE = {
                  "44f479128d41818fe5a056f125407dbde75a8735669c398a3b945cfeaa310d09"),
     "evidence_manifest": ("factscore_evidence_manifest.json",
                           "4983050b19eedcee5a3bbd2ac01bbda1a4f08bf3e38e8a6f46d812315eb2ced4"),
-    # Pinned once the one-time scoring run has finished (prereg §9 step 3).
-    "score_cache": ("factscore_nli_cache.sqlite", None),
-    "score_cache_manifest": ("factscore_nli_cache_manifest.json", None),
+    # The one-time scoring run (prereg §9 step 3), from main b56bebe.
+    "score_cache": ("factscore_nli_cache.sqlite",
+                    "7bd69b0c4a2e809311be9a9748cb1fba53ed09fee1c98d4e5fe7c4c2bb2edff0"),
+    "score_cache_manifest": ("factscore_nli_cache_manifest.json",
+                             "49f1be3adcff3c385c6d9778c2de28aa8cd1df7320d1390d11509b5f33a2a1cd"),
 }
 PINNED_ARTIFACTS = {
     "validation_freeze": RM.PINNED["validation_freeze"],

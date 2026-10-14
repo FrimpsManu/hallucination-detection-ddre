@@ -138,6 +138,11 @@ class TestScript(unittest.TestCase):
         self.assertEqual(pins["evidence"],
                          "44f479128d41818fe5a056f125407dbde75a8735669c398a3b945cfeaa310d09")
         self.assertEqual(pins["preregistration"], S.PREREGISTRATION_SHA256)
+        self.assertEqual(pins["score_cache"],
+                         "7bd69b0c4a2e809311be9a9748cb1fba53ed09fee1c98d4e5fe7c4c2bb2edff0")
+        self.assertEqual(pins["score_cache_manifest"],
+                         "49f1be3adcff3c385c6d9778c2de28aa8cd1df7320d1390d11509b5f33a2a1cd")
+        self.assertNotIn(None, pins.values())
 
     def test_unpinned_or_existing_outputs_are_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
