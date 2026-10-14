@@ -1,10 +1,8 @@
-# Multivariate DDRE: design (draft for review)
+# Multivariate DDRE: preregistration
 
-**Status: DRAFT. Not frozen.** Written on 2026-10-14 before any multivariate
-feature has been computed, any multivariate estimator has been fit, or any new
-method has been run on any dataset. It becomes the preregistration once the
-open decisions in §10 are settled and it is merged. Until then nothing in §5–§8
-is run.
+**Status: frozen when merged to `main`.** Written on 2026-10-14 before any
+multivariate feature has been computed, any multivariate estimator has been fit,
+or any new method has been run on any dataset. Changes after merge follow §11.
 
 ## 0. Why a new design
 
@@ -199,17 +197,26 @@ not extrapolated.
 - Cost is counted in documents and NLI calls. Wall-clock time is measured
   separately.
 
-## 10. Open decisions (for review before freezing)
+## 10. Decisions (settled at review)
 
-1. **Training data:** the entity-disjoint FActScore split (§4, recommended), or
-   another source.
-2. **Confirmatory dataset:** Factcheck-Bench (recommended; the only untouched
-   option that fits the sequential setup). RAGTruth was considered, but it
-   provides at most 3 documents per claim and measures faithfulness to a given
-   context rather than factuality, so it has almost no retrieval cost to save.
-3. **Cell L (logistic regression):** recommended. Reviewers will ask whether a
-   plain classifier does as well. If it does, the contribution is the
-   multivariate evidence model, not uLSIF specifically, and the paper should
-   say so.
-4. **Precision:** float16 as before, or float32. Decided after the float32
-   Gate 1 check reports.
+1. **Training data:** the entity-disjoint FActScore split of §4.
+2. **Confirmatory dataset:** Factcheck-Bench. RAGTruth was considered and not
+   used: it provides at most 3 documents per claim and measures faithfulness to
+   a given context rather than factuality, so it leaves almost no retrieval cost
+   to save.
+3. **Cell L (logistic regression):** included. If L performs as well as M, the
+   contribution is the multivariate evidence model, not uLSIF specifically, and
+   the paper says so.
+4. **Precision, fixed by rule before the float32 Gate 1 check reports:**
+   - The new scoring (§8 step 2) uses **float32** if that check's
+     CM 14 / CFA 24 verdict improves on the float16 FAIL, meaning no metric at
+     FAIL.
+   - Otherwise it uses **float16**, consistent with every existing cache.
+   - Either way, cell A's replay uses scores of the same precision as every
+     other cell on the same test set.
+
+## 11. Amendments
+
+Any change after merge is a dated amendment in this file. Each amendment states
+what changed, why, and whether any test-set result had been seen. Changes made
+after a test-set result has been seen make the affected endpoint exploratory.
