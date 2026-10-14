@@ -1198,5 +1198,6 @@ committed.
   - the preregistered A/B/C/D ablation.
 
   Results are in [`docs/ablation_results_summary.md`](docs/ablation_results_summary.md). The held-out artifacts are stored locally and identified by SHA-256 in that document.
-- **Next:** a frozen-transfer generalization test on FActScore, chosen in [`docs/generalization_dataset_survey.md`](docs/generalization_dataset_survey.md). It will be preregistered before any run. After that: simple baselines, cost–quality curves and a runtime measurement.
+- **Done on FActScore (preregistered frozen transfer):** cells A–D run once, exactly as frozen, on the ChatGPT and PerplexityAI biographies (2,573 sentences, 172 entities; dataset chosen in [`docs/generalization_dataset_survey.md`](docs/generalization_dataset_survey.md)). DDRE kept BSE's balanced PR-AUC within the preregistered margin (D − A −0.002, 95% CI [−0.028, 0.023]) but used 9.4% *more* documents and NLI calls (CI entirely below zero), so the efficiency saving did not transfer and RQ1 is not supported on FActScore. Results are in [`docs/factscore_transfer_results_summary.md`](docs/factscore_transfer_results_summary.md).
+- **Next (not yet decided):** exploratory diagnosis of the FActScore cost result and cost–quality curves on the existing caches, then a runtime measurement. Any new method needs a further dataset for confirmation, since FActScore has now been seen.
 - Numerical claims are reported whether or not they support the hypotheses.
