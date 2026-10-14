@@ -42,6 +42,9 @@ from src.evaluation import evaluate_detector
 from src.provenance import collect_provenance
 from src.reproduction_gate import (
     OFFICIAL_NLI_MODEL,
+    PRECISION_CHOICES,
+    PrecisionCacheRefused,
+    precision_cache_guard,
     PUBLISHED_TABLE1,
     STATUS_FAIL,
     STATUS_PASS,
@@ -63,6 +66,8 @@ OFFICIAL_MODEL = OFFICIAL_NLI_MODEL
 # actual count is recorded dynamically alongside this protocol value.
 PAPER_PROTOCOL_NBC_PER_CLASS = 200
 
+DEFAULT_CACHE_PATH = "results/wang_nli_cache.sqlite"
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -73,7 +78,7 @@ def parse_args():
     )
     parser.add_argument("--data-root", default="data/wang")
     parser.add_argument("--model-name", default=OFFICIAL_MODEL)
-    parser.add_argument("--cache-path", default="results/wang_nli_cache.sqlite")
+    parser.add_argument("--cache-path", default=DEFAULT_CACHE_PATH)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--nbc-per-class", type=int, default=200)
     parser.add_argument(
@@ -85,6 +90,22 @@ def parse_args():
         ),
     )
     parser.add_argument("--output", default=None)
+    parser.add_argument(
+        "--dtype",
+        choices=PRECISION_CHOICES,
+        default="checkpoint",
+        help=(
+            "Model weight dtype. 'checkpoint' (default) keeps the stored dtype, as "
+            "every formal run did. 'float32' matches Wang's released environment; "
+            "it is a precision check, needs its own --cache-path and --output, and "
+            "is never a formal Gate 1 run."
+        ),
+    )
+    parser.add_argument(
+        "--revision",
+        default=None,
+        help="Pin the checkpoint revision (default: whatever the hub resolves).",
+    )
     return parser.parse_args()
 
 
@@ -123,9 +144,18 @@ def build_scorer(args):
     batch_size = args.batch_size or (8 if torch.cuda.is_available() else 2)
     print(f"NLI model: {args.model_name}")
     print(f"Device: {device}; batch size: {batch_size}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    model = AutoModelForSequenceClassification.from_pretrained(args.model_name).to(device)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, revision=args.revision)
+    load_kwargs = {"revision": args.revision}
+    if args.dtype == "float32":
+        load_kwargs["dtype"] = torch.float32
+    model = AutoModelForSequenceClassification.from_pretrained(
+        args.model_name, **load_kwargs
+    ).to(device)
     model.eval()
+    model_dtype = next(model.parameters()).dtype
+    print(f"Model dtype: {model_dtype}")
+    if args.dtype == "float32" and model_dtype != torch.float32:
+        raise PrecisionCacheRefused(f"requested float32, model loaded as {model_dtype}")
     scorer = EntailmentScorer(
         tokenizer,
         model,
@@ -325,6 +355,14 @@ def run_gate(scorer, provenance, preconditions, nbc_metadata, pos_hist, neg_hist
 def main():
     args = parse_args()
     Path("results").mkdir(exist_ok=True)
+    marker = precision_cache_guard(args.cache_path, args.dtype, DEFAULT_CACHE_PATH)
+    if marker is not None:
+        if not args.output:
+            raise PrecisionCacheRefused("a float32 run must pass --output")
+        if Path(args.output).exists():
+            raise PrecisionCacheRefused(f"{args.output} already exists")
+        Path(args.cache_path).parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(args.dtype + "\n")
 
     scorer, tokenizer, model, device, batch_size = build_scorer(args)
     try:
@@ -338,6 +376,9 @@ def main():
             model=model,
             repo_root=PROJECT_ROOT,
         )
+        provenance["runtime"]["model_dtype"] = str(next(model.parameters()).dtype)
+        provenance["runtime"]["requested_dtype"] = args.dtype
+        provenance["runtime"]["checkpoint_revision_requested"] = args.revision
         preconditions = evaluate_protocol_preconditions(provenance)
         print()
         print(format_preconditions(preconditions))
@@ -403,6 +444,20 @@ def main():
                 records,
             )
 
+        if args.dtype != "checkpoint":
+            # A precision check is a diagnostic, never a formal Gate 1 run.
+            report["formal_gate1_run"] = False
+            if "gate" in report:
+                report["gate"]["formal_gate1_run"] = False
+            report["precision_check"] = {
+                "requested_dtype": args.dtype,
+                "model_dtype": provenance["runtime"]["model_dtype"],
+                "cache_path": args.cache_path,
+                "purpose": (
+                    "Does loading the checkpoint in float32, as Wang's released "
+                    "environment did, change the Gate 1 comparison? Diagnostic only."
+                ),
+            }
         with output_path.open("w", encoding="utf-8") as handle:
             json.dump(report, handle, indent=2)
         print(f"\nWritten to {output_path}")
