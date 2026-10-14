@@ -62,6 +62,12 @@ class Standardizer:
     def to_json(self):
         return {"mean": self.mean.tolist(), "std": self.std.tolist()}
 
+    @classmethod
+    def from_json(cls, d):
+        out = cls()
+        out.mean, out.std = np.asarray(d["mean"]), np.asarray(d["std"])
+        return out
+
 
 class HistogramEvidence:
     """BSE's histogram evidence on e (cells A and A')."""
@@ -87,6 +93,12 @@ class HistogramEvidence:
 
     def to_json(self):
         return {"kind": "histogram", "pos_hist": self.pos_hist, "neg_hist": self.neg_hist}
+
+    def likelihoods(self, doc):
+        """(P(bucket | factual), P(bucket | hallucinated)) as BSE uses them."""
+        b = discretize_document_score(doc["e"])
+        return (self.pos_hist[b] / float(sum(self.pos_hist)),
+                self.neg_hist[b] / float(sum(self.neg_hist)))
 
 
 def _kernel(x, centers, sigma):
@@ -187,6 +199,15 @@ class MultiULSIF:
                 "centers": self.centers.tolist(), "alpha": self.alpha.tolist(),
                 "cv_table": self.cv_table, "diagnostics": self.diagnostics}
 
+    @classmethod
+    def from_json(cls, d):
+        out = cls(d["features"])
+        out.scale = Standardizer.from_json(d["scale"])
+        out.sigma, out.lam, out.normaliser = d["sigma"], d["lambda"], d["normaliser"]
+        out.centers, out.alpha = np.asarray(d["centers"]), np.asarray(d["alpha"])
+        out.cv_table, out.diagnostics = d["cv_table"], d["diagnostics"]
+        return out
+
 
 class LogisticRatio:
     """Classifier-based density ratio (cell L)."""
@@ -204,6 +225,7 @@ class LogisticRatio:
         y = np.r_[np.ones(len(F)), np.zeros(len(Hx))]
         self.model = LogisticRegressionCV(Cs=LOGISTIC_CS, cv=CV_FOLDS, scoring="neg_log_loss",
                                           max_iter=2000).fit(X, y)
+        self.coef, self.intercept = self.model.coef_[0], float(self.model.intercept_[0])
         self.prior_correction = math.log(len(Hx) / len(F))
         r_h = np.exp([self._log_ratio_std(x) for x in self.scale(Hx)])
         r_f = np.exp([self._log_ratio_std(x) for x in self.scale(F)])
@@ -214,7 +236,7 @@ class LogisticRatio:
         return self
 
     def _log_ratio_std(self, x_std):
-        logit = float(self.model.decision_function(np.atleast_2d(x_std))[0])
+        logit = float(np.dot(self.coef, np.ravel(x_std)) + self.intercept)
         return float(np.clip(logit + self.prior_correction, *np.log(RATIO_CLIP)))
 
     def log_ratio(self, doc):
@@ -222,6 +244,26 @@ class LogisticRatio:
 
     def to_json(self):
         return {"kind": "logistic", "features": list(self.names),
-                "scale": self.scale.to_json(), "coef": self.model.coef_[0].tolist(),
-                "intercept": float(self.model.intercept_[0]),
+                "scale": self.scale.to_json(), "coef": self.coef.tolist(),
+                "intercept": self.intercept,
                 "prior_correction": self.prior_correction, "diagnostics": self.diagnostics}
+
+    @classmethod
+    def from_json(cls, d):
+        out = cls(d["features"])
+        out.scale = Standardizer.from_json(d["scale"])
+        out.coef, out.intercept = np.asarray(d["coef"]), float(d["intercept"])
+        out.prior_correction, out.diagnostics = d["prior_correction"], d["diagnostics"]
+        return out
+
+
+def from_json(d):
+    """Any fitted estimator from its ``to_json`` record."""
+    kind = d["kind"]
+    if kind == "histogram":
+        return HistogramEvidence(d["pos_hist"], d["neg_hist"])
+    if kind == "ulsif":
+        return MultiULSIF.from_json(d)
+    if kind == "logistic":
+        return LogisticRatio.from_json(d)
+    raise EstimatorError(f"unknown estimator kind {kind!r}")

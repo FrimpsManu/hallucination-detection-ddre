@@ -102,3 +102,17 @@ class TestFitScriptReadsTrainingOnly(unittest.TestCase):
         self.assertEqual(names & banned, set())
         self.assertIn("training, _, split = M.factscore_split", source)
         self.assertIn("out.chmod(0o444)", source)
+
+
+class TestRoundTrip(unittest.TestCase):
+    def test_every_estimator_round_trips_exactly(self):
+        import json
+
+        fitted = [E.HistogramEvidence.fit([55.0, 65.0], [15.0, 35.0]),
+                  E.MultiULSIF(E.FEATURE_SETS["M"]).fit(FACT, HALL),
+                  E.LogisticRatio(E.FEATURE_SETS["M"]).fit(FACT, HALL)]
+        probes = [{"e": 61.0, "k": 12.0, "rank": 2}, {"e": 33.0, "k": 47.0, "rank": 7}]
+        for est in fitted:
+            again = E.from_json(json.loads(json.dumps(est.to_json())))
+            for doc in probes:
+                self.assertEqual(again.log_ratio(doc), est.log_ratio(doc))
