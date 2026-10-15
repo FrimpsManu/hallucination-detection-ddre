@@ -72,3 +72,24 @@ class TestRetrievalScript(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDesignPins(unittest.TestCase):
+    def test_amendments_only_append_to_the_preregistration(self):
+        import tempfile
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[1]
+        self.assertEqual(M.design_problems(root, require_amendment_1=True), [])
+        text = (root / M.DESIGN_PATH).read_bytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / M.DESIGN_PATH
+            f.parent.mkdir(parents=True)
+            f.write_bytes(text[:M.DESIGN_PREREGISTERED_BYTES])
+            self.assertEqual(M.design_problems(tmp), [])
+            self.assertTrue(M.design_problems(tmp, require_amendment_1=True))
+            f.write_bytes(b"X" + text[1:])
+            self.assertIn("the design preregistration differs from its pinned digest",
+                          M.design_problems(tmp))
+            f.write_bytes(text + b"\nmore\n")
+            self.assertIn("the design file has an unpinned amendment", M.design_problems(tmp))
