@@ -23,13 +23,34 @@ class StubScorer:
 
 class TestBand(unittest.TestCase):
     def test_grid_and_threshold(self):
-        self.assertEqual(R.HALF_WIDTHS[0], 0.25)
-        self.assertEqual(R.HALF_WIDTHS[-1], 4.0)
-        self.assertEqual(len(R.HALF_WIDTHS), 16)
+        self.assertEqual(R.BAND_SCALES[0], 0.25)
+        self.assertEqual(R.BAND_SCALES[-1], 4.0)
+        self.assertEqual(len(R.BAND_SCALES), 16)
+        self.assertIn(1.0, R.BAND_SCALES)
         self.assertAlmostEqual(R.decision_threshold(), 28 / 124)
-        l, u = R.symmetric_band(1.0)
-        self.assertAlmostEqual(R._logit(u) - R._logit(R.decision_threshold()), 1.0)
-        self.assertAlmostEqual(R._logit(R.decision_threshold()) - R._logit(l), 1.0)
+
+    def test_scale_one_is_the_operating_point(self):
+        band = R.bse_band(BSEDetector(POS, NEG, mode="official"))
+        l, u = R.scaled_band(band, 1.0)
+        self.assertAlmostEqual(l, band[0], places=12)
+        self.assertAlmostEqual(u, band[1], places=12)
+        l, u = R.scaled_band(band, 2.0)
+        self.assertAlmostEqual(R._logit(l), 2 * R._logit(band[0]))
+        self.assertAlmostEqual(R._logit(u), 2 * R._logit(band[1]))
+
+    def test_every_curve_band_reads_at_least_one_document(self):
+        # Amendment 1 regression: the preregistered symmetric sweep had bands
+        # below P0 that stopped before any document, a constant P = 0.5.
+        band = R.bse_band(BSEDetector(POS, NEG, mode="official"))
+        for lo, hi in R.curve_bands(band):
+            self.assertLess(lo, R.P0)
+            self.assertGreater(hi, R.P0)
+            for lr in ([-9.0] * 5, [9.0] * 5, [0.0] * 5):
+                self.assertGreaterEqual(R.band_subclaim(lr, [1] * 5, lo, hi, 5)[1], 1)
+
+    def test_curve_refuses_a_band_without_p0(self):
+        with self.assertRaises(ValueError):
+            R.curve_bands((0.6, 0.8))
 
     def test_bse_official_continue_region_is_the_published_band(self):
         l, u = R.bse_band(BSEDetector(POS, NEG, mode="official"))
@@ -87,7 +108,7 @@ def synthetic(n_clusters=12):
             labels.append(int(rng.random() < 0.5))
             clusters.append(c)
     labels = np.array(labels)
-    nb = len(R.HALF_WIDTHS)
+    nb = len(R.BAND_SCALES)
 
     def cell(noise, docs_scale):
         p = np.clip(labels * 0.6 + 0.2 + rng.normal(0, noise, (nb, len(labels))), 0, 1)
@@ -133,10 +154,38 @@ class TestReplayScript(unittest.TestCase):
         self.assertEqual(S.CELLS, ("A", "A_prime", "U", "M", "L"))
         self.assertEqual(S.CHAIN, (("A", "A_prime"), ("A_prime", "U"), ("U", "M"), ("L", "M")))
         self.assertEqual(S.DATASETS["factcheck_bench"]["max_docs"], 5)
-        self.assertTrue(S.DATASETS["factcheck_bench"]["status"].startswith("confirmatory"))
-        self.assertTrue(all(v["status"].startswith("pre-specified")
-                            for k, v in S.DATASETS.items() if k != "factcheck_bench"))
+        self.assertTrue(all(v["status"].startswith("exploratory under amendment 1")
+                            for v in S.DATASETS.values()))
+        self.assertTrue(S.output_paths(Path("/x"), "float16")["result"].name
+                        .endswith("_amendment1.json"))
         names = {n.attr for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Attribute)}
         self.assertEqual(names & {"fit", "cv_table_select", "LogisticRegressionCV"}, set())
         self.assertLess(source.index("g1 = gate_engine"), source.index("sets, split = test_sets"))
         self.assertIn('p[k].chmod(0o444)', source)
+
+
+class TestGateG3(unittest.TestCase):
+    def test_exact_rows_pass_and_any_difference_fails(self):
+        import csv
+        import importlib.util
+        import tempfile
+        from pathlib import Path
+
+        path = Path(__file__).resolve().parents[1] / "scripts" / "run_mddre_replay.py"
+        spec = importlib.util.spec_from_file_location("run_mddre_replay", path)
+        S = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(S)
+        rows = [{"dataset": "d", "cell": "M", "id": "1", "cluster": 0, "gold_label": 1,
+                 "p_factual": 0.19336384439359272, "prediction": 0, "documents": 3,
+                 "nli_calls": 3, "subclaim_documents": [3]}]
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "frozen.csv"
+            with f.open("w", newline="") as handle:
+                w = csv.DictWriter(handle, fieldnames=list(rows[0]))
+                w.writeheader()
+                w.writerows(rows)
+            frozen = S.frozen_rows(f)
+        self.assertEqual(S.gate_frozen_operating_point(frozen, "d", rows), 0)
+        changed = [{**rows[0], "p_factual": 0.19336384439359267}]
+        self.assertEqual(S.gate_frozen_operating_point(frozen, "d", changed), 1)
+        self.assertEqual(S.gate_frozen_operating_point(frozen, "d", []), 1)

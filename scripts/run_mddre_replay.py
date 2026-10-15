@@ -6,19 +6,24 @@ Factcheck-Bench):
 
 - cell A runs BSE's official look-ahead with Wang's NBC histogram;
 - every cell runs the band rule at BSE's own band (the operating point) and
-  at the 16 preregistered symmetric half-widths (the cost-quality curve);
+  at BSE's band scaled in log-odds by 0.25 .. 4.0 (the cost-quality curve,
+  design amendment 1);
 - one paired cluster bootstrap gives the matched-quality saving, the
   matched-cost gain, the same-band differences and the RQ3 chain;
-- §7's rules are applied: confirmatory on Factcheck-Bench, pre-specified
-  replications on the other two.
+- §7's thresholds are applied and reported. Under amendment 1, RQ1, RQ2 and
+  the RQ3 chain are exploratory on every test set, because the first replay's
+  results had been seen.
 
-Two gates run before any test-set result is computed:
+The first replay's outputs stay frozen; this one writes ``*_amendment1`` files.
+Three gates run before any endpoint is reported:
 
 - **G1, engine:** on the SelfCheckGPT held-out set with the frozen float16
   scores, this engine must reproduce the canonical ablation predictions of
   cells A (official look-ahead) and D (frozen DDRE, band) exactly.
 - **G2, band:** on every test set, cell A's histogram under BSE's band must
   use exactly the same documents as the official look-ahead.
+- **G3, frozen operating point:** the operating point never used the curve, so
+  every row of the frozen first-replay predictions must be reproduced exactly.
 
 All inputs are read-only. Results are written once and made read-only.
 """
@@ -52,13 +57,22 @@ CHAIN = (("A", "A_prime"), ("A_prime", "U"), ("U", "M"), ("L", "M"))
 ABLATION_PREDICTIONS = ("ablation_heldout_predictions.csv",
                         "ebdcf5c2090cffbabbad81a628e0c04d297d0f85193318aa9c0d5903a50e260b")
 DATASETS = {
-    "factcheck_bench": {"max_docs": 5, "status": "confirmatory (untouched test set)"},
+    "factcheck_bench": {"max_docs": 5,
+                        "status": "exploratory under amendment 1 "
+                                  "(preregistered as the confirmatory test)"},
     "selfcheckgpt_heldout": {"max_docs": 10,
-                             "status": "pre-specified replication on previously used data"},
+                             "status": "exploratory under amendment 1 "
+                                       "(preregistered as a replication)"},
     "factscore_test": {"max_docs": 10,
-                       "status": "pre-specified replication on previously used data"},
+                       "status": "exploratory under amendment 1 "
+                                  "(preregistered as a replication)"},
 }
-STATUS = "preregistered (docs/multivariate_ddre_design.md); RQ3 exploratory"
+STATUS = ("amendment 1 (docs/multivariate_ddre_design.md §11): RQ1, RQ2 and the "
+          "RQ3 chain exploratory on every test set")
+FROZEN_FIRST_REPLAY = {
+    "result": "927e0a2d2388efa37147f2d4b4da7f9e533db55f2571275ca4abb23862541544",
+    "predictions": "c874d05f7bab41dfe0c033eb36ce2fb0f5648a452348e6ac5e30aee22526423a",
+}
 
 
 class MDDREReplayRefused(RuntimeError):
@@ -76,8 +90,10 @@ def parse_args():
 
 
 def output_paths(out_dir, dtype):
-    return {"result": out_dir / f"mddre_replay_result_{dtype}.json",
-            "predictions": out_dir / f"mddre_replay_predictions_{dtype}.csv",
+    return {"result": out_dir / f"mddre_replay_result_{dtype}_amendment1.json",
+            "predictions": out_dir / f"mddre_replay_predictions_{dtype}_amendment1.csv",
+            "frozen_result": out_dir / f"mddre_replay_result_{dtype}.json",
+            "frozen_predictions": out_dir / f"mddre_replay_predictions_{dtype}.csv",
             "estimators": out_dir / f"mddre_estimators_{dtype}.json",
             **{f"features_{k}": v for k, v in SF.output_paths(out_dir, dtype).items()}}
 
@@ -86,8 +102,7 @@ def verify_inputs(p, n_resamples):
     problems = []
     if n_resamples != R.N_RESAMPLES:
         problems.append(f"n_resamples is fixed at {R.N_RESAMPLES}")
-    if sha256_path(PROJECT_ROOT / M.DESIGN_PATH) != M.DESIGN_SHA256:
-        problems.append("the design preregistration differs from its pinned digest")
+    problems.extend(M.design_problems(PROJECT_ROOT, require_amendment_1=True))
     fm = json.loads(p["features_manifest"].read_text())
     if fm.get("status") != "complete" or sha256_path(p["features_cache"]) != fm.get("cache_sha256"):
         problems.append("the feature cache is not the complete, manifest-certified one")
@@ -97,12 +112,36 @@ def verify_inputs(p, n_resamples):
     name, sha = ABLATION_PREDICTIONS
     if sha256_path(SF.GATE1 / name) != sha:
         problems.append(f"{name} is not the frozen ablation predictions")
+    for k, sha in FROZEN_FIRST_REPLAY.items():
+        if not p[f"frozen_{k}"].exists() or sha256_path(p[f"frozen_{k}"]) != sha:
+            problems.append(f"{p[f'frozen_{k}']} is not the frozen first replay")
     for k in ("result", "predictions"):
         if p[k].exists():
-            problems.append(f"{p[k]} already exists; the replay runs once")
+            problems.append(f"{p[k]} already exists; the amended replay runs once")
     if problems:
         raise MDDREReplayRefused("inputs:\n  " + "\n  ".join(problems))
     return fm, est
+
+
+# ---------------------------------------------------------------- gate G3
+
+G3_FIELDS = ("gold_label", "p_factual", "prediction", "documents", "nli_calls",
+             "subclaim_documents")
+
+
+def frozen_rows(path):
+    """{(dataset, cell, id): row} from the frozen first-replay predictions."""
+    with open(path, newline="") as handle:
+        return {(r["dataset"], r["cell"], r["id"]): r for r in csv.DictReader(handle)}
+
+
+def gate_frozen_operating_point(frozen, name, rows):
+    """Rows of this dataset that differ from the frozen first replay (exact)."""
+    want = {k: v for k, v in frozen.items() if k[0] == name}
+    got = {(name, r["cell"], r["id"]): r for r in rows}
+    if set(want) != set(got):
+        return len(set(want) ^ set(got))
+    return sum(any(str(got[k][f]) != want[k][f] for f in G3_FIELDS) for k in want)
 
 
 # ---------------------------------------------------------------- gate G1
@@ -194,14 +233,14 @@ def nbc_histogram(reader, wang_root):
 def replay_dataset(sentences, estimators, bse, band, max_docs, reader):
     import numpy as np
 
-    nb = len(R.HALF_WIDTHS)
+    nb = len(R.BAND_SCALES)
     n = len(sentences)
     curves = {c: {"p_factual": np.zeros((nb, n)), "documents": np.zeros((nb, n)),
                   "nli": np.zeros((nb, n)), "op_p_factual": np.zeros(n),
                   "op_documents": np.zeros(n), "op_nli": np.zeros(n)} for c in CELLS}
     reference = {"p_factual": np.zeros(n), "documents": np.zeros(n), "nli": np.zeros(n)}
     rows, band_mismatch = [], 0
-    bands = [R.symmetric_band(w) for w in R.HALF_WIDTHS]
+    bands = R.curve_bands(band)
     for j, s in enumerate(sentences):
         docs = [[reader.document(text, page, rank) for rank, page in
                  enumerate(pages[:max_docs], start=1)] for text, pages in s["subclaims"]]
@@ -253,6 +292,7 @@ def main():
                       for name in ("A_prime", "U", "M", "L")}
         estimators["A"] = nbc_histogram(reader, args.wang_data_root)
         results, all_rows = {}, []
+        frozen_ops = frozen_rows(p["frozen_predictions"])
         for name, cfg in DATASETS.items():
             bse = BSEDetector(estimators["A"].pos_hist, estimators["A"].neg_hist,
                               mode="official", p0=R.P0, c_miss=R.C_MISS,
@@ -263,12 +303,17 @@ def main():
                 sets[name], estimators, bse, band, cfg["max_docs"], reader)
             if band_mismatch:
                 raise MDDREReplayRefused(f"gate G2 failed on {name}: {band_mismatch} sentences")
+            g3 = gate_frozen_operating_point(frozen_ops, name, rows)
+            if g3:
+                raise MDDREReplayRefused(f"gate G3 failed on {name}: {g3} rows differ "
+                                         "from the frozen first replay")
             labels = [s["label"] for s in sets[name]]
             clusters = [s["cluster"] for s in sets[name]]
             boot = R.bootstrap(curves, reference, CELLS, CHAIN, labels, clusters, wang_pr_auc)
             results[name] = {"status": cfg["status"], "max_docs": cfg["max_docs"],
                              "sentences": len(labels), "band": band,
-                             "gate_G2_band_mismatches": 0, "bootstrap": boot,
+                             "gate_G2_band_mismatches": 0,
+                             "gate_G3_frozen_row_mismatches": 0, "bootstrap": boot,
                              "decision": R.decide(boot["endpoints"])}
             for r in rows:
                 r["dataset"] = name
@@ -287,8 +332,12 @@ def main():
         "feature_cache_sha256": fm["cache_sha256"],
         "estimators_sha256": sha256_path(p["estimators"]),
         "split": split,
-        "gates": {"G1_engine": g1, "G2_band": "passed on every test set"},
-        "half_widths": list(R.HALF_WIDTHS),
+        "gates": {"G1_engine": g1, "G2_band": "passed on every test set",
+                  "G3_frozen_operating_point": "passed on every test set"},
+        "band_scales": list(R.BAND_SCALES),
+        "amendment": {"number": 1, "design_sha256": M.AMENDMENT_1_SHA256,
+                      "test_results_seen_before": True,
+                      "supersedes_curve_endpoints_of": FROZEN_FIRST_REPLAY},
         "cells": list(CELLS),
         "chain": [list(c) for c in CHAIN],
         "results": results,
