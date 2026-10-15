@@ -220,3 +220,51 @@ not extrapolated.
 Any change after merge is a dated amendment in this file. Each amendment states
 what changed, why, and whether any test-set result had been seen. Changes made
 after a test-set result has been seen make the affected endpoint exploratory.
+
+### Amendment 1 (2026-10-14): cost–quality curve
+
+**Test-set results had been seen.** The §8 step 5 replay ran once from
+`19415ca` (result sha256 `927e0a2d…`, predictions sha256 `c874d05f…`). All
+results on all three test sets were seen before this amendment. That output
+stays frozen and unedited.
+
+**What was wrong.** §5 swept symmetric bands of half-width 0.25 to 4.0 in
+log-odds around the decision threshold t = logit(28/124) = −1.23. Two problems
+followed:
+
+- For half-widths 0.25 to 1.0 the whole band lies below P0 = 0.5, so the
+  detector stops before reading any document and every sentence keeps
+  P = 0.5. Wang's PR-AUC gives a constant score (1 + π)/2, so these points have
+  balanced PR-AUC exactly 0.75 at zero documents. That is higher than every real
+  detector on Factcheck-Bench (BSE: 0.609). The §6 matched endpoints then
+  matched or interpolated to this point. Every cell "saved" all of BSE's
+  documents, and cell A, which is BSE itself, showed a matched-cost "gain" of
+  +0.073 over itself. **The frozen output's RQ1 and RQ2 values and decisions,
+  and the RQ3 chain, are void.**
+- BSE's band is asymmetric about t (−0.13 below, +2.44 above, in log-odds).
+  The valid symmetric bands therefore all used more documents than BSE, so the
+  curve could not reach BSE's cost region.
+
+**What changes.**
+
+1. **Curve family.** With BSE's band (l*, u*) from §5, the curve uses the
+   bands (sigmoid(s · logit l*), sigmoid(s · logit u*)) for
+   s = 0.25, 0.50, …, 4.00 (16 points, the same count and spacing as before).
+   s = 1 is exactly BSE's band, so the operating point lies on every cell's
+   curve. Every band contains P0, so every subclaim reads at least one
+   document. The family was chosen as the smallest change that passes through
+   the operating point and always contains P0. No curve was computed under it
+   before this amendment was written.
+2. **Guard.** The replay refuses if any curve band does not strictly contain
+   P0.
+3. **Status.** On all three test sets, RQ1, RQ2 and the RQ3 chain are
+   **exploratory**. §7's thresholds are still applied and reported, but
+   Factcheck-Bench is no longer a confirmatory test for them.
+4. **Reproduction check.** The same-band results (§6 "both") never used the
+   curve. The amended replay must reproduce the frozen predictions exactly at
+   the operating point for every cell and for BSE's official run, or it
+   refuses.
+
+**What does not change.** Features, estimators, test sets, the operating point,
+the endpoint definitions, the bootstrap (10,000 resamples, seed 42) and the
+decision thresholds. The amended replay writes new files and runs once.
