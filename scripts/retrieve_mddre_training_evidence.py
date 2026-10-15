@@ -48,8 +48,7 @@ def parse_args():
 
 def verify_inputs(release, out_dir):
     problems = []
-    if sha256_path(PROJECT_ROOT / M.DESIGN_PATH) != M.DESIGN_SHA256:
-        problems.append("the design preregistration differs from its pinned digest")
+    problems.extend(M.design_problems(PROJECT_ROOT))
     manifest = json.loads((release / RF.INDEX_MANIFEST_NAME).read_text())
     if manifest.get("snapshot_sha256") != RF.SNAPSHOT_SHA256:
         problems.append("the index was not built from the pinned snapshot")

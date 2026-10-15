@@ -50,8 +50,7 @@ def verify_features(out_dir, dtype):
     paths = SF.output_paths(out_dir, dtype)
     manifest = json.loads(paths["manifest"].read_text())
     problems = []
-    if sha256_path(PROJECT_ROOT / M.DESIGN_PATH) != M.DESIGN_SHA256:
-        problems.append("the design preregistration differs from its pinned digest")
+    problems.extend(M.design_problems(PROJECT_ROOT))
     if manifest.get("status") != "complete":
         problems.append(f"feature cache status is {manifest.get('status')!r}")
     if sha256_path(paths["cache"]) != manifest.get("cache_sha256"):
