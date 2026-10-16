@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="990" height="300" font-family="Helvetica, Arial, sans-serif" font-size="11">
+<rect width="990" height="300" fill="#fff"/>
+<text transform="translate(14,125.0) rotate(-90)" text-anchor="middle">balanced PR-AUC</text>
+<text x="185.0" y="20" text-anchor="middle" font-weight="bold">Factcheck-Bench</text>
+<rect x="52" y="34" width="266" height="182" fill="none" stroke="#333"/>
+<line x1="52" x2="318" y1="216.0" y2="216.0" stroke="#eee"/>
+<text x="47" y="220.0" text-anchor="end">0.55</text>
+<line x1="52" x2="318" y1="179.6" y2="179.6" stroke="#eee"/>
+<text x="47" y="183.6" text-anchor="end">0.60</text>
+<line x1="52" x2="318" y1="143.2" y2="143.2" stroke="#eee"/>
+<text x="47" y="147.2" text-anchor="end">0.65</text>
+<line x1="52" x2="318" y1="106.8" y2="106.8" stroke="#eee"/>
+<text x="47" y="110.8" text-anchor="end">0.70</text>
+<line x1="52" x2="318" y1="70.4" y2="70.4" stroke="#eee"/>
+<text x="47" y="74.4" text-anchor="end">0.75</text>
+<line x1="52" x2="318" y1="34.0" y2="34.0" stroke="#eee"/>
+<text x="47" y="38.0" text-anchor="end">0.80</text>
+<text x="52.0" y="232" text-anchor="middle">0</text>
+<text x="140.7" y="232" text-anchor="middle">5</text>
+<text x="229.3" y="232" text-anchor="middle">10</text>
+<text x="318.0" y="232" text-anchor="middle">15</text>
+<text x="185.0" y="252" text-anchor="middle">documents per sentence</text>
+<polyline points="98.8,194.6 120.3,161.4 134.3,202.2 157.0,171.5 166.4,191.9 190.6,185.6 203.1,137.3 223.4,130.1 231.7,143.6 232.1,143.5 234.6,147.6 235.4,147.6 237.8,146.5 238.4,146.0 243.3,144.8 243.9,147.1" fill="none" stroke="#555555" stroke-width="1.4"/>
+<polyline points="109.5,194.1 153.4,152.6 177.0,109.2 204.6,141.9 224.8,107.6 235.9,103.2 238.6,103.1 243.5,103.9 247.1,103.3 249.8,102.8 251.4,102.8 253.5,102.9 253.9,102.9 255.4,102.9 256.8,102.9 257.4,102.9" fill="none" stroke="#8c8c8c" stroke-width="1.4" stroke-dasharray="4 3"/>
+<polyline points="115.7,143.8 153.2,167.4 180.7,159.4 204.3,127.5 223.0,131.9 230.7,121.5 238.1,126.3 243.3,124.9 247.9,120.2 250.1,129.2 251.0,126.1 252.3,126.1 254.1,126.1 256.4,126.1 256.7,126.1 257.1,126.1" fill="none" stroke="#2b83ba" stroke-width="1.4" stroke-dasharray="6 3"/>
+<polyline points="100.0,92.6 112.5,104.5 148.8,82.0 171.0,137.7 188.0,103.3 205.2,100.0 223.8,77.7 231.4,87.5 239.3,113.5 244.7,102.9 251.6,84.8 253.5,92.9 255.0,93.7 257.0,90.2 258.5,90.2 258.5,90.2" fill="none" stroke="#d7191c" stroke-width="2.2"/>
+<polyline points="102.5,182.1 121.9,187.4 163.0,147.7 191.0,142.7 211.7,143.2 225.3,119.8 238.1,127.6 246.1,128.3 250.1,122.8 251.1,123.8 252.9,123.8 254.9,124.0 256.0,124.0 256.8,124.0 257.3,124.0 257.7,124.0" fill="none" stroke="#fdae61" stroke-width="1.4" stroke-dasharray="2 2"/>
+<path d="M151.0,172.7 L157.0,166.7 L163.0,172.7 L157.0,178.7 Z" fill="#000"/>
+<text x="515.0" y="20" text-anchor="middle" font-weight="bold">SelfCheckGPT held-out</text>
+<rect x="382" y="34" width="266" height="182" fill="none" stroke="#333"/>
+<line x1="382" x2="648" y1="216.0" y2="216.0" stroke="#eee"/>
+<text x="377" y="220.0" text-anchor="end">0.55</text>
+<line x1="382" x2="648" y1="179.6" y2="179.6" stroke="#eee"/>
+<text x="377" y="183.6" text-anchor="end">0.60</text>
+<line x1="382" x2="648" y1="143.2" y2="143.2" stroke="#eee"/>
+<text x="377" y="147.2" text-anchor="end">0.65</text>
+<line x1="382" x2="648" y1="106.8" y2="106.8" stroke="#eee"/>
+<text x="377" y="110.8" text-anchor="end">0.70</text>
+<line x1="382" x2="648" y1="70.4" y2="70.4" stroke="#eee"/>
+<text x="377" y="74.4" text-anchor="end">0.75</text>
+<line x1="382" x2="648" y1="34.0" y2="34.0" stroke="#eee"/>
+<text x="377" y="38.0" text-anchor="end">0.80</text>
+<text x="382.0" y="232" text-anchor="middle">0</text>
+<text x="470.7" y="232" text-anchor="middle">5</text>
+<text x="559.3" y="232" text-anchor="middle">10</text>
+<text x="648.0" y="232" text-anchor="middle">15</text>
+<text x="515.0" y="252" text-anchor="middle">documents per sentence</text>
+<polyline points="428.2,109.6 448.1,94.5 471.8,81.4 495.0,84.2 513.8,69.3 534.7,75.3 552.8,56.9 568.8,56.1 582.4,57.9 590.9,60.1 598.0,53.1 603.6,51.2 608.0,50.4 611.8,56.1 614.8,46.4 617.1,54.8" fill="none" stroke="#555555" stroke-width="1.4"/>
+<polyline points="448.7,109.2 500.9,84.2 533.8,70.8 555.4,62.0 577.5,62.1 591.6,53.3 600.8,56.7 609.6,54.4 616.8,54.3 621.9,59.8 625.4,51.8 628.1,49.2 630.7,54.1 633.3,54.5 635.8,58.4 637.6,54.5" fill="none" stroke="#8c8c8c" stroke-width="1.4" stroke-dasharray="4 3"/>
+<polyline points="440.6,100.0 491.0,87.3 528.3,75.8 554.6,80.8 575.4,68.1 588.3,56.8 599.6,60.0 607.2,55.1 613.9,59.8 619.2,60.4 623.3,57.6 626.6,55.0 629.9,57.4 633.2,58.6 635.3,58.1 637.2,56.5" fill="none" stroke="#2b83ba" stroke-width="1.4" stroke-dasharray="6 3"/>
+<polyline points="429.8,109.4 455.0,91.4 485.8,72.9 519.1,71.3 541.6,71.5 563.1,46.9 580.8,46.6 593.9,51.5 605.9,50.3 615.7,42.0 625.0,49.6 631.2,43.3 636.4,43.2 640.6,47.6 643.6,43.9 646.3,41.9" fill="none" stroke="#d7191c" stroke-width="2.2"/>
+<polyline points="439.0,98.9 467.5,92.6 510.8,87.6 540.5,70.3 564.7,64.9 581.5,68.6 595.2,63.0 606.3,61.4 614.6,58.2 620.2,57.5 624.9,60.7 628.7,59.3 632.0,59.1 634.2,57.5 636.3,55.5 638.1,60.9" fill="none" stroke="#fdae61" stroke-width="1.4" stroke-dasharray="2 2"/>
+<path d="M489.0,84.5 L495.0,78.5 L501.0,84.5 L495.0,90.5 Z" fill="#000"/>
+<text x="845.0" y="20" text-anchor="middle" font-weight="bold">FActScore test entities</text>
+<rect x="712" y="34" width="266" height="182" fill="none" stroke="#333"/>
+<line x1="712" x2="978" y1="216.0" y2="216.0" stroke="#eee"/>
+<text x="707" y="220.0" text-anchor="end">0.55</text>
+<line x1="712" x2="978" y1="179.6" y2="179.6" stroke="#eee"/>
+<text x="707" y="183.6" text-anchor="end">0.60</text>
+<line x1="712" x2="978" y1="143.2" y2="143.2" stroke="#eee"/>
+<text x="707" y="147.2" text-anchor="end">0.65</text>
+<line x1="712" x2="978" y1="106.8" y2="106.8" stroke="#eee"/>
+<text x="707" y="110.8" text-anchor="end">0.70</text>
+<line x1="712" x2="978" y1="70.4" y2="70.4" stroke="#eee"/>
+<text x="707" y="74.4" text-anchor="end">0.75</text>
+<line x1="712" x2="978" y1="34.0" y2="34.0" stroke="#eee"/>
+<text x="707" y="38.0" text-anchor="end">0.80</text>
+<text x="712.0" y="232" text-anchor="middle">0</text>
+<text x="778.5" y="232" text-anchor="middle">10</text>
+<text x="845.0" y="232" text-anchor="middle">20</text>
+<text x="911.5" y="232" text-anchor="middle">30</text>
+<text x="978.0" y="232" text-anchor="middle">40</text>
+<text x="845.0" y="252" text-anchor="middle">documents per sentence</text>
+<polyline points="742.1,136.9 751.4,77.8 759.4,121.2 770.1,63.1 777.7,134.4 797.8,103.0 809.6,106.8 841.9,136.2 870.3,95.3 877.2,111.1 886.3,99.3 892.4,99.7 902.0,81.2 907.9,86.4 919.2,69.4 923.9,70.8" fill="none" stroke="#555555" stroke-width="1.4"/>
+<polyline points="746.8,106.0 769.8,55.4 789.6,113.7 828.0,148.3 863.2,131.0 881.1,136.8 896.4,128.6 911.4,98.0 924.6,98.7 934.4,92.7 941.8,87.0 947.6,84.2 951.2,85.7 955.6,86.8 959.0,85.9 961.7,84.9" fill="none" stroke="#8c8c8c" stroke-width="1.4" stroke-dasharray="4 3"/>
+<polyline points="749.2,77.2 771.3,89.3 793.2,113.3 820.6,127.7 862.3,140.4 879.5,131.2 896.3,125.4 909.9,123.8 923.7,112.6 933.1,115.3 940.6,111.7 945.8,104.2 950.7,107.8 955.4,108.7 958.5,104.2 961.5,103.5" fill="none" stroke="#2b83ba" stroke-width="1.4" stroke-dasharray="6 3"/>
+<polyline points="743.4,79.9 752.1,84.0 804.5,101.4 831.5,86.5 852.9,105.2 873.6,85.0 899.9,74.9 913.2,89.8 924.4,84.2 934.8,71.2 944.6,78.2 950.3,79.3 954.7,80.4 959.5,77.4 963.3,77.3 965.4,77.9" fill="none" stroke="#d7191c" stroke-width="2.2"/>
+<polyline points="744.8,92.0 758.3,113.1 789.6,107.3 833.6,121.5 856.1,126.0 876.2,111.7 895.7,124.7 912.5,109.9 925.3,112.0 935.0,104.3 942.4,92.0 948.9,94.7 954.1,89.5 957.5,88.0 960.4,88.7 963.2,89.6" fill="none" stroke="#fdae61" stroke-width="1.4" stroke-dasharray="2 2"/>
+<path d="M764.1,60.9 L770.1,54.9 L776.1,60.9 L770.1,66.9 Z" fill="#000"/>
+<line x1="52" x2="74" y1="282" y2="282" stroke="#555555" stroke-width="2"/>
+<text x="79" y="286">A  BSE histogram</text>
+<line x1="184" x2="206" y1="282" y2="282" stroke="#8c8c8c" stroke-width="2" stroke-dasharray="4 3"/>
+<text x="211" y="286">A′ histogram, new data</text>
+<line x1="350" x2="372" y1="282" y2="282" stroke="#2b83ba" stroke-width="2" stroke-dasharray="6 3"/>
+<text x="377" y="286">U  uLSIF on e</text>
+<line x1="465" x2="487" y1="282" y2="282" stroke="#d7191c" stroke-width="2"/>
+<text x="492" y="286">M  uLSIF on (e, k, log rank)</text>
+<line x1="664" x2="686" y1="282" y2="282" stroke="#fdae61" stroke-width="2" stroke-dasharray="2 2"/>
+<text x="691" y="286">L  logistic ratio</text>
+<path d="M802,282 l5,-5 l5,5 l-5,5 Z" fill="#000"/>
+<text x="817" y="286">BSE official run</text>
+</svg>
