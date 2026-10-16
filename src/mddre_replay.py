@@ -8,6 +8,11 @@ only while P(factual) lies strictly inside the band (l, u), and stops after
 ``max_docs``. For a band containing P0 this equals the frozen DDRE rule
 (stop once P <= l or P >= u). Cell A's official look-ahead is replayed with
 ``BSEDetector.should_continue`` and ``bayes_update`` exactly as BSE runs it.
+
+The cost-quality curve follows design amendment 1: BSE's band scaled in
+log-odds about P0 = 0.5, so s = 1 is the operating point and every band
+contains P0. (The preregistered symmetric sweep around the decision threshold
+included bands below P0, which read no document at all.)
 """
 
 import math
@@ -18,7 +23,7 @@ from src.baseline_core import bayes_update, cost_based_prediction
 
 C_MISS, C_FALSE_ALARM, P0 = 28.0, 96.0, 0.5
 LOG_ODDS_CLIP = 40.0
-HALF_WIDTHS = tuple(0.25 * i for i in range(1, 17))  # 0.25 .. 4.0 (design §5)
+BAND_SCALES = tuple(0.25 * i for i in range(1, 17))  # 0.25 .. 4.0 (amendment 1)
 N_RESAMPLES, SEED, CI_LEVEL = 10_000, 42, 0.95
 NOT_REACHED = -1e9  # sentinel: a matched endpoint the curve cannot reach
 
@@ -40,9 +45,21 @@ def _sigmoid(x):
     return z / (1.0 + z)
 
 
-def symmetric_band(half_width):
-    t = _logit(decision_threshold())
-    return _sigmoid(t - half_width), _sigmoid(t + half_width)
+def scaled_band(band, scale):
+    """BSE's band scaled in log-odds about P0 = 0.5 (amendment 1)."""
+    lower, upper = band
+    return _sigmoid(scale * _logit(lower)), _sigmoid(scale * _logit(upper))
+
+
+def curve_bands(band):
+    """The amended curve's bands. Refuses unless each strictly contains P0."""
+    if P0 != 0.5:
+        raise ValueError("scaling about log-odds 0 assumes P0 = 0.5")
+    bands = [scaled_band(band, s) for s in BAND_SCALES]
+    for s, (lower, upper) in zip(BAND_SCALES, bands):
+        if not lower < P0 < upper:
+            raise ValueError(f"curve band at scale {s} does not contain P0: {(lower, upper)}")
+    return bands
 
 
 def bse_band(bse, tol=1e-13):
@@ -147,9 +164,9 @@ def endpoints(curves, reference, cells, pr_auc, labels, idx):
     out = {"reference": {"balanced_pr_auc": ref_q, "documents": ref_d}}
     for cell in cells:
         c = curves[cell]
-        docs = [float(np.mean(c["documents"][b][idx])) for b in range(len(HALF_WIDTHS))]
-        qual = [balanced_pr_auc(lab, c["p_factual"][b][idx], pr_auc)
-                for b in range(len(HALF_WIDTHS))]
+        nb = len(c["documents"])
+        docs = [float(np.mean(c["documents"][b][idx])) for b in range(nb)]
+        qual = [balanced_pr_auc(lab, c["p_factual"][b][idx], pr_auc) for b in range(nb)]
         d_star = matched_quality_docs(docs, qual, ref_q)
         q_star = quality_at_docs(docs, qual, ref_d)
         op_q = balanced_pr_auc(lab, c["op_p_factual"][idx], pr_auc)
