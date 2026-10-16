@@ -43,6 +43,26 @@ from src.factscore_data import (
 DESIGN_PATH = "docs/multivariate_ddre_design.md"
 DESIGN_SHA256 = "fd96b04f2a16dfaedfb3139ec221bb0dfab2a13cf6a00738b6415676198f0df3"
 DESIGN_MERGE_COMMIT = "e5c8bda8295d9569da0222a982cc051eac49d9c1"
+DESIGN_PREREGISTERED_BYTES = 11387  # the preregistration is an unchanged prefix
+AMENDMENT_1_SHA256 = "928b280bb972348f82a656d9f6b44a104b589d65a16b31964c3ee7d3d19e4340"
+
+
+def design_problems(root, require_amendment_1=False):
+    """Why the design file is not the preregistration (plus allowed amendments).
+
+    Amendments only append (§11), so the first DESIGN_PREREGISTERED_BYTES must
+    still hash to DESIGN_SHA256.
+    """
+    data = (Path(root) / DESIGN_PATH).read_bytes()
+    problems = []
+    if hashlib.sha256(data[:DESIGN_PREREGISTERED_BYTES]).hexdigest() != DESIGN_SHA256:
+        problems.append("the design preregistration differs from its pinned digest")
+    full = hashlib.sha256(data).hexdigest()
+    if full not in (DESIGN_SHA256, AMENDMENT_1_SHA256):
+        problems.append("the design file has an unpinned amendment")
+    if require_amendment_1 and full != AMENDMENT_1_SHA256:
+        problems.append("the design file is not at amendment 1")
+    return problems
 
 TRAINING_GENERATORS = ("InstructGPT", "ChatGPT", "PerplexityAI")
 INSTRUCTGPT_SHA256 = "4ec1fa538a9f99606130c76db63d4af7f203ca460954a3edd7c4d0e385cd2d58"

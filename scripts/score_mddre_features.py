@@ -97,8 +97,7 @@ def references(dtype):
 
 def verify_inputs(out, dtype):
     problems, digests = [], {}
-    if sha256_path(PROJECT_ROOT / M.DESIGN_PATH) != M.DESIGN_SHA256:
-        problems.append("the design preregistration differs from its pinned digest")
+    problems.extend(M.design_problems(PROJECT_ROOT))
     name, sha = FACTSCORE_EVIDENCE
     if sha256_path(FACTSCORE / name) != sha:
         problems.append(f"{name} is not the frozen FActScore evidence")
