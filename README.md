@@ -1236,5 +1236,11 @@ committed.
 
   Results are in [`docs/ablation_results_summary.md`](docs/ablation_results_summary.md). The held-out artifacts are stored locally and identified by SHA-256 in that document.
 - **Done on FActScore (preregistered frozen transfer):** cells A–D run once, exactly as frozen, on the ChatGPT and PerplexityAI biographies (2,573 sentences, 172 entities; dataset chosen in [`docs/generalization_dataset_survey.md`](docs/generalization_dataset_survey.md)). DDRE kept BSE's balanced PR-AUC within the preregistered margin (D − A −0.002, 95% CI [−0.028, 0.023]) but used 9.4% *more* documents and NLI calls (CI entirely below zero), so the efficiency saving did not transfer and RQ1 is not supported on FActScore. Results are in [`docs/factscore_transfer_results_summary.md`](docs/factscore_transfer_results_summary.md).
-- **Next (not yet decided):** exploratory diagnosis of the FActScore cost result and cost–quality curves on the existing caches, then a runtime measurement. Any new method needs a further dataset for confirmation, since FActScore has now been seen.
+- **Done: multivariate DDRE (exploratory after Amendment 1).** Five evidence models, from BSE's histogram to uLSIF on (entailment, contradiction, log rank), were trained on an entity-disjoint FActScore split and replayed on Factcheck-Bench, SelfCheckGPT held-out and the FActScore test entities ([`docs/multivariate_ddre_design.md`](docs/multivariate_ddre_design.md)). The preregistered curve was replaced after the first replay because some of its bands read no documents (Amendment 1), so every RQ is now exploratory.
+  - On Factcheck-Bench, multivariate uLSIF (M) reached BSE's balanced PR-AUC with 3.21 fewer documents per sentence (95% CI [2.90, 3.55]) and scored +0.096 higher at matched cost ([0.037, 0.158]).
+  - The result did not replicate. On SelfCheckGPT held-out the gain was +0.017 ([−0.012, 0.045]). On the FActScore test entities it was −0.040 ([−0.072, −0.010]).
+  - At BSE's own band, every new model read more documents than BSE.
+
+  Results are in [`docs/mddre_results_summary.md`](docs/mddre_results_summary.md).
+- **Next (not yet decided):** a further untouched dataset to confirm or refute the Factcheck-Bench result, a runtime measurement, and the paper.
 - Numerical claims are reported whether or not they support the hypotheses.
