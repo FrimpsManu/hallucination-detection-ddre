@@ -206,3 +206,19 @@ Any change after merge is a dated amendment at the end of this file. Each states
 what changed, why, and whether any result on these datasets had been seen. A
 change made after a result has been seen makes the affected endpoint
 exploratory.
+
+### Amendment 1 (2026-10-16): ExpertQA cluster count
+
+**No result on either dataset had been seen.** No NLI score, feature or
+detector output existed when this was written.
+
+The data loader's gate G0 found that ExpertQA has **483** question-author
+clusters after the §2 exclusions, not 484. All 484 authors appear in the
+release, but one author's sentences are all excluded (Unsure, missing label,
+or no atomic claims). §2 and §9 therefore read 483 clusters for ExpertQA. The
+unit and hallucinated totals (11,389 and 596) are unchanged.
+
+A clarification, not a change: the BingCheck digest in §2 is the sha256 of the
+pinned `shasum -a 256` listing file `bingcheck/file_sha256.txt`. The loader
+checks that this file matches the digest and that every release file matches
+its line, in any order.
