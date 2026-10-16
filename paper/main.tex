@@ -169,9 +169,9 @@ and 21{,}460 of hallucinated ones.
 \section{Evaluation protocol}
 \label{sec:protocol}
 
-\paragraph{NLI model.} Wang's released checkpoint
-(\texttt{MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli};
-\citealp{he2023debertav3,laurer2024less}) in float16, with Wang's segmentation.
+\paragraph{NLI model.} Wang's released DeBERTa-v3 NLI
+checkpoint\footnote{\url{https://huggingface.co/MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli}}
+\citep{he2023debertav3,laurer2024less} in float16, with Wang's segmentation.
 Before every scoring run, the 398 pairs behind Wang's histogram must reproduce
 earlier caches bit for bit.
 
@@ -227,13 +227,17 @@ first replay (\S\ref{sec:pitfall}).
 
 \begin{table}[t]
 \centering\small
-\begin{tabular}{lcc}
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lcc@{}}
 \toprule
-Test set & RQ1 docs saved & RQ2 gain \\
+Test set & RQ1: docs saved & RQ2: gain \\
 \midrule
-Factcheck-Bench & \textbf{3.21} [2.90, 3.55] & \textbf{+0.096} [0.037, 0.158] \\
-SelfCheckGPT & 1.61 [$-$2.98, 3.54] & +0.017 [$-$0.012, 0.045] \\
-FActScore test & not reached & $-$0.040 [$-$0.072, $-$0.010] \\
+Factcheck-Bench & \textbf{3.21} & \textbf{+0.096} \\
+ & {\scriptsize [2.90, 3.55]} & {\scriptsize [0.037, 0.158]} \\
+SelfCheckGPT & 1.61 & +0.017 \\
+ & {\scriptsize [$-$2.98, 3.54]} & {\scriptsize [$-$0.012, 0.045]} \\
+FActScore test & not reached & $-$0.040 \\
+ & & {\scriptsize [$-$0.072, $-$0.010]} \\
 \bottomrule
 \end{tabular}
 \caption{M against BSE (exploratory). Factcheck-Bench: 271 sentences, at most
