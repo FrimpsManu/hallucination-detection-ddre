@@ -1,0 +1,362 @@
+% Draft. Confirmatory results are marked \pending{...} until the preregistered
+% replay has run; every other number is read from the frozen artifacts listed in
+% the repository's results summaries.
+\documentclass[11pt]{article}
+\usepackage[preprint]{acl}
+\usepackage{times}
+\usepackage{latexsym}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{microtype}
+\usepackage{inconsolata}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+
+\newcommand{\pending}[1]{\textcolor{red}{[#1]}}
+\newcommand{\E}{\mathbb{E}}
+
+\title{Cheaper Sequential Hallucination Detection with Multivariate\\
+Density-Ratio Evidence: An Exploratory Study and a Preregistered Test}
+
+\author{Augustine Manu-Frimpong \\
+  Independent researcher \\
+  \texttt{\pending{email}}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Bayesian sequential estimation (BSE) detects hallucinated claims in LLM output by
+retrieving evidence documents one at a time and stopping once the posterior is
+decisive. Every document costs a retrieval and several NLI calls, so the
+evidence model that turns a document into a likelihood ratio decides how much
+the detector costs. We show that BSE's Bayes-risk look-ahead is exactly a
+posterior band, so detectors can be compared on a common stopping rule and
+differ only in their evidence model. We then replace BSE's one-dimensional
+entailment histogram with a self-normalised uLSIF density ratio over three
+document features: entailment, contradiction and retrieval rank. In an
+exploratory comparison on three test sets, this multivariate evidence model
+matched BSE's balanced PR-AUC with 3.21 fewer documents per sentence
+(95\% CI [2.90, 3.55]) and improved balanced PR-AUC by 0.096 [0.037, 0.158] at
+matched cost on Factcheck-Bench. The gain was absent on SelfCheckGPT and
+reversed on FActScore. Along the way we found that a cost--quality sweep
+containing stopping bands that exclude the prior produces a zero-document
+detector whose PR-AUC beats every real detector, and we report the corrected
+analysis. We then ran a preregistered confirmatory test on ExpertQA and
+BingCheck: \pending{confirmatory outcome}.
+\end{abstract}
+
+\section{Introduction}
+
+Retrieval-based hallucination detectors decompose a generated sentence into
+claims, retrieve evidence for each claim and score claim--evidence pairs with an
+NLI model \citep{min-etal-2023-factscore,manakul-etal-2023-selfcheckgpt,
+wang-etal-2024-factcheck}. Their cost grows with the number of documents read.
+\citet{wang-etal-2023-hallucination} cast detection as Bayesian sequential
+estimation (BSE): documents are read one at a time, a naive-Bayes likelihood
+ratio updates the posterior that a claim is factual, and a Bayes-risk
+look-ahead decides whether another document is worth its cost
+\citep{wald1945sequential}. BSE reads fewer documents than fixed-$k$ retrieval.
+
+This paper asks whether a better \emph{evidence model}, the map from one
+document to a likelihood ratio, can make BSE cheaper. Our research questions:
+
+\begin{itemize}
+\item \textbf{RQ1 (cost).} At BSE's detection quality, does a density-ratio
+evidence model read fewer documents and make fewer NLI calls?
+\item \textbf{RQ2 (quality).} At BSE's cost, does it detect hallucinations
+better?
+\item \textbf{RQ3 (components).} Is any difference associated with more training
+data, ratio normalisation, or richer document features?
+\end{itemize}
+
+Our contributions:
+\begin{enumerate}
+\item We show that BSE's look-ahead, at its published costs, continues exactly
+while the posterior lies in a fixed interval (0.204, 0.769). Every detector can
+therefore share one stopping rule and be compared on its evidence model alone
+(\S\ref{sec:band}).
+\item We propose \emph{multivariate DDRE}: direct density-ratio estimation
+\citep{kanamori2009ulsif,sugiyama2012density} over entailment, contradiction
+and log rank, self-normalised so the ratio averages one under the
+hallucinated-claim distribution (\S\ref{sec:method}).
+\item We report a staged evaluation in the order it happened. A one-dimensional
+DDRE saved 20.7\% of documents on SelfCheckGPT but not on FActScore. The
+multivariate model gave a large gain on Factcheck-Bench, no clear gain on
+SelfCheckGPT and a loss on FActScore (\S\ref{sec:results}).
+\item We document a pitfall in cost--quality curves for sequential detectors:
+a stopping band that excludes the prior yields a constant, zero-cost detector
+whose PR-AUC under a common implementation is $(1+\pi)/2$
+(\S\ref{sec:pitfall}).
+\item We preregistered \citep{nosek2018preregistration} and ran a confirmatory
+test on two untouched datasets, ExpertQA \citep{malaviya-etal-2024-expertqa}
+and BingCheck \citep{li-etal-2024-self} (\S\ref{sec:confirmatory}).
+\end{enumerate}
+
+\section{Background: Bayesian sequential estimation}
+\label{sec:bse}
+
+For a claim $c$ and its ranked documents $d_1, d_2, \dots$, an NLI model gives
+each document a score $s_j \in [0, 100]$: the maximum entailment probability
+over 400-word spans, with temperature 5 \citep{wang-etal-2023-hallucination}.
+BSE discretises $s_j$ into ten buckets and estimates
+$P(b \mid \text{factual})$ and $P(b \mid \text{hallucinated})$ from labelled
+pairs with Laplace smoothing. Starting from prior $P_0 = 0.5$, the posterior
+after $j$ documents is
+\begin{equation}
+\operatorname{logit} P_j = \operatorname{logit} P_{j-1}
+  + \log \frac{P(b_j \mid \text{factual})}{P(b_j \mid \text{hallucinated})}.
+\end{equation}
+BSE reads another document only if the expected Bayes risk after one more
+document, plus the retrieval cost, is below the risk of stopping now, with miss
+cost $C_M$, false-alarm cost $C_{FA}$ and retrieval cost 1. A sentence's
+posterior is the minimum over its claims, and it is labelled factual iff
+$P > C_M / (C_M + C_{FA})$.
+
+\paragraph{The look-ahead is a posterior band.}
+\label{sec:band}
+With the histogram fixed, the look-ahead decision depends only on the current
+$P$. We computed the set where it continues by bisection and checked it on a
+grid of 20{,}001 points. At $C_M = 28$, $C_{FA} = 96$ it is exactly the
+interval $(0.20404, 0.76895)$. Replaying BSE as ``continue while $P$ is in
+this band'' reproduces its document choices on all 2{,}387 SelfCheckGPT
+held-out claims with zero mismatches, and on every test set of \S\ref{sec:results} (the replay checks it again on each new set). So
+any evidence model can be run under BSE's own stopping rule, and differences
+between detectors come from the evidence model alone.
+
+\section{Multivariate density-ratio evidence}
+\label{sec:method}
+
+BSE's update needs only the likelihood ratio
+$r(x) = p(x \mid \text{factual}) / p(x \mid \text{hallucinated})$ of a
+document's features $x$. Instead of estimating two densities and dividing, we
+estimate $r$ directly.
+
+\paragraph{Features.} For each document: $e$, the maximum entailment over spans
+(BSE's score); $k$, the maximum contradiction over spans, from the same NLI
+forward pass; and $\log(\text{rank})$. Adding $k$ and the rank costs no extra
+NLI calls.
+
+\paragraph{Estimator.} We fit unconstrained least-squares importance fitting
+(uLSIF; \citealp{kanamori2009ulsif}) with 100 Gaussian kernel centres on
+standardised features. The kernel width (0.5, 1, 2 or 4 times the median
+pairwise distance) and the ridge penalty ($10^{-4}$ to $10$) are chosen only by
+uLSIF's own 5-fold cross-validation objective, never by any detection metric.
+uLSIF's fitted ratio need not average one under the denominator distribution.
+In an earlier one-dimensional fit, the mean ratio over hallucinated-claim
+documents ranged from 0.63 to 74.8 across hyperparameters, which biases every
+update. We therefore self-normalise: $\hat r \leftarrow \hat r /
+\overline{\hat r}_{h}$, where $\overline{\hat r}_{h}$ is the mean over the
+training documents of hallucinated claims.
+
+\paragraph{Cells.} To separate the components (RQ3) we compare five evidence
+models under the same band:
+\textbf{A}, BSE's histogram fit on Wang's data;
+\textbf{A$'$}, the same histogram refit on our training data;
+\textbf{U}, normalised uLSIF on $e$ alone;
+\textbf{M}, normalised uLSIF on $(e, k, \log \text{rank})$;
+\textbf{L}, a logistic-regression density ratio on the same three features
+\citep{bickel2009discriminative}.
+
+\paragraph{Training data.} An entity-disjoint split of FActScore
+\citep{min-etal-2023-factscore}: 91 of 182 entities, chosen by the order of
+the SHA-256 hash of their names. That gives 7{,}382 human-labelled facts, each
+with ten BM25-retrieved Wikipedia passages: 52{,}360 documents of factual facts
+and 21{,}460 of hallucinated ones.
+
+\section{Evaluation protocol}
+\label{sec:protocol}
+
+\paragraph{NLI model.} Wang's released checkpoint
+(\texttt{MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli};
+\citealp{he2023debertav3,laurer2024less}) in float16, with Wang's segmentation.
+Before every scoring run, the 398 pairs behind Wang's histogram must reproduce
+earlier caches bit for bit.
+
+\paragraph{Reproduction.} Our BSE reproduction matches Wang's Table~1 at
+$C_M{=}28$, $C_{FA}{=}96$ on all six metrics within the predeclared tolerances
+(e.g.\ nonfactual PR-AUC 0.8595 vs 0.8645, 6.47 vs 6.22 documents per
+sentence). At $C_M{=}14$, $C_{FA}{=}24$ it reads 16\% more documents than
+reported and has higher correlations. Loading the checkpoint in float32
+changes every metric by at most 0.001, so precision does not explain the
+gap. All comparisons in this paper use the $28/96$ operating point.
+
+\paragraph{Cost--quality curves.} Each cell runs under BSE's band $(l^*, u^*)$
+and under scaled bands
+$(\sigma(s \cdot \operatorname{logit} l^*), \sigma(s \cdot \operatorname{logit} u^*))$
+for $s = 0.25, 0.50, \dots, 4$. Every scaled band contains $P_0$, and $s = 1$
+is BSE's band. Quality is balanced PR-AUC: the mean of factual and nonfactual
+PR-AUC, computed as in Wang's code. Cost is documents (and NLI calls) per
+sentence.
+
+\paragraph{Endpoints and statistics.} The matched-cost gain (RQ2) is a cell's
+balanced PR-AUC at BSE's documents per sentence, interpolated on its curve,
+minus BSE's. The matched-quality saving (RQ1) is the reduction in documents at
+BSE's balanced PR-AUC. All endpoints come from a paired cluster bootstrap
+(10{,}000 resamples, seed 42) over responses, passages or entities, with every
+cell evaluated on the same draws.
+
+\section{Results}
+\label{sec:results}
+
+\subsection{One-dimensional DDRE}
+
+A first, one-dimensional uLSIF on $e$ was selected on SelfCheckGPT validation
+data (640 configurations) and frozen. On the SelfCheckGPT held-out split (190
+passages, 1{,}525 sentences) it read 20.7\% fewer documents than BSE
+(1.32 per sentence, [1.15, 1.49]) and made 22.0\% fewer NLI calls, with balanced
+PR-AUC +0.008 [$-0.021$, 0.038]. Because the configuration was chosen from many
+candidates, we treated this as non-confirmatory and preregistered a frozen
+transfer to FActScore. There the same detector kept BSE's quality (balanced
+PR-AUC $-0.002$ [$-0.028$, 0.023]) but read 9.4\% \emph{more} documents. The
+saving had not transferred.
+
+Two facts explained the reversal. First, the histogram and the 1-D uLSIF
+estimate the same function, $r(e)$, so their costs depend on where each
+dataset's scores fall. Second, the frozen uLSIF was unnormalised (mean ratio
+0.736 under the hallucinated distribution), which biased its updates toward
+``hallucinated''. This motivated normalisation and additional features.
+
+\subsection{Multivariate DDRE (exploratory)}
+
+Table~\ref{tab:explore} and Figure~\ref{fig:curves} give the multivariate
+results. They are exploratory: the curve construction was amended after the
+first replay (\S\ref{sec:pitfall}).
+
+\begin{table}[t]
+\centering\small
+\begin{tabular}{lcc}
+\toprule
+Test set & RQ1 docs saved & RQ2 gain \\
+\midrule
+Factcheck-Bench & \textbf{3.21} [2.90, 3.55] & \textbf{+0.096} [0.037, 0.158] \\
+SelfCheckGPT & 1.61 [$-$2.98, 3.54] & +0.017 [$-$0.012, 0.045] \\
+FActScore test & not reached & $-$0.040 [$-$0.072, $-$0.010] \\
+\bottomrule
+\end{tabular}
+\caption{M against BSE (exploratory). Factcheck-Bench: 271 sentences, at most
+5 documents per claim; SelfCheckGPT held-out: 1{,}525 sentences;
+FActScore test entities: 1{,}260 sentences. BSE reads 5.92, 6.37 and 8.74
+documents per sentence respectively.}
+\label{tab:explore}
+\end{table}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/mddre_cost_quality_curves.pdf}
+\caption{Cost--quality curves of the five evidence models (band scales 0.25 to
+4). The diamond is BSE's official run.}
+\label{fig:curves}
+\end{figure*}
+
+On Factcheck-Bench, M's curve lies above every other cell's at nearly every
+cost. On SelfCheckGPT the curves lie within a few hundredths of one another.
+On FActScore, BSE's official run lies above its own neighbouring curve points
+(0.763 vs 0.680 and 0.662), and the negative matched-cost value is measured
+against that single point.
+
+\paragraph{The same band.} Under BSE's own band, every new cell reads
+\emph{more} documents than BSE on all three test sets (M: 0.79, 1.36 and 9.22
+more per sentence). Better evidence does not by itself shorten the walk to a
+fixed band. The savings in Table~\ref{tab:explore} come from moving along the
+cost--quality curve to a tighter band.
+
+\paragraph{Components (RQ3).} On Factcheck-Bench, the matched-cost difference
+between M and U (adding $k$ and the rank) is +0.088 [0.036, 0.143], and between
+M and L (uLSIF vs logistic on the same features) is +0.070 [0.007, 0.133]. More
+training data (A$\to$A$'$: +0.035 [$-$0.010, 0.078]) and normalisation
+(A$'\to$U: $-$0.028 [$-$0.069, 0.019]) show no consistent difference. M also
+exceeds L on SelfCheckGPT (+0.023 [0.001, 0.046]). These are associations within
+our design, not isolated causes.
+
+\subsection{A pitfall in cost--quality curves}
+\label{sec:pitfall}
+
+Our preregistered curve swept bands of half-width 0.25 to 4 in log-odds around
+the decision threshold $\operatorname{logit}(28/124) = -1.23$. For half-widths
+up to 1, the whole band lies below $P_0 = 0.5$, so the detector reads no
+document and outputs $P = 0.5$ for every sentence. The common PR-AUC
+implementation (\texttt{precision\_recall\_curve} followed by trapezoidal
+\texttt{auc}) gives a constant score the value $(1 + \pi)/2$ for positive
+prevalence $\pi$, so balanced PR-AUC is exactly 0.75. That beat every real
+detector on Factcheck-Bench (BSE: 0.609). Matched endpoints then interpolated
+to this point: every cell, including BSE itself, appeared to save all of BSE's
+documents. We kept the first output frozen, recorded a dated amendment, and
+replaced the sweep by the scaled bands of \S\ref{sec:protocol}, which always
+contain $P_0$. All multivariate results above are therefore exploratory.
+
+A second, subtler optimism remains: on a noisy curve, the first crossing of a
+quality target can occur early by chance. BSE's own curve ``saves'' 2.48
+documents against BSE's official run on Factcheck-Bench by this rule. The
+confirmatory test corrects for it.
+
+\subsection{Preregistered confirmatory test}
+\label{sec:confirmatory}
+
+Before any model touched them, we preregistered a test of M against BSE on two
+datasets with the same structure (LLM answers, claim-level human labels, saved
+ranked evidence):
+
+\begin{itemize}
+\item \textbf{ExpertQA} \citep{malaviya-etal-2024-expertqa}: 11{,}389
+expert-labelled sentences (596 hallucinated) in 483 question-author clusters.
+Each atomic claim has five released passages.
+\item \textbf{BingCheck} \citep{li-etal-2024-self}: 3{,}623 claims (942
+refuted or partially supported) in 396 responses. Each claim has three saved
+Bing pages.
+\end{itemize}
+
+The endpoints are:
+\begin{itemize}
+\item \textbf{E2}, the matched-cost gain.
+\item \textbf{E1}, a \emph{net} matched-quality saving. It compares M's first
+crossing of BSE's quality with BSE's own first crossing, capped at BSE's cost.
+\end{itemize}
+Holm's correction \citep{holm1979simple} runs over the four tests. A
+hypothesis counts as confirmed only if supported on both datasets.
+
+\pending{Table of E1/E2 per dataset; Holm decisions; curves; sensitivity
+analyses; per-system breakdown.}
+
+\section{Discussion}
+
+\pending{To be written after the confirmatory result. Points to cover:}
+\begin{itemize}
+\item The band equivalence makes the evidence model the only lever on BSE's
+cost, and the curve, not the fixed band, is where the savings appear.
+\item Contradiction and rank carry information that the entailment histogram
+discards, at no extra NLI cost.
+\item Dataset dependence: Factcheck-Bench vs SelfCheckGPT and FActScore;
+\pending{confirmatory pattern}.
+\item A practical rule for evaluating sequential detectors: every band in a
+sweep must contain the prior.
+\end{itemize}
+
+\section{Limitations}
+
+\begin{itemize}
+\item \textbf{Exploratory status.} The multivariate results are exploratory,
+and Factcheck-Bench is small: 271 sentences, at most 5 documents per claim.
+\item \textbf{Grid edge.} Cross-validation chose the smallest kernel width on
+the fixed grid for U and M.
+\item \textbf{Label semantics.} ExpertQA has one annotator per sentence and few
+hallucinations. BingCheck labels measure support by the saved pages, not
+world-level truth.
+\item \textbf{Reproduction gap.} Our BSE reproduction fails Wang's
+$C_M{=}14$, $C_{FA}{=}24$ row, so we use only the 28/96 operating point.
+\item \textbf{Cost measure.} Cost is counted in documents and NLI calls.
+Wall-clock time is \pending{to be measured}.
+\end{itemize}
+
+\section*{Reproducibility}
+
+Code, preregistrations, amendments and results summaries are in the
+repository \pending{URL}. Every artifact is identified by SHA-256 in those
+documents. Datasets are used under their licences; BingCheck states none, and
+its authors were contacted on 16 October 2026.
+
+\bibliography{refs}
+
+\end{document}
