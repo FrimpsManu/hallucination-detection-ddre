@@ -204,13 +204,21 @@ class FitScript(unittest.TestCase):
 
     def test_plan_is_append_only(self):
         from src import plan_v2
+        text = (ROOT / plan_v2.PLAN_PATH).read_bytes()
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / plan_v2.PLAN_PATH
             target.parent.mkdir(parents=True)
-            text = (ROOT / plan_v2.PLAN_PATH).read_bytes()
             target.write_bytes(text + b"\nlater amendment\n")
+            self.assertEqual(plan_v2.plan_problems(tmp, require_amendment_2=True), [])
+            # an edit inside amendment 1 breaks amendments 1 and 2, not the base
+            i = plan_v2.PLAN_BYTES + 10
+            edited = text[:i] + bytes([text[i] ^ 1]) + text[i + 1:]
+            target.write_bytes(edited)
             self.assertEqual(plan_v2.plan_problems(tmp), [])
             self.assertEqual(len(plan_v2.plan_problems(tmp, require_amendment_1=True)), 1)
+            self.assertEqual(len(plan_v2.plan_problems(tmp, require_amendment_2=True)), 2)
+            target.write_bytes(text[:plan_v2.AMENDMENT_1_BYTES])
+            self.assertEqual(len(plan_v2.plan_problems(tmp, require_amendment_2=True)), 1)
             target.write_bytes(b"X" + text[1:])
             self.assertIn("differs from the approved plan", plan_v2.plan_problems(tmp)[0])
 
