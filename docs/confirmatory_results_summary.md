@@ -202,6 +202,19 @@ No system shows a consistent advantage for M.
 - **Cost** is counted in documents and NLI calls. Wall-clock time was not
   measured.
 
+## 7a. Disclosures
+
+- **Labels seen before the test.** During the dataset survey, one structure
+  printout listed one BingCheck response's six claims, with string lengths that
+  reveal their six labels (`docs/confirmatory_dataset_survey.md`). Nothing else
+  about BingCheck labels or content was seen before scoring. Six of 3,623 units
+  cannot plausibly move the results above.
+- **BingCheck licence.** The release states no licence. The authors were
+  emailed on 2026-10-16 to ask for permission. The first author's university
+  address returned an automatic reply saying they are no longer affiliated. The
+  two co-authors in copy had not replied as of 2026-10-17. The
+  data are used for research only and are not redistributed.
+
 ## 8. Run record
 
 1. Features were scored from `5093d11`.
