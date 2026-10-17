@@ -333,3 +333,145 @@ def support_from_json(d):
     if d["kind"] == "atoms":
         return Support(d["log_ratios"], d["weights"])
     raise SequentialError(f"unknown support kind {d['kind']!r}")
+
+
+# ---------------------------------------------------------------- backward induction
+
+BI_GRID_POINTS = 8001        # value function on a logit grid over +-LOG_ODDS_CLIP
+BI_LOG_RATIO_BIN = 0.005     # support compression: atoms pooled within 0.005 nats
+
+
+def compress(support, bin_width=BI_LOG_RATIO_BIN):
+    """Pool atoms whose log ratios fall in the same ``bin_width`` bin.
+
+    Each pooled atom carries the summed weight and the weight-averaged ratio,
+    so E_h[r] is preserved exactly; log ratios move by at most ``bin_width``.
+    """
+    keys = np.floor(support.log_ratios / bin_width).astype(np.int64)
+    order = np.argsort(keys, kind="stable")
+    keys, w, r = keys[order], support.weights[order], support.ratios[order]
+    starts = np.flatnonzero(np.r_[True, keys[1:] != keys[:-1]])
+    w_sum = np.add.reduceat(w, starts)
+    r_mean = np.add.reduceat(w * r, starts) / w_sum
+    return Support(np.log(r_mean), w_sum)
+
+
+class BackwardInductionPolicy:
+    """Bayes-optimal stopping over a finite horizon (plan v2 amendment 1).
+
+    With n documents read and at most ``horizon`` available, the optimal
+    expected cost is V_n(pi) = min(R_stop(pi), C_retrieve + E_next V_{n+1}(pi'))
+    with V_horizon = R_stop. The expectation uses the same predictive mixture
+    as Eq. 8, over the support at the next document's rank n + 1. With
+    horizon 1 this is exactly Eq. 8. V is held on a logit grid and read by
+    linear interpolation; the continue set of each stage is extracted as open
+    intervals with edges refined by bisection, as ``ContinueRegion`` does.
+    """
+
+    def __init__(self, support, costs, horizon, grid_points=BI_GRID_POINTS):
+        if horizon < 1:
+            raise SequentialError("horizon must be at least 1")
+        self.costs, self.horizon = costs, int(horizon)
+        self.ranked = isinstance(support, RankedSupport)
+        self._support = support
+        self.x = np.linspace(-LOG_ODDS_CLIP, LOG_ODDS_CLIP, grid_points)
+        self.p = 1.0 / (1.0 + np.exp(-self.x))
+        self.stop = np.minimum((1.0 - self.p) * costs.c_miss, self.p * costs.c_false_alarm)
+        self._compressed = {}
+        values = self.stop.copy()
+        self.values = {self.horizon: values}
+        self.intervals = {}
+        for n in range(self.horizon - 1, -1, -1):
+            nxt = values
+            margin = self.stop - costs.c_retrieve - self._expected(n, self.p, self.x, nxt)
+            values = np.where(margin > 0, self.stop - margin, self.stop)
+            self.values[n] = values
+            self.intervals[n] = self._intervals(n, margin > 0, nxt)
+
+    def _atoms(self, n):
+        if n not in self._compressed:
+            s = self._support.at(n + 1) if self.ranked else self._support
+            self._compressed[n] = compress(s)
+        return self._compressed[n]
+
+    def _expected(self, n, p, x, nxt):
+        """E_next V_{n+1} at posteriors p (logits x), for the document of rank n + 1."""
+        s = self._atoms(n)
+        p = np.atleast_1d(p)[:, None]
+        x = np.atleast_1d(x)[:, None]
+        pred = p * s.ratios[None, :] + (1.0 - p)
+        if n + 1 == self.horizon:
+            # V_horizon = R_stop exactly; the weight cancels the posterior's
+            # denominator, as in Support.expected_next_stop_risk.
+            risks = np.minimum((1.0 - p) * self.costs.c_miss,
+                               p * s.ratios[None, :] * self.costs.c_false_alarm)
+            return risks @ s.weights / (pred @ s.weights)
+        nx = np.clip(x + s.log_ratios[None, :], -LOG_ODDS_CLIP, LOG_ODDS_CLIP)
+        v = np.interp(nx, self.x, nxt)
+        return (v * pred) @ s.weights / (pred @ s.weights)
+
+    def _margin(self, n, p, nxt):
+        x = _logit(p)
+        return (stop_risk(p, self.costs.c_miss, self.costs.c_false_alarm)
+                - self.costs.c_retrieve - float(self._expected(n, p, x, nxt)[0]))
+
+    def _intervals(self, n, inside, nxt):
+        def edge(outside, inner):
+            while abs(inner - outside) > EDGE_TOL:
+                mid = 0.5 * (inner + outside)
+                if self._margin(n, mid, nxt) > 0:
+                    inner = mid
+                else:
+                    outside = mid
+            return 0.5 * (inner + outside)
+
+        out, start, ps = [], None, self.p
+        for i in range(len(ps)):
+            if inside[i] and start is None:
+                start = edge(ps[i - 1], ps[i]) if i > 0 else 0.0
+            if not inside[i] and start is not None:
+                out.append((start, edge(ps[i], ps[i - 1])))
+                start = None
+        if start is not None:
+            out.append((start, 1.0))
+        return out
+
+    def should_continue(self, p, next_rank):
+        n = next_rank - 1
+        if not 0 <= n < self.horizon:
+            return False
+        return any(lo < p < hi for lo, hi in self.intervals[n])
+
+    def to_json(self):
+        return {"horizon": self.horizon, **self.costs.as_dict(),
+                "intervals_by_stage": {str(n): [list(iv) for iv in self.intervals[n]]
+                                       for n in sorted(self.intervals)}}
+
+
+class PolicyByHorizon:
+    """One backward-induction policy per horizon, built on first use.
+
+    A subclaim with fewer available documents than ``max_docs`` is planned
+    over the documents it actually has.
+    """
+
+    def __init__(self, support, costs, max_docs):
+        self.support, self.costs, self.max_docs = support, costs, int(max_docs)
+        self._cache = {}
+
+    def for_documents(self, available):
+        h = min(int(available), self.max_docs)
+        if h < 1:
+            return None
+        if h not in self._cache:
+            self._cache[h] = BackwardInductionPolicy(self.support, self.costs, h)
+        return self._cache[h]
+
+
+def run_subclaim_bi(log_ratios, spans, policies, max_docs, p0=0.5):
+    """``run_subclaim`` under the backward-induction policy for this subclaim's
+    number of available documents. No document available: (P0, 0, 0)."""
+    policy = policies.for_documents(min(len(log_ratios), max_docs))
+    if policy is None:
+        return float(p0), 0, 0
+    return run_subclaim(log_ratios, spans, policy, max_docs, p0)
