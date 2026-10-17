@@ -186,6 +186,17 @@ class FitScript(unittest.TestCase):
             self.assertIn("already exists", msg)
             self.assertIn("approved plan", msg)
 
+    def test_missing_artifacts_are_reported_not_raised(self):
+        F = self.F
+        with tempfile.TemporaryDirectory() as tmp:
+            gone = (Path(tmp) / "absent.sqlite", F.FEATURES[1])
+            with mock.patch.object(F, "FEATURES", gone), \
+                    mock.patch.object(F, "GATE1", (Path(tmp) / "absent.json", "x")):
+                with self.assertRaises(F.FitRefused) as ctx:
+                    F.verify_inputs(Path(tmp) / F.OUT_NAME)
+            self.assertIn("absent.sqlite is missing", str(ctx.exception))
+            self.assertIn("absent.json is missing", str(ctx.exception))
+
     def test_plan_pin_matches_the_merged_plan(self):
         from src.factscore_data import sha256_path
         self.assertEqual(sha256_path(ROOT / self.F.PLAN[0]), self.F.PLAN[1])
