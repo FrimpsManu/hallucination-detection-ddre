@@ -442,3 +442,51 @@ Five of six deliberate mutants are caught. The sixth removes a clip that
 
 **Phase table:** Phase 2b (this amendment and its code) is inserted before
 Phase 4.
+
+## 11. Amendment 2 (2026-10-17): a budget knob (exploratory)
+
+Recorded after Phase 5's results (`docs/v2_results_summary.md`) had been
+seen. Everything it adds is therefore **exploratory**. It changes no Phase 5
+result.
+
+**Why:**
+- Under backward induction the C_retrieve sweep is nearly all-or-nothing.
+  Between C_retrieve ≈ 1.4 and 2, most methods jump from reading nearly every
+  document to reading none.
+- The curves therefore have no middle-budget points, and the envelope
+  endpoints compare against gaps.
+- Phase 5 also showed that Wang's fixed-k "Maximum" baseline is competitive,
+  but did not bootstrap it.
+
+**What is added (`src/v2_budget.py`, `scripts/run_v2_budget.py`):**
+- **Knob K:** the maximum number of documents per subclaim, from 1 to the
+  dataset's maximum.
+  - It is crossed with C_retrieve ∈ {0.125, 0.25, 0.5, 1}, the values below the
+    cliff plus the operating point.
+  - Backward induction plans over min(available documents, K).
+- **Curves:** a method's curve is the step envelope over all its (K,
+  C_retrieve) points. Point (K = maximum, C_retrieve = 1) is Phase 5's
+  operating point.
+- **Methods:** BSE, DDRE-1D, NB-M, DDRE-M, at C_M/C_FA 28/96 and 14/24. Also
+  fixed-k max entailment for K = 1 … maximum.
+- **Contrasts and endpoints (bootstrapped):**
+  - **BSE → DDRE-1D and NB-M → DDRE-M,** anchored at the reference's
+    operating point: net E-cost in NLI calls and in documents, net E-quality,
+    AUC-gap.
+  - **Fixed-k → each of the four methods,** anchored at the method's own
+    operating point:
+    - the method's quality minus the best fixed-k quality within the
+      method's cost;
+    - the extra cost fixed-k needs to reach the method's quality;
+    - the fraction of replicates in which fixed-k never reaches it;
+    - AUC-gap.
+- **Statistics:** paired cluster bootstrap, 10,000 replicates, seed 42, as in
+  §4.5.
+- **Gates:**
+  - X0: pins, now including this amendment and the Phase 5 result;
+  - X2: BSE-official reproduces the frozen replays, as before;
+  - **X4:** the (K = maximum, C_retrieve = 1) points reproduce Phase 5's
+    operating-point predictions exactly, for every method.
+
+**Not changed:** Phase 5's frozen result, the estimators, the metrics and the
+data.
