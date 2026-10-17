@@ -56,7 +56,12 @@ LLMs produce fluent text that is sometimes false. A common way to detect such
 hallucinations is to split a sentence into claims, retrieve evidence for each
 claim, and score claim--evidence pairs with a natural-language-inference (NLI)
 model \citep{min-etal-2023-factscore,wang-etal-2024-factcheck}. The cost of
-such detectors grows with every document they read.
+such detectors grows with every document they read. This matters most in
+deployed assistants that check responses before they reach users, for example
+customer-service systems in enterprises. There, every retrieved and scored
+document adds compute and latency to each response, so a detector that
+reaches the same reliability with fewer documents is directly cheaper to
+run.
 
 \citet{wang-etal-2023-hallucination} cast this as Bayesian sequential
 estimation (BSE). Documents are read in retrieval order. After each one, the
@@ -454,6 +459,19 @@ does not, by itself, shorten the walk to a fixed stopping region. Its benefit
 shows when cost is allowed to vary, so evaluations of sequential detectors
 should report curves, not a single operating point.
 
+\paragraph{Implications for deployment.} In retrieval-augmented
+assistants, such as enterprise customer-service systems, NLI scoring of
+retrieved evidence dominates a detector's per-response compute. The
+estimator itself costs little: a histogram lookup, or a kernel sum over 100
+centres. At equal detection quality, the direct ratio needed 70\% fewer NLI
+calls than BSE on HELM. That suggests a proportional saving in verification
+compute for such systems.
+
+We did not test this setting. Domain-specific knowledge bases, different
+retrievers and the cost of a wrong answer in customer service may change both
+the size of the saving and the best operating point. A measured evaluation on
+customer-service data, with wall-clock latency, is the natural next step.
+
 \paragraph{Lessons for evaluation.}
 \begin{itemize}
 \item A competitive simple baseline (fixed-$k$ maximum entailment) should
@@ -484,6 +502,8 @@ We contacted the authors on 17 October 2026.
 training pairs. These pairs are scored on whole premises, while test
 documents are scored as the maximum over spans. Both methods inherit this
 mismatch.
+\item \textbf{Application domain:} we evaluated on general-domain and
+Wikipedia-grounded data only, not on enterprise or customer-service data.
 \item \textbf{Cost} is counted in NLI calls and documents. We did not
 measure wall-clock time; estimator overhead is small next to the NLI model
 but unmeasured.
