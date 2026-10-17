@@ -43,12 +43,11 @@ import run_mddre_replay as RR  # noqa: E402
 import score_mddre_features as SF  # noqa: E402
 from src import mddre_data as M  # noqa: E402
 from src import mddre_estimators as E  # noqa: E402
+from src import plan_v2  # noqa: E402
 from src import sequential as S  # noqa: E402
 from src.factscore_data import sha256_path  # noqa: E402
 
 DTYPE = "float16"
-PLAN = ("docs/research_plan_v2.md",
-        "29a80fa2fcb1e4afd2a7a60d582d6f611ab6fdff3181b8335c82dfa43c1df98c")
 FEATURES = (SF.MDDRE / "mddre_features_float16.sqlite",
             "47a0425fcd90944f47331c2dad8900fe8c05d8bd03eb4d4ca0f5d70b7e097353")
 GATE1 = (SF.GATE1 / "wang_reproduction_fidelity_v2_batch1_mps.json",
@@ -71,8 +70,7 @@ def parse_args():
 
 def verify_inputs(out):
     problems = []
-    if sha256_path(PROJECT_ROOT / PLAN[0]) != PLAN[1]:
-        problems.append(f"{PLAN[0]} differs from the approved plan")
+    problems.extend(plan_v2.plan_problems(PROJECT_ROOT))
     for path, sha in (FEATURES, GATE1):
         if not path.exists():
             problems.append(f"{path} is missing")
@@ -189,8 +187,8 @@ def main():
     k_med = float(sorted(d["k"] for d in all_h)[len(all_h) // 2])
     result = {
         "artifact": "v2-estimators",
-        "protocol": PLAN[0] + " §3.3-§3.4 (Phase 3)",
-        "plan_sha256": PLAN[1],
+        "protocol": plan_v2.PLAN_PATH + " §3.3-§3.4 (Phase 3)",
+        "plan_sha256": plan_v2.PLAN_SHA256,
         "dtype": manifest["dtype"],
         "feature_cache_sha256": FEATURES[1],
         "gates": {"X1_bse_histogram": x1},
