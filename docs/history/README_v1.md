@@ -1,3 +1,9 @@
+> **Historical record.** This was the repository README until 2026-10-17, before
+> research plan v2 (`docs/research_plan_v2.md`). It is kept unchanged below this
+> note for the Gate 1 reproduction forensics, the NBC sensitivity analysis and
+> the provenance details it documents. Some statements are superseded; see the
+> current [README](../../README.md) and `docs/naming.md`.
+
 # Retrieval-Aware Hallucination Detection with Direct Density-Ratio Estimation
 
 Research code for an in-progress paper extending Wang et al., **“Hallucination Detection for Generative Large Language Models by Bayesian Sequential Estimation” (EMNLP 2023)**.
