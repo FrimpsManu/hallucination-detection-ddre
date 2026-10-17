@@ -1238,3 +1238,7 @@ Frozen by this PR, before any real number exists:
 so it can be reviewed before any GPU time is spent.
 
 **Not resolved by PR #13:** D-03 (protocol only), D-09 and D-13 remain open.
+
+---
+
+**Status note (2026-10-17).** The D-03 empirical run took place on 2026-09-30. Its outcome, the sensitivity study and the selection decision that followed are recorded in [`docs/d03_decision_record.md`](d03_decision_record.md). Statements above that the run is "still required" describe the state before that date.
