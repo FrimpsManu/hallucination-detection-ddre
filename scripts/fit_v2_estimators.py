@@ -74,9 +74,12 @@ def verify_inputs(out):
     if sha256_path(PROJECT_ROOT / PLAN[0]) != PLAN[1]:
         problems.append(f"{PLAN[0]} differs from the approved plan")
     for path, sha in (FEATURES, GATE1):
-        if sha256_path(path) != sha:
+        if not path.exists():
+            problems.append(f"{path} is missing")
+        elif sha256_path(path) != sha:
             problems.append(f"{path.name} differs from its pinned digest")
-    manifest = json.loads(SF.output_paths(SF.MDDRE, DTYPE)["manifest"].read_text())
+    manifest_path = SF.output_paths(SF.MDDRE, DTYPE)["manifest"]
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     if manifest.get("status") != "complete" or manifest.get("cache_sha256") != FEATURES[1]:
         problems.append("the feature manifest does not certify the pinned cache")
     if out.exists():
