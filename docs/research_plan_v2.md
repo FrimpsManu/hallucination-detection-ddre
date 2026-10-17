@@ -374,3 +374,71 @@ Each phase is one PR. Code PRs carry tests. Runs happen once, after merge.
   which also allows K = 10–50.
 - **Q3, PR #50:** closed. The paper is rebuilt in Phase 9.
 - **Q4, G3 calibration:** approved as a third goal.
+
+## 10. Amendment 1 (2026-10-17): the stopping rule
+
+Recorded after Phase 3's fit and before any v2 detector was run on any
+evaluation data. It changes §3.2's primary stopping rule. Everything above
+this section is unchanged.
+
+**Finding:**
+- Wang's paper defines the look-ahead as Eq. 8, a one-step rule. Wang's
+  released code uses a different heuristic: the stop risk of the unweighted
+  mean of the ten next posteriors (`docs/wang_deviations.md` row 16).
+  Our BSE reproduction matches Wang's numbers because it follows the code.
+- Implemented exactly, Eq. 8 **never reads a document at Wang's costs**
+  (C_M 28, C_FA 96), for any C_retrieve > 0. Two independent implementations
+  agree (`src/baseline_core.py` eq8 and `src/sequential.py`):
+  - At P0 = 0.5 the decision is "factual" (threshold 0.226).
+  - No single document's histogram ratio can carry P below 0.226: the strongest
+    negative bin has log r = −0.69, and logit(0.226) = −1.23.
+  - The one-step value of a document is therefore exactly 0.
+
+  This is the known myopia of one-step look-ahead. At 14/24 the one-step
+  value at P0 is 0.43, so Eq. 8 reads only when C_retrieve < 0.43.
+- Continue regions at 28/96, C_retrieve = 1, with Wang's histogram:
+
+  | Rule | Continue while P is in |
+  |---|---|
+  | BSE-official (code) | (0.204, 0.769) |
+  | Eq. 8 | (0.048, 0.335): excludes P0 |
+  | backward induction over 10 documents | (0.034, 0.813) |
+
+**Decision (approved by the author, 2026-10-17):**
+- **Primary rule: backward induction**, the Bayes-optimal finite-horizon rule.
+  Wang's §3.4 names it as optimal and approximates it because exact induction
+  over discrete features grows exponentially. Our state is the scalar
+  posterior, so it is a small dynamic programme on a logit grid
+  (`BackwardInductionPolicy`).
+- **Same structure as Eq. 8:** it uses the same predictive expectation (§3.2)
+  over each estimator's own support, at the next document's rank. With one
+  document left it is Eq. 8 exactly.
+- **Horizon:** the subclaim's available documents, capped at the dataset's
+  maximum.
+- **Fairness:** every method (BSE, DDRE-1D, Hist-1D, DDRE-1D′, NB-M, DDRE-M,
+  Logit-M) is stopped by this rule, so step 5 remains the only difference.
+- **Also reported, for transparency:**
+  - BSE-official, Wang's code: the reproduction reference;
+  - the one-step Eq. 8 for every method, including where it reads nothing.
+- **Unchanged:**
+  - the operating point (28/96, C_retrieve = 1);
+  - the C_retrieve sweeps at 28/96 and 14/24 (§4.1);
+  - the metrics, the statistics and the data.
+
+**Names (`docs/naming.md`):**
+- **BSE** now means Wang's histogram under backward induction.
+- **BSE-eq8** means Wang's histogram under the one-step Eq. 8.
+- **BSE-official** means Wang's code.
+
+**Verification** (`tests/test_backward_induction.py`):
+- horizon 1 equals Eq. 8 to 1e-9;
+- values and decisions match full enumeration on small supports;
+- regions shrink as documents run out and as C_retrieve rises;
+- rank conditioning;
+- Wang's case kept as a regression test.
+
+Five of six deliberate mutants are caught. The sixth removes a clip that
+`np.interp` already applies, so its behaviour is identical.
+
+**Phase table:** Phase 2b (this amendment and its code) is inserted before
+Phase 4.

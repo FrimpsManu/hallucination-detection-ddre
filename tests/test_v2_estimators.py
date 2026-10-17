@@ -179,7 +179,7 @@ class FitScript(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / F.OUT_NAME
             out.write_text("{}")
-            with mock.patch.object(F, "PLAN", (F.PLAN[0], "0" * 64)):
+            with mock.patch.object(F.plan_v2, "PLAN_SHA256", "0" * 64):
                 with self.assertRaises(F.FitRefused) as ctx:
                     F.verify_inputs(out)
             msg = str(ctx.exception)
@@ -197,9 +197,22 @@ class FitScript(unittest.TestCase):
             self.assertIn("absent.sqlite is missing", str(ctx.exception))
             self.assertIn("absent.json is missing", str(ctx.exception))
 
-    def test_plan_pin_matches_the_merged_plan(self):
-        from src.factscore_data import sha256_path
-        self.assertEqual(sha256_path(ROOT / self.F.PLAN[0]), self.F.PLAN[1])
+    def test_plan_pins_match_the_merged_plan(self):
+        from src import plan_v2
+        self.assertEqual(plan_v2.plan_problems(ROOT), [])
+        self.assertEqual(plan_v2.plan_problems(ROOT, require_amendment_1=True), [])
+
+    def test_plan_is_append_only(self):
+        from src import plan_v2
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / plan_v2.PLAN_PATH
+            target.parent.mkdir(parents=True)
+            text = (ROOT / plan_v2.PLAN_PATH).read_bytes()
+            target.write_bytes(text + b"\nlater amendment\n")
+            self.assertEqual(plan_v2.plan_problems(tmp), [])
+            self.assertEqual(len(plan_v2.plan_problems(tmp, require_amendment_1=True)), 1)
+            target.write_bytes(b"X" + text[1:])
+            self.assertIn("differs from the approved plan", plan_v2.plan_problems(tmp)[0])
 
     def test_fit_tier_supports(self):
         F = self.F
