@@ -13,6 +13,17 @@
 \usepackage{booktabs}
 \usepackage{amsmath,amssymb}
 \usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+% Numbered citations, [1], [2], ... (references sorted by author, as
+% acl_natbib.bst orders them). Set to \numberedcitationsfalse for the ACL
+% author-year style.
+\newif\ifnumberedcitations
+\numberedcitationstrue
+\ifnumberedcitations
+  \setcitestyle{numbers,square,comma}
+\fi
 
 \newcommand{\pending}[1]{\textcolor{red}{[#1]}}
 \newcommand{\Rstop}{R_{\mathrm{stop}}}
@@ -89,7 +100,7 @@ Our goals are:
 \paragraph{Contributions.}
 \begin{enumerate}
 \item A drop-in replacement of BSE's likelihood ratio by direct density-ratio
-estimation (uLSIF; \citealp{kanamori2009ulsif}). The documents, prior,
+estimation, uLSIF \citep{kanamori2009ulsif}. The documents, prior,
 update, stopping rule and aggregation are all unchanged (\S\ref{sec:method}).
 \item A finding about BSE's stopping rule. The published one-step look-ahead,
 implemented as written, never reads a document at the published costs,
@@ -151,23 +162,66 @@ $\CM{=}28$, $\CFA{=}96$. Our repository tabulates every difference.
 \section{Direct density-ratio evidence}
 \label{sec:method}
 
-Eq.~\ref{eq:update} needs only the ratio $r$, never the two densities. We
-estimate $r$ directly with unconstrained least-squares importance fitting
-(uLSIF; \citealp{kanamori2009ulsif}). It fits
-$\hat r(x) = \sum_l \alpha_l\, k(x, x_l)$ with Gaussian kernels on 100
-centres drawn from the factual sample, by minimising
-$\tfrac12 \mathbb{E}_h[\hat r^2] - \mathbb{E}_f[\hat r]$. This objective has
-a closed-form solution.
+Eq.~\ref{eq:update} needs only the ratio $r$, never the two densities.
 
-\paragraph{Fitting choices.}
-\begin{itemize}
-\item \textbf{Hyperparameters:} the kernel width
-($0.125$--$4\times$ the median pairwise distance) and the ridge penalty
-($10^{-4}$--$10$) are chosen only by uLSIF's own 5-fold cross-validation
-objective, with folds grouped by claim, never by a detection metric.
-\item \textbf{Self-normalisation:} the ratio is rescaled so that it averages
-1 over the hallucinated training documents.
-\end{itemize}
+\paragraph{BSE's ratio, for contrast.} BSE discretises $e$ into ten bins
+$b(e)$, counts the $N_f$ factual and $N_h$ hallucinated training pairs per
+bin ($n_f(b)$, $n_h(b)$) and divides the two smoothed histograms:
+\begin{equation}
+r_{\mathrm{BSE}}(e) = \frac{\bigl(n_f(b(e)) + 1\bigr) / (N_f + 10)}
+                           {\bigl(n_h(b(e)) + 1\bigr) / (N_h + 10)}.
+\label{eq:bse-ratio}
+\end{equation}
+
+\paragraph{Direct estimation (uLSIF).} Instead, we fit the ratio itself
+with unconstrained least-squares importance fitting
+\citep{kanamori2009ulsif}. Let $x^f_1, \dots, x^f_{n_f}$ be the features of
+documents of factual claims and $x^h_1, \dots, x^h_{n_h}$ those of
+hallucinated claims, standardised on the pooled sample. The model is a
+non-negative combination of Gaussian kernels on $L = 100$ centres $c_l$
+drawn from the factual sample:
+\begin{equation}
+\hat r(x) = \sum_{l=1}^{L} \alpha_l \exp\!\Bigl(-\frac{\lVert x - c_l\rVert^2}{2\sigma^2}\Bigr).
+\label{eq:ulsif-model}
+\end{equation}
+uLSIF minimises the squared error
+$\tfrac12 \mathbb{E}_h[(\hat r - r)^2]$, which up to a constant equals
+$\tfrac12 \mathbb{E}_h[\hat r^2] - \mathbb{E}_f[\hat r]$. With a ridge
+penalty, the empirical objective is
+\begin{equation}
+\min_{\alpha}\ \tfrac12\, \alpha^\top \hat H \alpha - \hat h^\top \alpha
+  + \tfrac{\lambda}{2}\, \alpha^\top \alpha,
+\label{eq:ulsif-objective}
+\end{equation}
+where $\hat H_{ll'} = \frac{1}{n_h}\sum_j k_l(x^h_j)\, k_{l'}(x^h_j)$,
+$\hat h_l = \frac{1}{n_f}\sum_i k_l(x^f_i)$ and $k_l$ is the $l$-th kernel.
+Its solution is in closed form, with negative weights set to zero:
+\begin{equation}
+\hat\alpha = \max\bigl\{0,\ (\hat H + \lambda I)^{-1} \hat h\bigr\}.
+\label{eq:ulsif-solution}
+\end{equation}
+
+\paragraph{Model selection.} The kernel width $\sigma$
+($0.125$--$4\times$ the median pairwise distance) and $\lambda$
+($10^{-4}$--$10$) minimise the held-out criterion
+\begin{equation}
+J(\sigma, \lambda) = \tfrac12\, \overline{\hat r(x^h)^2}
+  - \overline{\hat r(x^f)}
+\label{eq:ulsif-cv}
+\end{equation}
+over five folds, where the bars average over held-out documents. Folds are
+grouped by claim, so that documents of one claim never straddle folds. No
+detection metric is used.
+
+\paragraph{Self-normalisation.} A ratio should average 1 under the
+hallucinated distribution, $\mathbb{E}_h[r] = 1$. uLSIF's fit need not, which
+biases every update. We therefore use
+\begin{equation}
+\tilde r(x) = \hat r(x) \Big/ \frac{1}{n_h}\sum_{j=1}^{n_h} \hat r(x^h_j),
+\label{eq:normalise}
+\end{equation}
+clipped to $[10^{-6}, 10^{6}]$. In the update, Eq.~\ref{eq:update}, the
+ratio $r(e)$ is replaced by $\tilde r(x)$.
 
 \paragraph{Estimators compared.} The pure test, \textbf{DDRE-1D}, fits
 $\hat r(e)$ on exactly BSE's 398 training pairs. Against BSE it changes only
@@ -223,6 +277,32 @@ it, because induction over discrete features grows exponentially.
 using Eq.~\ref{eq:identity} for the expectation.
 \item With one document left, it equals Eq.~8.
 \end{itemize}
+Algorithm~\ref{alg:ddre} summarises the whole procedure.
+
+\begin{algorithm}[t]
+\caption{Sequential hallucination detection with a direct density-ratio
+evidence model (DDRE).}
+\label{alg:ddre}
+\small
+\begin{algorithmic}[1]
+\Statex \textbf{Offline} (once per estimator)
+\State Fit $\hat r$ by uLSIF (Eqs.~\ref{eq:ulsif-model}--\ref{eq:ulsif-solution}), choosing $(\sigma, \lambda)$ by Eq.~\ref{eq:ulsif-cv}
+\State Self-normalise: $\tilde r \gets \hat r / \overline{\hat r(x^h)}$ (Eq.~\ref{eq:normalise})
+\State Support $\mathcal{S} \gets \{\log \tilde r(x^h_j)\}_{j=1}^{n_h}$, the hallucinated training sample
+\For{$n = K-1, \dots, 0$} \Comment{backward induction}
+  \State $V_n(\pi) \gets \min\{\Rstop(\pi),\ \Cr + \mathbb{E}_{\text{next}}[V_{n+1}(\pi')]\}$, expectation by Eq.~\ref{eq:identity} over $\mathcal{S}$
+\EndFor
+\Statex \textbf{Online} (one claim $c$, ranked documents $d_1, \dots, d_K$)
+\State $\pi \gets \pi_0$
+\For{$n = 0, \dots, K-1$}
+  \If{$\Rstop(\pi) \le \Cr + \mathbb{E}_{\text{next}}[V_{n+1}(\pi')]$} \textbf{break} \EndIf
+  \State $x \gets$ NLI features of $(d_{n+1}, c)$ \Comment{one NLI pass per span}
+  \State $\pi \gets \pi\, \tilde r(x) / \bigl(\pi\, \tilde r(x) + 1 - \pi\bigr)$ \Comment{Eq.~\ref{eq:update}}
+\EndFor
+\State \Return $\pi$; a sentence takes the minimum over its claims and is factual iff $(1-P)\CM < P\,\CFA$
+\end{algorithmic}
+\end{algorithm}
+
 For BSE at $\CM{=}28$, $\CFA{=}96$, $\Cr{=}1$ and $K{=}10$ it continues while
 $\pi \in (0.034, 0.813)$. Every method in our comparisons is stopped by this
 rule, so they differ only in $r$.

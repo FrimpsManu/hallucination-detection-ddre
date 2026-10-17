@@ -34,8 +34,17 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-CSL_URL = ("https://raw.githubusercontent.com/citation-style-language/styles/master/"
-           "association-for-computational-linguistics.csl")
+CSL_BASE = "https://raw.githubusercontent.com/citation-style-language/styles/master/"
+CSL_AUTHOR_YEAR = CSL_BASE + "association-for-computational-linguistics.csl"
+# Numbered style; its bibliography is re-sorted by author, then year, so the
+# numbers match the PDF (acl_natbib.bst sorts by author, natbib numbers them).
+CSL_NUMBERED = CSL_BASE + "american-mathematical-society-numeric.csl"
+
+
+def numbered_by_author(csl_text):
+    return re.sub(r"(<bibliography\b[^>]*>)",
+                  r'\1<sort><key variable="author"/><key variable="issued"/></sort>',
+                  csl_text, count=1)
 
 CM = 567  # twips per cm
 PAGE_W, PAGE_H, MARGIN, GAP = 11906, 16838, round(2.5 * CM), round(0.6 * CM)
@@ -69,8 +78,70 @@ def simplify(tex, numbers):
 
     tex = re.sub(r"\\begin\{equation\}(.*?)\\end\{equation\}", equation, tex, flags=re.S)
     tex = re.sub(r"\\paragraph\{([^}]*)\}", r"\\textbf{\1} ", tex)
+    tex = re.sub(r"\\begin\{algorithm\}.*?\\end\{algorithm\}",
+                 lambda m: algorithm(m.group(0), numbers), tex, flags=re.S)
     tex = re.sub(r"(figures/[A-Za-z0-9_]+)\.pdf", r"\1.png", tex)
     return tex
+
+
+def group(text, start):
+    """(content, end) of the balanced {...} group opening at ``text[start]``."""
+    if text[start] != "{":
+        raise SystemExit(f"expected '{{' in {text[start:start + 40]!r}")
+    depth = 0
+    for i in range(start, len(text)):
+        depth += {"{": 1, "}": -1}.get(text[i], 0)
+        if depth == 0:
+            return text[start + 1:i], i + 1
+    raise SystemExit("unbalanced braces in an algorithm line")
+
+
+def algorithm(block, numbers):
+    """An algorithmic environment as a caption plus a numbered list (pandoc
+    cannot read algpseudocode). Control lines become keywords; comments
+    become a right-pointing triangle."""
+    caption = re.search(r"\\caption\{(.*?)\}\s*\\label", block, re.S).group(1)
+    label = re.search(r"\\label\{([^}]*)\}", block).group(1)
+    body = block.split("\\begin{algorithmic}[1]", 1)[1].split("\\end{algorithmic}")[0]
+    out = [f"\\noindent\\textbf{{Algorithm {numbers[label]}:}} {' '.join(caption.split())}", ""]
+    items, depth, done = [], 0, [0]
+
+    def flush():
+        if items:
+            start = f"\\setcounter{{enumi}}{{{done[0]}}}" if done[0] else ""
+            out.extend(["\\begin{enumerate}", start, *items, "\\end{enumerate}", ""])
+            done[0] += len(items)
+            items.clear()
+
+    for raw in body.strip().splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        line = re.sub(r"\\Comment\{(.*?)\}\s*$", r" $\\triangleright$ \1", line)
+        if line.startswith("\\Statex"):
+            flush()
+            out.extend([line[len("\\Statex"):].strip(), ""])
+            continue
+        indent = "\\quad " * depth
+        if line.startswith("\\EndFor") or line.startswith("\\EndIf"):
+            depth -= 1
+            items.append("\\item " + "\\quad " * depth + "\\textbf{end}")
+            continue
+        if line.startswith("\\For{"):
+            cond, end = group(line, len("\\For"))
+            items.append(f"\\item {indent}\\textbf{{for}} {cond} \\textbf{{do}}{line[end:]}")
+            depth += 1
+            continue
+        if line.startswith("\\If{"):
+            cond, end = group(line, len("\\If"))
+            then = line[end:].replace("\\EndIf", "").strip()
+            items.append(f"\\item {indent}\\textbf{{if}} {cond} \\textbf{{then}} {then}")
+            continue
+        line = re.sub(r"^\\State\s*", "", line)
+        line = line.replace("\\Return", "\\textbf{return}")
+        items.append(f"\\item {indent}{line}")
+    flush()
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------- styles
@@ -286,8 +357,12 @@ def main():
             subprocess.run(["rsvg-convert", "-f", "png", "-z", "2", "-o",
                             str(tmp / "figures" / f"{svg.stem}.png"), str(svg)], check=True)
         (tmp / "pandoc.tex").write_text(simplify((tmp / "main.tex").read_text(), numbers))
-        csl = tmp / "acl.csl"
-        subprocess.run(["curl", "-sSLf", "-o", str(csl), CSL_URL], check=True)
+        numbered = "\\numberedcitationstrue" in (tmp / "main.tex").read_text()
+        csl = tmp / "style.csl"
+        subprocess.run(["curl", "-sSLf", "-o", str(csl),
+                        CSL_NUMBERED if numbered else CSL_AUTHOR_YEAR], check=True)
+        if numbered:
+            csl.write_text(numbered_by_author(csl.read_text()))
         subprocess.run(["pandoc", "pandoc.tex", "-o", "raw.docx", "--citeproc",
                         "--bibliography", "refs.bib", "--csl", str(csl),
                         "-M", "reference-section-title=References", "--number-sections",
