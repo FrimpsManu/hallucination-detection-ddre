@@ -12,14 +12,16 @@ with its study (for example, "ablation cell D" or "multivariate G2").
 | Name | Meaning |
 |---|---|
 | **BSE-official** | Wang's BSE exactly as in the released code: histogram ratio, uniform-average look-ahead (`docs/wang_deviations.md` row 16) |
-| **BSE** | Wang's histogram ratio with the paper's Eq. 8 look-ahead |
-| **DDRE-1D** | uLSIF ratio on entailment, fitted on Wang's NBC pairs, Eq. 8 look-ahead (plan v2, Tier 1) |
+| **BSE** | Wang's histogram ratio stopped by backward induction (plan v2 amendment 1) |
+| **BSE-eq8** | Wang's histogram ratio stopped by the paper's one-step Eq. 8 |
+| **DDRE-1D** | uLSIF ratio on entailment, fitted on Wang's NBC pairs (plan v2, Tier 1) |
 | **Hist-1D**, **DDRE-1D′** | histogram vs uLSIF on entailment, fitted on the FActScore training split (Tier 2) |
 | **NB-M**, **DDRE-M**, **Logit-M** | Naive-Bayes histograms, uLSIF and logistic ratio on (entailment, contradiction, log rank), FActScore training split (Tier 2) |
 | **Fixed-k (Max / Avg / NBC)** | the first k documents, aggregated as in Wang's Figure 2 |
 
 "DDRE" alone means the method family: BSE with the likelihood ratio estimated
-directly.
+directly. Unless a name says otherwise (for example "DDRE-M-eq8"), every
+method is stopped by backward induction (plan v2 amendment 1).
 
 ### Goals
 
