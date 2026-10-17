@@ -145,3 +145,17 @@ class Bootstrap(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FastAP(unittest.TestCase):
+    def test_equals_sklearn_with_and_without_ties(self):
+        rng = np.random.default_rng(11)
+        for trial in range(60):
+            n = int(rng.integers(5, 400))
+            y = rng.integers(0, 2, n)
+            y[0], y[1] = 0, 1
+            s = rng.uniform(0, 1, n)
+            if trial % 2:
+                s = np.round(s * 7) / 7       # heavy ties
+            yy, ss = V._arrays(y, s)
+            self.assertAlmostEqual(V.balanced_ap_fast(yy, ss), V.balanced_ap(y, s), places=12)
