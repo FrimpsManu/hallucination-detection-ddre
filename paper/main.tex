@@ -1,6 +1,5 @@
-% Draft. Confirmatory results are marked \pending{...} until the preregistered
-% replay has run; every other number is read from the frozen artifacts listed in
-% the repository's results summaries.
+% Draft. Every number is read from the frozen artifacts listed in the
+% repository's results summaries. \pending{...} marks items still to be supplied.
 \documentclass[11pt]{article}
 \usepackage[preprint]{acl}
 \usepackage{times}
@@ -17,8 +16,8 @@
 \newcommand{\pending}[1]{\textcolor{red}{[#1]}}
 \newcommand{\E}{\mathbb{E}}
 
-\title{Cheaper Sequential Hallucination Detection with Multivariate\\
-Density-Ratio Evidence: An Exploratory Study and a Preregistered Test}
+\title{Multivariate Density-Ratio Evidence for Sequential Hallucination\\
+Detection: An Exploratory Gain a Preregistered Test Did Not Confirm}
 
 \author{Augustine Manu-Frimpong \\
   Independent researcher \\
@@ -37,15 +36,19 @@ posterior band, so detectors can be compared on a common stopping rule and
 differ only in their evidence model. We then replace BSE's one-dimensional
 entailment histogram with a self-normalised uLSIF density ratio over three
 document features: entailment, contradiction and retrieval rank. In an
-exploratory comparison on three test sets, this multivariate evidence model
-matched BSE's balanced PR-AUC with 3.21 fewer documents per sentence
-(95\% CI [2.90, 3.55]) and improved balanced PR-AUC by 0.096 [0.037, 0.158] at
-matched cost on Factcheck-Bench. The gain was absent on SelfCheckGPT and
-reversed on FActScore. Along the way we found that a cost--quality sweep
-containing stopping bands that exclude the prior produces a zero-document
-detector whose PR-AUC beats every real detector, and we report the corrected
-analysis. We then ran a preregistered confirmatory test on ExpertQA and
-BingCheck: \pending{confirmatory outcome}.
+exploratory comparison on three test sets, on Factcheck-Bench this
+multivariate evidence model matched BSE's balanced PR-AUC with 3.21 fewer
+documents per sentence (95\% CI [2.90, 3.55]) and improved balanced PR-AUC by
+0.096 [0.037, 0.158] at matched cost. The gain was absent on SelfCheckGPT and
+reversed on FActScore. We then ran a preregistered confirmatory test on two
+untouched datasets. It confirmed neither lower cost nor better detection. On
+BingCheck the multivariate model was worse than BSE (matched-cost balanced
+PR-AUC $-0.063$ [$-0.080$, $-0.046$]); on ExpertQA no evidence model, BSE's
+included, was far from chance. Along the way we found that a cost--quality
+sweep containing stopping bands that exclude the prior produces a
+zero-document detector whose PR-AUC beats every real detector. We report the
+corrected analysis and argue that gains in evidence models for sequential
+detectors should be tested on held-out datasets before they are claimed.
 \end{abstract}
 
 \section{Introduction}
@@ -92,7 +95,9 @@ whose PR-AUC under a common implementation is $(1+\pi)/2$
 (\S\ref{sec:pitfall}).
 \item We preregistered \citep{nosek2018preregistration} and ran a confirmatory
 test on two untouched datasets, ExpertQA \citep{malaviya-etal-2024-expertqa}
-and BingCheck \citep{li-etal-2024-self} (\S\ref{sec:confirmatory}).
+and BingCheck \citep{li-etal-2024-self}. It did not confirm the exploratory
+gain: the multivariate model was worse than BSE on BingCheck and no different
+on ExpertQA (\S\ref{sec:confirmatory}).
 \end{enumerate}
 
 \section{Background: Bayesian sequential estimation}
@@ -321,22 +326,104 @@ crossing of BSE's quality with BSE's own first crossing, capped at BSE's cost.
 Holm's correction \citep{holm1979simple} runs over the four tests. A
 hypothesis counts as confirmed only if supported on both datasets.
 
-\pending{Table of E1/E2 per dataset; Holm decisions; curves; sensitivity
-analyses; per-system breakdown.}
+The estimators, the band and the curve were all frozen. Gates G1 and G2
+(the replay engine reproduces earlier predictions, and cell A under the band
+reads exactly BSE's documents) passed on both datasets.
+
+\begin{table}[t]
+\centering\small
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+ & BSE & E1: net saving & E2: gain \\
+\midrule
+ExpertQA & 11.20, 0.516 & $-10.22$ & $-0.002$ \\
+ & & {\scriptsize [n.r., 0.86]} & {\scriptsize [$-$0.007, 0.005]} \\
+BingCheck & 1.91, 0.668 & n.r. & $\mathbf{-0.063}$ \\
+ & & {\scriptsize [n.r., n.r.]} & {\scriptsize [$-$0.080, $-$0.046]} \\
+\bottomrule
+\end{tabular}
+\caption{Preregistered confirmatory test of M against BSE. BSE: documents per
+sentence and balanced PR-AUC of BSE's official run. n.r.: M's curve does not
+reach BSE's quality (ExpertQA: 2{,}872 of 10{,}000 replicates; BingCheck:
+9{,}952). No test supports its hypothesis after Holm's correction; both
+BingCheck tests show M worse than BSE.}
+\label{tab:confirm}
+\end{table}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.72\textwidth]{figures/confirmatory_cost_quality_curves.pdf}
+\caption{Confirmatory cost--quality curves (band scales 0.25 to 4). Both
+panels share one y-axis. The diamond is BSE's official run.}
+\label{fig:confirm}
+\end{figure*}
+
+Table~\ref{tab:confirm} gives the result. Under the preregistered rule,
+neither hypothesis is confirmed. Figure~\ref{fig:confirm} shows why.
+
+\paragraph{BingCheck.} The curves of A, A$'$, U and L lie between about 0.64
+and 0.68. M's curve lies below all of them at every cost and reaches only
+0.647 when every page is read, so it never attains BSE's 0.668. Every cell
+trained on our FActScore split has a lower matched-cost gain than Wang's
+histogram (A$'$: $-0.017$, U: $-0.020$, L: $-0.021$), but M's loss is three
+times theirs. The RQ3 chain locates it: adding $k$ and the rank (U$\to$M) goes
+with $-0.044$ [$-0.059$, $-0.028$], and uLSIF instead of a logistic ratio on
+the same features (L$\to$M) with $-0.042$ [$-0.056$, $-0.029$], the two steps
+that went with M's gain on Factcheck-Bench.
+
+\paragraph{ExpertQA.} Every curve is flat at a balanced PR-AUC of 0.51--0.53,
+against 0.50 for a constant score. No evidence model, BSE's included,
+separates factual from hallucinated sentences on this data at any cost. The
+large negative E1 reflects where noise on flat curves crosses BSE's level,
+not a real cost difference, and the null result says little about M in
+particular.
+
+\paragraph{Sensitivity and subgroups.} Counting ``not supported'' BingCheck
+claims as hallucinated gives the same picture (E2 $-0.067$ [$-0.083$,
+$-0.049$]); so does counting ExpertQA's Unsure sentences as hallucinated
+($-0.005$ [$-0.011$, 0.000]). Counting only BingCheck's 42 refuted claims is
+the one analysis with a positive point estimate (+0.034 [$-0.014$, 0.095]),
+which with 42 positives is uninformative. Across ExpertQA's six answering
+systems, M's E2 ranges from $-0.019$ to +0.010 with no consistent sign. Under
+BSE's own band, every new cell again reads more documents than BSE on both
+datasets.
 
 \section{Discussion}
 
-\pending{To be written after the confirmatory result. Points to cover:}
-\begin{itemize}
-\item The band equivalence makes the evidence model the only lever on BSE's
-cost, and the curve, not the fixed band, is where the savings appear.
-\item Contradiction and rank carry information that the entailment histogram
-discards, at no extra NLI cost.
-\item Dataset dependence: Factcheck-Bench vs SelfCheckGPT and FActScore;
-\pending{confirmatory pattern}.
-\item A practical rule for evaluating sequential detectors: every band in a
-sweep must contain the prior.
-\end{itemize}
+\paragraph{The evidence model is the lever, but not a portable one.} Because
+BSE's look-ahead is a fixed posterior band, a detector's cost is decided by
+how fast its evidence model moves the posterior out of that band. This made
+the comparison clean: every difference we report comes from the evidence
+model. It also showed that a better evidence model does not shorten the walk
+to a fixed band. Under BSE's own band every new cell read more documents than
+BSE on all five test sets, and any savings came from moving along the
+cost--quality curve to a tighter band.
+
+\paragraph{Gains did not transfer.} Across five test sets, M was better than
+BSE on one (Factcheck-Bench, exploratory), no different on two (SelfCheckGPT,
+ExpertQA) and worse on two (FActScore test entities, BingCheck). The features
+that went with the gain on Factcheck-Bench, contradiction and rank under
+uLSIF, went with the loss on BingCheck. A plausible reading is that a
+three-dimensional ratio fit on one retrieval setting, FActScore biographies
+with BM25 Wikipedia passages, encodes that setting: rank means BM25 order in
+training, embedding order in ExpertQA and Bing's order in BingCheck, and
+contradiction scores on long web pages differ from those on short passages.
+The one-dimensional histogram has less to mis-specify. We did not test this
+reading, and our design associates the loss with the added features without
+isolating a cause.
+
+\paragraph{The confirmatory test changed the conclusion.} Had we stopped after
+the exploratory study, Factcheck-Bench alone would have suggested a 54\%
+document saving and a large quality gain. The preregistered test, with its
+endpoints and decision rule fixed in advance and a net saving that removes
+the first-crossing optimism of \S\ref{sec:pitfall}, shows that result to be
+specific to that dataset. We think the same discipline is worth applying to
+other proposals for cheaper retrieval-based detection.
+
+\paragraph{A rule for evaluating sequential detectors.} Every band in a
+cost--quality sweep must contain the prior; otherwise the sweep contains a
+zero-cost constant detector, and PR-AUC as commonly implemented rewards it.
 
 \section{Limitations}
 
@@ -346,8 +433,13 @@ and Factcheck-Bench is small: 271 sentences, at most 5 documents per claim.
 \item \textbf{Grid edge.} Cross-validation chose the smallest kernel width on
 the fixed grid for U and M.
 \item \textbf{Label semantics.} ExpertQA has one annotator per sentence and few
-hallucinations. BingCheck labels measure support by the saved pages, not
-world-level truth.
+hallucinations (5.2\%), and every detector is near chance on it, so it has
+little power to tell evidence models apart. BingCheck labels measure support
+by the saved pages, not world-level truth, and come from one crowd worker per
+claim.
+\item \textbf{One training set.} All estimators were trained on one FActScore
+split. We did not test whether training on in-domain data would recover the
+exploratory gain; that would be a new, separately confirmed study.
 \item \textbf{Reproduction gap.} Our BSE reproduction fails Wang's
 $C_M{=}14$, $C_{FA}{=}24$ row, so we use only the 28/96 operating point.
 \item \textbf{Cost measure.} Cost is counted in documents and NLI calls.
