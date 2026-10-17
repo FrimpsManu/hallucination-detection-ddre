@@ -1,6 +1,6 @@
 # Research plan v2 — DDRE as a drop-in likelihood ratio for BSE
 
-**Status: draft for approval. Nothing in it has been run.** It follows the
+**Status: decisions recorded in §9; awaiting merge. Nothing in it has been run.** It follows the
 repository audit of 2026-10-17, which found that no experiment so far compares
 DDRE with BSE with step 5 as the only difference. This plan defines that
 experiment and everything the paper needs around it. Each phase below is its
@@ -36,7 +36,7 @@ Large Language Models via Direct Density Ratio Estimation.*
 |---|---|---|
 | **G1, cost** | At equal detection quality, does DDRE need fewer NLI calls and documents than BSE? | settled |
 | **G2, detection** | At equal cost, does DDRE separate factual from hallucinated claims better than BSE? | settled |
-| **G3, calibration** | Are DDRE's posteriors better calibrated than BSE's? This tests the premise directly: a better ratio should give truer probabilities. | proposed |
+| **G3, calibration** | Are DDRE's posteriors better calibrated than BSE's? This tests the premise directly: a better ratio should give truer probabilities. | approved 2026-10-17 |
 
 **Language:**
 - Say "hallucination-detection performance".
@@ -366,13 +366,11 @@ Each phase is one PR. Code PRs carry tests. Runs happen once, after merge.
 - The deadline sets the pace, not the standard. Anything not done properly is
   left out and stated as future work.
 
-## 9. Decisions needed before Phase 1
+## 9. Decisions (2026-10-17)
 
-- **Q1:** Is a CUDA machine (Colab, cloud or university) available for
-  running Wang's original code? Otherwise we try a CPU/MPS patch of their code
-  and disclose the patch.
-- **Q2:** Is live web retrieval (a paid search API) wanted for a small runtime
-  demonstration? Or do we stay with saved evidence plus our own BM25 retriever?
-- **Q3:** PR #50 (paper draft): close it and rebuild in Phase 9, or keep it open
-  as the base?
-- **Q4:** Approve G3 (calibration) as a third goal?
+- **Q1, Wang's original code:** no CUDA machine. Patch Wang's code to run on
+  CPU/MPS and disclose the patch.
+- **Q2, live retrieval:** none. Use saved evidence plus our own BM25 retriever,
+  which also allows K = 10–50.
+- **Q3, PR #50:** closed. The paper is rebuilt in Phase 9.
+- **Q4, G3 calibration:** approved as a third goal.
