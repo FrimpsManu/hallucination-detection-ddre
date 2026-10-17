@@ -1242,5 +1242,10 @@ committed.
   - At BSE's own band, every new model read more documents than BSE.
 
   Results are in [`docs/mddre_results_summary.md`](docs/mddre_results_summary.md).
-- **Next (not yet decided):** a further untouched dataset to confirm or refute the Factcheck-Bench result, a runtime measurement, and the paper.
+- **Done: preregistered confirmatory test on ExpertQA and BingCheck.** M against BSE, run once with the frozen estimators ([`docs/confirmatory_preregistration.md`](docs/confirmatory_preregistration.md)). **Neither hypothesis is confirmed.**
+  - On BingCheck, M is worse than BSE. Its matched-cost gain is −0.063 (95% CI [−0.080, −0.046]), and its curve never reaches BSE's balanced PR-AUC.
+  - On ExpertQA there is no difference (E2 −0.002, [−0.007, 0.005]). BSE itself is near chance there (balanced PR-AUC 0.516).
+
+  Results are in [`docs/confirmatory_results_summary.md`](docs/confirmatory_results_summary.md).
+- **Next:** a runtime measurement and the paper (draft in `paper/`).
 - Numerical claims are reported whether or not they support the hypotheses.
