@@ -107,12 +107,19 @@ def evidence_records(units, evidence_path):
         for r, u in zip(rows, units)]
 
 
-def enumerate_pairs(units):
-    from src.utils import SCORE_VERSION, split_text
+def enumerate_pairs(units, split_text=None, score_version=None):
+    """Every (span, sentence) pair, deduplicated in fixed order.
 
+    ``split_text`` and ``score_version`` default to the production ones in
+    ``src.utils`` (which needs torch); tests pass torch-free stand-ins.
+    """
+    if split_text is None or score_version is None:
+        from src.utils import SCORE_VERSION, split_text as production_split
+
+        split_text, score_version = production_split, SCORE_VERSION
     records = evidence_records(units, EVIDENCE[0])
     return AC.enumerate_coverage(records, split_text, model_name=frozen.OFFICIAL_MODEL,
-                                 score_version=SCORE_VERSION, max_docs=MAX_DOCS)
+                                 score_version=score_version, max_docs=MAX_DOCS)
 
 
 def main():

@@ -55,7 +55,8 @@ class Evidence(unittest.TestCase):
             p = Path(tmp) / "e.jsonl"
             write_evidence(p, self.rows())
             with mock.patch.object(SH, "EVIDENCE", (p, "x")):
-                cov = SH.enumerate_pairs(units())
+                cov = SH.enumerate_pairs(units(), split_text=lambda t, **_: [t],
+                                         score_version="test")
         self.assertEqual(cov["counts"]["document_occurrences"], 20)
         self.assertEqual(len(cov["pairs"]), 20)
 
