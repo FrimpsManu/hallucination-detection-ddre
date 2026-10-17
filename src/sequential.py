@@ -292,3 +292,44 @@ def fixed_k_subclaim(entailments, log_ratios, spans, k, how, p0=0.5):
     for lr in log_ratios[:used]:
         log_odds = min(max(log_odds + float(lr), -LOG_ODDS_CLIP), LOG_ODDS_CLIP)
     return _sigmoid(log_odds), used, nli
+
+
+# ---------------------------------------------------------------- building
+
+
+def reads_rank(estimator):
+    """Whether an estimator's ratio depends on the document's rank."""
+    names = getattr(estimator, "names", ())
+    return "rank" in names or "log_rank" in names
+
+
+def build_support(estimator, hallucinated_docs):
+    """An estimator's look-ahead support from its own p_h training documents.
+
+    Rank-conditional (one ``Support`` per rank) iff the estimator reads rank.
+    Histogram estimators on e alone should use ``Support.from_histogram``.
+    """
+    if not hallucinated_docs:
+        raise SequentialError("no hallucinated training documents")
+    if not reads_rank(estimator):
+        return Support.from_sample([estimator.log_ratio(d) for d in hallucinated_docs])
+    by_rank = {}
+    for d in hallucinated_docs:
+        by_rank.setdefault(int(d["rank"]), []).append(estimator.log_ratio(d))
+    return RankedSupport({r: Support.from_sample(v) for r, v in sorted(by_rank.items())})
+
+
+def support_to_json(support):
+    if isinstance(support, RankedSupport):
+        return {"kind": "ranked", "by_rank": {str(r): support_to_json(s)
+                                              for r, s in support.by_rank.items()}}
+    return {"kind": "atoms", "log_ratios": support.log_ratios.tolist(),
+            "weights": support.weights.tolist()}
+
+
+def support_from_json(d):
+    if d["kind"] == "ranked":
+        return RankedSupport({int(r): support_from_json(s) for r, s in d["by_rank"].items()})
+    if d["kind"] == "atoms":
+        return Support(d["log_ratios"], d["weights"])
+    raise SequentialError(f"unknown support kind {d['kind']!r}")
