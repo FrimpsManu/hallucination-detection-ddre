@@ -268,3 +268,31 @@ def format_p(p, replicates):
         return "n/a"
     floor = 1.0 / replicates
     return f"< {floor:.0e}" if p < floor else f"{p:.4f}"
+
+
+def _ap_sorted(y_sorted, distinct_end):
+    """Average precision for labels already sorted by descending score."""
+    tps = np.cumsum(y_sorted)[distinct_end]
+    total = tps[-1]
+    if total == 0:
+        raise MetricsError("both classes are needed")
+    fps = (np.flatnonzero(distinct_end) + 1) - tps
+    precision = tps / (tps + fps)
+    recall = tps / total
+    return float(np.sum(np.diff(np.r_[0.0, recall]) * precision))
+
+
+def balanced_ap_fast(y, s):
+    """``balanced_ap`` for the bootstrap: same value, no sklearn overhead.
+
+    ``s`` must already be rounded to ``RANK_DECIMALS`` (``_arrays`` does it).
+    Thresholds sit at distinct scores, as in sklearn.
+    """
+    order = np.argsort(-s, kind="mergesort")
+    ys, ss = y[order], s[order]
+    distinct_end = np.r_[ss[1:] != ss[:-1], True]
+    factual = _ap_sorted(ys, distinct_end)
+    # hallucinated class, score 1 - s: the reversed order, ties grouped alike
+    yr, sr = 1 - ys[::-1], ss[::-1]
+    distinct_end_r = np.r_[sr[1:] != sr[:-1], True]
+    return 0.5 * (factual + _ap_sorted(yr, distinct_end_r))
