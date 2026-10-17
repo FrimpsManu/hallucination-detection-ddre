@@ -379,3 +379,7 @@ Running the diagnostic produces a measurement and, at most, a pre-registered
 statement that a further sensitivity study is warranted. It does not resolve
 D-03, does not authorise a cap, and does not permit threshold tuning to begin
 before the result has been reviewed.
+
+---
+
+**Status note (2026-10-17).** The D-03 empirical run took place on 2026-09-30. Its outcome, the sensitivity study and the selection decision that followed are recorded in [`docs/d03_decision_record.md`](d03_decision_record.md). Statements above that the run is "still required" describe the state before that date.
