@@ -1,0 +1,15 @@
+% Written by make_tables.py from the frozen artifacts; do not edit.
+\begin{tabular}{@{}l lccc @{\hspace{14pt}} lccc@{}}
+\toprule
+ & \multicolumn{4}{c}{$(\CM, \CFA) = (28, 96)$} & \multicolumn{4}{c}{$(\CM, \CFA) = (14, 24)$} \\
+\cmidrule(lr){2-5}\cmidrule(l){6-9}
+Method & $\Delta_{\mathrm{AUC}}$ vs.\ fixed-$k$ & bAP & NLI calls & Brier & $\Delta_{\mathrm{AUC}}$ vs.\ fixed-$k$ & bAP & NLI calls & Brier \\
+\midrule
+BSE, released look-ahead & -- & 0.736 & 2.98 & 0.205 & -- & 0.734 & 1.62 & 0.192 \\
+BSE & $-$0.041 {\scriptsize [$-$.052, $-$.031]} & 0.762 & 5.46 & 0.233 & $-$0.028 {\scriptsize [$-$.038, $-$.018]} & 0.721 & 3.42 & 0.211 \\
+DDRE-1D & +0.008 {\scriptsize [+.001, +.016]} & 0.766 & 5.87 & 0.213 & +0.016 {\scriptsize [+.008, +.023]} & 0.757 & 3.91 & 0.198 \\
+\addlinespace[2pt]
+NB-M & \textbf{+0.035} {\scriptsize [+.024, +.047]} & \textbf{0.804} & 4.68 & \textbf{0.196} & \textbf{+0.033} {\scriptsize [+.021, +.044]} & \textbf{0.775} & 2.71 & \textbf{0.184} \\
+DDRE-M & +0.009 {\scriptsize [$-$.001, +.017]} & 0.782 & \textbf{2.44} & 0.217 & $-$0.005 {\scriptsize [$-$.013, +.005]} & 0.731 & \textbf{1.30} & 0.219 \\
+\bottomrule
+\end{tabular}
