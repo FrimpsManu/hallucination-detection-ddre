@@ -49,6 +49,7 @@ def numbered_by_author(csl_text):
 CM = 567  # twips per cm
 PAGE_W, PAGE_H, MARGIN, GAP = 11906, 16838, round(2.5 * CM), round(0.6 * CM)
 COLUMN_EMU = int(7.7 * 360000)
+TEXT_EMU = int(15.0 * 360000)
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 
@@ -77,7 +78,18 @@ def simplify(tex, numbers):
         return f"$$ {body}{tag} $$"
 
     tex = re.sub(r"\\begin\{equation\}(.*?)\\end\{equation\}", equation, tex, flags=re.S)
+    def caption(m):
+        env, body = m.group(1), m.group(2)
+        lab = re.search(r"\\label\{([^}]*)\}", body)
+        if not lab or "\\caption{" not in body:
+            return m.group(0)
+        name = "Table" if env == "table" else "Figure"
+        body = body.replace("\\caption{", f"\\caption{{{name} {numbers[lab.group(1)]}: ", 1)
+        return f"\\begin{{{env}}}{body}\\end{{{env}}}"
+
+    tex = re.sub(r"\\begin\{(figure\*?|table)\}(.*?)\\end\{\1\}", caption, tex, flags=re.S)
     tex = re.sub(r"\\paragraph\{([^}]*)\}", r"\\textbf{\1} ", tex)
+    tex = re.sub(r"\\cmidrule(\([a-z]*\))?\{[^}]*\}", "", tex)   # pandoc misreads trim options
     tex = re.sub(r"\\begin\{algorithm\}.*?\\end\{algorithm\}",
                  lambda m: algorithm(m.group(0), numbers), tex, flags=re.S)
     tex = re.sub(r"(figures/[A-Za-z0-9_]+)\.pdf", r"\1.png", tex)
@@ -97,51 +109,57 @@ def group(text, start):
 
 
 def algorithm(block, numbers):
-    """An algorithmic environment as a caption plus a numbered list (pandoc
-    cannot read algpseudocode). Control lines become keywords; comments
-    become a right-pointing triangle."""
+    """An algorithmic environment as a one-column ruled table (pandoc cannot
+    read algpseudocode): caption row, Input/Output, then numbered steps with
+    keyword-bold control lines, indented by depth; comments become a
+    right-pointing triangle. With the Table style this gives ACL's rules."""
     caption = re.search(r"\\caption\{(.*?)\}\s*\\label", block, re.S).group(1)
     label = re.search(r"\\label\{([^}]*)\}", block).group(1)
     body = block.split("\\begin{algorithmic}[1]", 1)[1].split("\\end{algorithmic}")[0]
-    out = [f"\\noindent\\textbf{{Algorithm {numbers[label]}:}} {' '.join(caption.split())}", ""]
-    items, depth, done = [], 0, [0]
+    rows, depth, step = [], 0, 0
 
-    def flush():
-        if items:
-            start = f"\\setcounter{{enumi}}{{{done[0]}}}" if done[0] else ""
-            out.extend(["\\begin{enumerate}", start, *items, "\\end{enumerate}", ""])
-            done[0] += len(items)
-            items.clear()
+    def add(text, numbered=True):
+        nonlocal step
+        if numbered:
+            step += 1
+            text = f"{step}:~~" + "~~~~" * depth + text
+        rows.append(text)
 
     for raw in body.strip().splitlines():
         line = raw.strip()
         if not line:
             continue
-        line = re.sub(r"\\Comment\{(.*?)\}\s*$", r" $\\triangleright$ \1", line)
+        line = re.sub(r"\\Comment\{(.*?)\}\s*$", r" \\hfill $\\triangleright$ \1", line)
         if line.startswith("\\Statex"):
-            flush()
-            out.extend([line[len("\\Statex"):].strip(), ""])
-            continue
-        indent = "\\quad " * depth
-        if line.startswith("\\EndFor") or line.startswith("\\EndIf"):
+            add(line[len("\\Statex"):].strip(), numbered=False)
+        elif line.startswith("\\Require"):
+            add("\\textbf{Input:} " + line[len("\\Require"):].strip(), numbered=False)
+        elif line.startswith("\\Ensure"):
+            add("\\textbf{Output:} " + line[len("\\Ensure"):].strip(), numbered=False)
+        elif line.startswith("\\EndFor") or line.startswith("\\EndIf"):
             depth -= 1
-            items.append("\\item " + "\\quad " * depth + "\\textbf{end}")
-            continue
-        if line.startswith("\\For{"):
+            add("\\textbf{end}")
+        elif line.startswith("\\For{"):
             cond, end = group(line, len("\\For"))
-            items.append(f"\\item {indent}\\textbf{{for}} {cond} \\textbf{{do}}{line[end:]}")
+            add(f"\\textbf{{for}} {cond} \\textbf{{do}}{line[end:]}")
             depth += 1
-            continue
-        if line.startswith("\\If{"):
+        elif line.startswith("\\If{"):
             cond, end = group(line, len("\\If"))
-            then = line[end:].replace("\\EndIf", "").strip()
-            items.append(f"\\item {indent}\\textbf{{if}} {cond} \\textbf{{then}} {then}")
-            continue
-        line = re.sub(r"^\\State\s*", "", line)
-        line = line.replace("\\Return", "\\textbf{return}")
-        items.append(f"\\item {indent}{line}")
-    flush()
-    return "\n".join(out)
+            rest = line[end:].strip()
+            if "\\EndIf" in rest:
+                then = rest.replace("\\EndIf", "").strip()
+                add(f"\\textbf{{if}} {cond} \\textbf{{then}} {then}")
+            else:
+                add(f"\\textbf{{if}} {cond} \\textbf{{then}}{rest}")
+                depth += 1
+        else:
+            line = re.sub(r"^\\State\s*", "", line).replace("\\Return", "\\textbf{return}")
+            add(line)
+    head = f"\\textbf{{Algorithm {numbers[label]}:}} {' '.join(caption.split())}"
+    lines = ["\\begin{tabular}{l}", "\\toprule", head + " \\\\", "\\midrule"]
+    lines += [r + " \\\\" for r in rows]
+    lines += ["\\bottomrule", "\\end{tabular}", ""]
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------- styles
@@ -198,7 +216,7 @@ STYLES = [
 
 TABLE_STYLE = (
     '<w:style w:type="table" w:styleId="Table"><w:name w:val="Table"/>'
-    '<w:pPr><w:spacing w:before="20" w:after="20"/><w:jc w:val="center"/></w:pPr>'
+    '<w:pPr><w:spacing w:before="20" w:after="20"/><w:jc w:val="left"/></w:pPr>'
     + rpr(9) +
     '<w:tblPr><w:jc w:val="center"/><w:tblBorders>'
     '<w:top w:val="single" w:sz="8" w:space="0" w:color="000000"/>'
@@ -245,9 +263,22 @@ def fit_table(m):
     n = len(re.findall(r"<w:gridCol\b", tbl))
     if n == 0:
         return tbl
-    first = round(COLUMN_TWIPS * (0.28 if n > 2 else 0.5))
-    rest = (COLUMN_TWIPS - first) // max(n - 1, 1)
-    widths = [first] + [rest] * (n - 1)
+    # Width of each column in proportion to its longest single-span cell text.
+    longest = [3] * n
+    for tr in re.findall(r"<w:tr\b.*?</w:tr>", tbl, re.S):
+        col = 0
+        for tc in re.findall(r"<w:tc>.*?</w:tc>", tr, re.S):
+            span = re.search(r'<w:gridSpan w:val="(\d+)"', tc)
+            k = int(span.group(1)) if span else 1
+            text = "".join(re.findall(r"<(?:w|m):t[^>]*>([^<]*)</(?:w|m):t>", tc))
+            if k == 1 and col < n:
+                longest[col] = max(longest[col], len(text.strip()))
+            col += k
+    weights = [min(x, 14) + 5 for x in longest]   # cap long labels, floor short numbers
+    if n == 1:
+        weights = [1]
+    widths = [round(COLUMN_TWIPS * w / sum(weights)) for w in weights]
+    rest = widths[-1]
     tbl = re.sub(r"<w:tblW [^/]*/>", f'<w:tblW w:w="{COLUMN_TWIPS}" w:type="dxa"/>'
                  '<w:tblLayout w:type="fixed"/>', tbl, count=1)
     grid = "".join(f'<w:gridCol w:w="{w}"/>' for w in widths)
@@ -269,7 +300,20 @@ def fit_table(m):
 
         return re.sub(r"<w:tc>.*?</w:tc>", cell, rm.group(0), flags=re.S)
 
-    return re.sub(r"<w:tr\b.*?</w:tr>", row, tbl, flags=re.S)
+    tbl = re.sub(r"<w:tr\b.*?</w:tr>", row, tbl, flags=re.S)
+    return small_runs(tbl)
+
+
+SMALL = '<w:sz w:val="18"/><w:szCs w:val="18"/>'
+
+
+def small_runs(xml):
+    """9 pt on every run, set directly (Pages ignores table-style run sizes)."""
+    xml = re.sub(r"<w:r>(?!<w:rPr>)", f"<w:r><w:rPr>{SMALL}</w:rPr>", xml)
+    xml = re.sub(r"<w:r><w:rPr>(?!<w:sz )", f"<w:r><w:rPr>{SMALL}", xml)
+    xml = re.sub(r"(<m:r>(?:<m:rPr>.*?</m:rPr>)?)(?!<w:rPr>)(?=<m:t)",
+                 lambda m: m.group(1) + f"<w:rPr>{SMALL}</w:rPr>", xml, flags=re.S)
+    return xml
 
 
 def relayout(doc, footer_rid):
@@ -281,9 +325,17 @@ def relayout(doc, footer_rid):
     if not authors:
         raise SystemExit("no Author paragraph found")
     last = authors[-1]
+    teaser = ""
+    fig = re.search(r'<w:p>(?:(?!</w:p>).)*?w:val="CaptionedFigure".*?</w:p>\s*'
+                    r'<w:p>(?:(?!</w:p>).)*?w:val="ImageCaption".*?</w:p>', doc, re.S)
+    if fig and fig.start() > last.end():
+        teaser = re.sub(r'cx="(\d+)" cy="(\d+)"',
+                        lambda m: f'cx="{TEXT_EMU}" cy="{int(int(m.group(2)) * TEXT_EMU / int(m.group(1)))}"',
+                        fig.group(0)).replace("<w:drawing>", '<w:drawing  data-teaser="1">', 1)
+        doc = doc[:fig.start()] + doc[fig.end():]
     brk = ('<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/>'
            + section(1, footer_rid, True) + '</w:pPr></w:p>')
-    doc = doc[:last.end()] + brk + doc[last.end():]
+    doc = doc[:last.end()] + teaser + brk + doc[last.end():]
     doc = re.sub(r"<w:sectPr\b(?:(?!<w:sectPr\b).)*?</w:sectPr>\s*</w:body>",
                  section(2, footer_rid, True) + "</w:body>", doc, flags=re.S)
     # Figures: scale to the column width, keeping the aspect ratio.
@@ -292,7 +344,9 @@ def relayout(doc, footer_rid):
         cx, cy = int(m.group(1)), int(m.group(2))
         return f'cx="{COLUMN_EMU}" cy="{int(cy * COLUMN_EMU / cx)}"'
 
-    doc = re.sub(r'cx="(\d+)" cy="(\d+)"', fit, doc)
+    head, sep, tail = doc.partition("</w:sectPr></w:pPr></w:p>")   # end of title section
+    doc = head + sep + re.sub(r'cx="(\d+)" cy="(\d+)"', fit, tail)
+    doc = doc.replace('<w:drawing  data-teaser="1">', "<w:drawing>")
     # Tables: explicit widths filling the column, first (label) column wider.
     doc = re.sub(r"<w:tbl>.*?</w:tbl>", fit_table, doc, flags=re.S)
     # Paragraphs with inline math: left-aligned, since some renderers stretch
@@ -300,8 +354,10 @@ def relayout(doc, footer_rid):
 
     def left(m):
         p = m.group(0)
-        if "<m:oMath>" not in p or "<m:oMathPara>" in p or "<w:jc " in p:
+        if "<m:oMath>" not in p:
             return p
+        if "<w:jc " in p:
+            return re.sub(r'<w:jc w:val="both"\s*/>', '<w:jc w:val="left"/>', p, count=1)
         if re.search(r"<w:pStyle [^>]*/>", p):
             return re.sub(r"(<w:pStyle [^>]*/>)", r'\1<w:jc w:val="left"/>', p, count=1)
         if "<w:pPr>" in p:
@@ -356,6 +412,10 @@ def main():
         for svg in (ROOT / "docs" / "figures").glob("*.svg"):
             subprocess.run(["rsvg-convert", "-f", "png", "-z", "2", "-o",
                             str(tmp / "figures" / f"{svg.stem}.png"), str(svg)], check=True)
+        for pdf in (tmp / "figures").glob("*.pdf"):
+            if not (tmp / "figures" / f"{pdf.stem}.png").exists():
+                subprocess.run(["pdftoppm", "-png", "-r", "250", "-singlefile", str(pdf),
+                                str(tmp / "figures" / pdf.stem)], check=True)
         (tmp / "pandoc.tex").write_text(simplify((tmp / "main.tex").read_text(), numbers))
         numbered = "\\numberedcitationstrue" in (tmp / "main.tex").read_text()
         csl = tmp / "style.csl"

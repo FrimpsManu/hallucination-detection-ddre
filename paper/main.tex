@@ -11,13 +11,13 @@
 \usepackage{inconsolata}
 \usepackage{graphicx}
 \usepackage{booktabs}
-\usepackage{amsmath,amssymb}
+\usepackage{amsmath,amssymb,amsthm}
 \usepackage{xcolor}
 \usepackage{algorithm}
 \usepackage{algpseudocode}
 
-% Numbered citations, [1], [2], ... (references sorted by author, as
-% acl_natbib.bst orders them). Set to \numberedcitationsfalse for the ACL
+% Numbered citations [1], [2], ... (references sorted by author, as
+% acl_natbib.bst orders them). \numberedcitationsfalse restores ACL's
 % author-year style.
 \newif\ifnumberedcitations
 \numberedcitationstrue
@@ -25,11 +25,16 @@
   \setcitestyle{numbers,square,comma}
 \fi
 
+\newtheorem{proposition}{Proposition}
 \newcommand{\pending}[1]{\textcolor{red}{[#1]}}
-\newcommand{\Rstop}{R_{\mathrm{stop}}}
-\newcommand{\CM}{C_{M}}
-\newcommand{\CFA}{C_{FA}}
-\newcommand{\Cr}{C_{r}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\CM}{C_{\mathrm{M}}}
+\newcommand{\CFA}{C_{\mathrm{FA}}}
+\newcommand{\Cr}{C_{\mathrm{r}}}
+\newcommand{\pf}{p_{\mathrm{f}}}
+\newcommand{\ph}{p_{\mathrm{h}}}
+\renewcommand{\algorithmicrequire}{\textbf{Input:}}
+\renewcommand{\algorithmicensure}{\textbf{Output:}}
 
 \title{Direct Density Ratio Estimation for Efficient Retriever-aware\\
 Hallucination Detection in Large Language Models}
@@ -42,341 +47,541 @@ Hallucination Detection in Large Language Models}
 \maketitle
 
 \begin{abstract}
-Retrieval-based hallucination detectors verify LLM claims against evidence
-documents, and every document read costs NLI calls. Bayesian sequential
-estimation (BSE) reads documents one at a time and stops when another is not
-worth its cost. It weighs each document by a likelihood ratio that it obtains
-by counting two histograms of entailment scores and dividing them. We keep
-BSE's pipeline fixed and change only this step: the ratio is estimated
-directly by density-ratio estimation (uLSIF). Along the way we find that
-BSE's published one-step look-ahead, implemented as written, never reads a
-document at the published costs. We therefore stop every method by backward
-induction, which we derive for any ratio estimator. In a preregistered test
-on HELM (3,736 sentences from seven LLMs), the direct ratio's cost--quality
-curve lies above BSE's at both published cost settings (area gap +0.043 and
-+0.037 balanced AP). At BSE's quality it needs 2.7 fewer NLI calls per
-sentence (70\% fewer). Its curve also lies above a simple fixed-$k$ maximum-entailment
-baseline, which BSE's does not. A retriever-aware multivariate variant is
-not supported. Effects are modest but consistent across five exploratory
-datasets and the confirmatory test.
+Retrieval-based hallucination detectors verify the claims of a large language
+model (LLM) against retrieved evidence, and every document they read adds the
+cost of natural-language-inference (NLI) scoring. Bayesian sequential
+estimation (BSE) reduces this cost by reading documents one at a time and
+stopping once further evidence is not worth its cost. Both its decisions and
+its stopping rest on a likelihood ratio that BSE obtains by dividing two
+histograms of entailment scores. We replace this ratio, and nothing else,
+with a directly estimated density ratio (uLSIF). We also show that BSE's
+published one-step look-ahead never reads a document at its own cost
+settings, and derive a backward-induction stopping rule that any ratio
+estimator can use. In a preregistered test on HELM (3,736 sentences from
+seven LLMs), the direct ratio's cost--quality curve lies above BSE's at both
+published cost settings (area gap $+0.043$ and $+0.037$ balanced average
+precision). At BSE's detection quality it needs 70\% fewer NLI calls, and it
+lies above a fixed-$k$ maximum-entailment baseline that BSE does not beat. A
+retriever-aware variant that adds contradiction and retrieval rank is not
+supported.
 \end{abstract}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.9\textwidth]{figures/overview.pdf}
+\caption{The sequential detector. For each claim, documents are read in
+retrieval order. The NLI features of each document update the probability
+that the claim is factual through a likelihood ratio, and a Bayes-risk rule
+decides whether to read the next document. BSE obtains the ratio from two
+histograms; we estimate it directly. Everything else is shared.}
+\label{fig:overview}
+\end{figure*}
 
 \section{Introduction}
 
-LLMs produce fluent text that is sometimes false. A common way to detect such
-hallucinations is to split a sentence into claims, retrieve evidence for each
-claim, and score claim--evidence pairs with a natural-language-inference (NLI)
-model \citep{min-etal-2023-factscore,wang-etal-2024-factcheck}. The cost of
-such detectors grows with every document they read. This matters most in
-deployed assistants that check responses before they reach users, for example
-customer-service systems in enterprises. There, every retrieved and scored
-document adds compute and latency to each response, so a detector that
-reaches the same reliability with fewer documents is directly cheaper to
-run.
+Large language models produce fluent text that is not always true
+\citep{ji2023survey}. A widely used way to detect such hallucinations is to
+decompose a response into claims, retrieve evidence for each claim, and score
+claim--evidence pairs with an NLI model
+\citep{min-etal-2023-factscore,wang-etal-2024-factcheck}. The cost of these
+detectors grows with every document they read. This matters most in deployed
+assistants that verify responses before they reach users, such as
+customer-service systems in enterprises, where each retrieved and scored
+document adds compute and latency to every response.
 
-\citet{wang-etal-2023-hallucination} cast this as Bayesian sequential
+\citet{wang-etal-2023-hallucination} cast detection as Bayesian sequential
 estimation (BSE). Documents are read in retrieval order. After each one, the
-posterior probability that the claim is factual is updated, and a Bayes-risk
-rule decides whether reading another document is worth its cost
-\citep{wald1945sequential}.
+probability that the claim is factual is updated with a likelihood ratio, and
+a Bayes-risk rule decides whether another document is worth reading
+\citep{wald1945sequential}. The quality of the final decision and the number
+of documents read therefore both depend on how well this ratio is estimated.
+BSE estimates it by counting two 10-bin histograms of entailment scores, one
+for factual and one for hallucinated claims, and dividing them. The
+density-ratio literature advises against exactly this route: estimating two
+densities is harder than estimating their ratio, and dividing them amplifies
+the errors of both \citep{sugiyama2012density}.
 
-The quality and the cost of this process both hinge on one quantity: the
-likelihood ratio that turns a document's entailment score into evidence.
-BSE estimates it by counting two 10-bin histograms, one for factual and one
-for hallucinated claims, and dividing them. The density-ratio literature
-warns against exactly this two-step route. Estimating each density separately
-is harder than estimating their ratio, and dividing amplifies both errors
-\citep{sugiyama2012density}.
+This paper asks whether estimating the ratio \emph{directly} makes sequential
+hallucination detection cheaper and better when everything else is held
+fixed. We study three goals: reaching BSE's detection quality with fewer NLI
+calls (\textbf{G1}), detecting hallucinations better at BSE's cost
+(\textbf{G2}), and producing better-calibrated probabilities (\textbf{G3}).
+Our contributions are:
 
-We ask whether estimating the ratio \emph{directly} makes sequential
-hallucination detection cheaper and better, with everything else held fixed.
-Our goals are:
-\begin{itemize}
-\item \textbf{G1 (cost):} reach BSE's detection quality with fewer NLI calls;
-\item \textbf{G2 (detection):} detect hallucinations better at BSE's cost;
-\item \textbf{G3 (calibration):} give better-calibrated probabilities.
-\end{itemize}
-
-\paragraph{Contributions.}
 \begin{enumerate}
 \item A drop-in replacement of BSE's likelihood ratio by direct density-ratio
-estimation, uLSIF \citep{kanamori2009ulsif}. The documents, prior,
-update, stopping rule and aggregation are all unchanged (\S\ref{sec:method}).
-\item A finding about BSE's stopping rule. The published one-step look-ahead,
-implemented as written, never reads a document at the published costs,
-because no single document can flip the decision from the prior.
-\begin{itemize}
-\item We show that the look-ahead's expectation can be computed for
-\emph{any} ratio estimator from its own training sample.
-\item We use this to stop every method by backward induction, the
-Bayes-optimal rule BSE's authors name but approximate
-(\S\ref{sec:stopping}).
-\end{itemize}
-\item A preregistered confirmatory test on a dataset no detector of ours had
-touched. The direct ratio's cost--quality curve lies above BSE's and above
-a simple fixed-$k$ baseline (\S\ref{sec:helm}).
-\item Negative results reported in full:
-\begin{itemize}
-\item a retriever-aware multivariate ratio does not beat its histogram
-control;
-\item BSE lies below the fixed-$k$ baseline;
-\item earlier configurations did not survive testing (\S\ref{sec:negative}).
-\end{itemize}
+estimation (uLSIF; \citealp{kanamori2009ulsif}), with the documents, prior,
+update, stopping rule and aggregation unchanged (\S\ref{sec:method}).
+\item An analysis of BSE's stopping rule. We prove that the published one-step
+look-ahead reads no document whenever no single document can change the
+decision, which is the case at BSE's own costs, and we give a
+backward-induction rule whose look-ahead any ratio estimator can evaluate
+from its training sample (\S\ref{sec:stopping}).
+\item A preregistered confirmatory test on a dataset that none of our
+detectors had touched. The direct ratio's cost--quality curve lies above
+BSE's and above a fixed-$k$ baseline (\S\ref{sec:helm}).
+\item A full account of what did not work, including a retriever-aware
+multivariate ratio that does not beat its own histogram control
+(\S\ref{sec:negative}).
 \end{enumerate}
 
-\section{Background: Bayesian sequential estimation}
+\section{Related Work}
+
+\paragraph{Hallucination detection.} Detectors differ in the evidence they
+use. SelfCheckGPT compares a response with stochastic samples from the same
+model \citep{manakul-etal-2023-selfcheckgpt}. FActScore and Factcheck-GPT
+decompose a response into atomic claims and verify each against retrieved
+documents \citep{min-etal-2023-factscore,wang-etal-2024-factcheck}, and
+long-form evaluators extend this idea \citep{wei2024longform}. MIND trains a
+detector on the model's internal states \citep{su-etal-2024-unsupervised}.
+Among retrieval-based detectors, BSE \citep{wang-etal-2023-hallucination} is,
+to our knowledge, the only one that decides adaptively how many documents to
+read. We change its evidence model and its stopping computation.
+
+\paragraph{Sequential decisions.} Sequential analysis
+\citep{wald1945sequential} trades the cost of further observations against
+the risk of a wrong decision. The Bayes-optimal stopping rule is obtained by
+backward induction, which BSE approximates by a one-step look-ahead
+\citep{cardillo1968suboptimal}. Because the state of our problem is a single
+posterior probability, we solve the backward induction exactly on a grid.
+
+\paragraph{Density-ratio estimation.} Estimating a ratio of densities
+directly, without estimating either density, underlies KLIEP
+\citep{sugiyama2007kliep}, uLSIF \citep{kanamori2009ulsif}, its relative
+variant RuLSIF \citep{yamada2011rulsif} and probabilistic-classification
+estimators \citep{bickel2009discriminative}. All are instances of
+density-ratio matching under a Bregman divergence
+\citep{sugiyama2012bregman,sugiyama2012density}, and they are used for
+covariate-shift adaptation, two-sample testing and outlier detection. We use
+them as the evidence model of a sequential hallucination detector.
+
+\section{Background: Bayesian Sequential Estimation}
 \label{sec:bse}
 
-\paragraph{Scoring and update.} For a claim $c$ and its ranked documents
-$d_1, d_2, \dots$, an NLI model gives each document an entailment score
-$e \in [0, 100]$: the maximum entailment probability over 400-word spans,
-with softmax temperature 5. Starting from prior $\pi_0 = 0.5$, BSE updates
-the probability that $c$ is factual after each document:
+\paragraph{Notation.} A response is split into claims. For a claim $c$, a
+retriever returns documents $d_1, \dots, d_K$ in rank order. An NLI model maps
+each claim--document pair to features $x_n = \phi(c, d_n)$. In BSE,
+$x_n = e_n \in [0, 100]$ is the largest entailment probability, in percent,
+over 400-word spans of $d_n$. Let $\theta = 1$ if $c$ is factual and
+$\theta = 0$ if it is hallucinated, let $\pf$ and $\ph$ be the densities of
+$x$ under the two classes, and let $r(x) = \pf(x)/\ph(x)$ be their likelihood
+ratio.
+
+\paragraph{Posterior update.} BSE starts from the prior $\pi_0 = 0.5$ and,
+treating documents as conditionally independent given $\theta$, updates the
+probability that $c$ is factual after each document:
 \begin{equation}
-\pi' = \frac{\pi\, r(e)}{\pi\, r(e) + 1 - \pi},
+\pi_n = \frac{\pi_{n-1}\, r(x_n)}{\pi_{n-1}\, r(x_n) + 1 - \pi_{n-1}}.
 \label{eq:update}
 \end{equation}
-where $r(e) = p(e \mid \text{factual}) / p(e \mid \text{hallucinated})$.
-BSE estimates $r$ as the ratio of two Laplace-smoothed 10-bin histograms of
-$e$, counted over 199 factual and 199 hallucinated claim--document pairs.
-
-\paragraph{Stopping.} With miss cost $\CM$, false-alarm cost $\CFA$ and
-retrieval cost $\Cr$, the risk of stopping is
-$\Rstop(\pi) = \min\{(1-\pi)\CM,\ \pi\CFA\}$. BSE's Eq.~8 continues iff
-$\Rstop(\pi) > \Cr + \mathbb{E}_{\text{next}}[\Rstop(\pi')]$, a one-step
-look-ahead \citep{cardillo1968suboptimal}.
-
-\paragraph{Decision.} A sentence's probability is the minimum over its
-claims. The sentence is labelled factual iff $(1-\pi)\CM < \pi\CFA$.
-
-\paragraph{Paper vs released code.} BSE's released code differs from the
-paper in 26 documented details. For example:
-\begin{itemize}
-\item spans are 400 \emph{words} with a stride of 300;
-\item the look-ahead averages the ten possible next posteriors with uniform
-weights, instead of weighting them by predictive probability.
-\end{itemize}
-Our reproduction follows the code, and matches the published Table~1 at
-$\CM{=}28$, $\CFA{=}96$. Our repository tabulates every difference.
-
-\section{Direct density-ratio evidence}
-\label{sec:method}
-
-Eq.~\ref{eq:update} needs only the ratio $r$, never the two densities.
-
-\paragraph{BSE's ratio, for contrast.} BSE discretises $e$ into ten bins
-$b(e)$, counts the $N_f$ factual and $N_h$ hallucinated training pairs per
-bin ($n_f(b)$, $n_h(b)$) and divides the two smoothed histograms:
+BSE estimates $r$ by discretising $e$ into ten bins $b(e)$ and dividing two
+Laplace-smoothed histograms, counted over $N_f$ factual and $N_h$
+hallucinated training pairs:
 \begin{equation}
 r_{\mathrm{BSE}}(e) = \frac{\bigl(n_f(b(e)) + 1\bigr) / (N_f + 10)}
-                           {\bigl(n_h(b(e)) + 1\bigr) / (N_h + 10)}.
+                           {\bigl(n_h(b(e)) + 1\bigr) / (N_h + 10)},
 \label{eq:bse-ratio}
 \end{equation}
+where $n_f(b)$ and $n_h(b)$ are the counts in bin $b$.
 
-\paragraph{Direct estimation (uLSIF).} Instead, we fit the ratio itself
-with unconstrained least-squares importance fitting
-\citep{kanamori2009ulsif}. Let $x^f_1, \dots, x^f_{n_f}$ be the features of
-documents of factual claims and $x^h_1, \dots, x^h_{n_h}$ those of
-hallucinated claims, standardised on the pooled sample. The model is a
-non-negative combination of Gaussian kernels on $L = 100$ centres $c_l$
-drawn from the factual sample:
+\paragraph{Decision and stopping.} Declaring a hallucinated claim factual
+costs $\CM$ (a miss), and declaring a factual claim hallucinated costs $\CFA$
+(a false alarm). The Bayes risk of stopping at posterior $\pi$ is
 \begin{equation}
-\hat r(x) = \sum_{l=1}^{L} \alpha_l \exp\!\Bigl(-\frac{\lVert x - c_l\rVert^2}{2\sigma^2}\Bigr).
-\label{eq:ulsif-model}
+R(\pi) = \min\bigl\{(1 - \pi)\,\CM,\ \pi\, \CFA\bigr\},
+\label{eq:risk}
 \end{equation}
-uLSIF minimises the squared error
-$\tfrac12 \mathbb{E}_h[(\hat r - r)^2]$, which up to a constant equals
-$\tfrac12 \mathbb{E}_h[\hat r^2] - \mathbb{E}_f[\hat r]$. With a ridge
-penalty, the empirical objective is
+attained by declaring the claim factual iff $\pi > \tau = \CM / (\CM + \CFA)$.
+Each document costs $\Cr$ to read. BSE reads document $d_{n+1}$ iff stopping
+is riskier than reading one more document and then stopping:
 \begin{equation}
-\min_{\alpha}\ \tfrac12\, \alpha^\top \hat H \alpha - \hat h^\top \alpha
-  + \tfrac{\lambda}{2}\, \alpha^\top \alpha,
-\label{eq:ulsif-objective}
+R(\pi_n) > \Cr + \E_{x \sim q_{\pi_n}}\bigl[R(\pi_{n+1}(x))\bigr],
+\label{eq:onestep}
 \end{equation}
-where $\hat H_{ll'} = \frac{1}{n_h}\sum_j k_l(x^h_j)\, k_{l'}(x^h_j)$,
-$\hat h_l = \frac{1}{n_f}\sum_i k_l(x^f_i)$ and $k_l$ is the $l$-th kernel.
-Its solution is in closed form, with negative weights set to zero:
+where $q_\pi = \pi \pf + (1 - \pi) \ph$ is the predictive density of the next
+document's features. A sentence's probability is the minimum over its claims,
+and the sentence is labelled factual iff this minimum exceeds $\tau$. BSE was
+evaluated at $(\CM, \CFA) = (14, 24)$ and $(28, 96)$, with $\Cr = 1$.
+
+\section{Direct Density-Ratio Evidence}
+\label{sec:method}
+
+Eq.~\ref{eq:update} uses the two class-conditional densities only through
+their ratio. We therefore estimate $r$ directly and leave every other part of
+BSE unchanged.
+
+\paragraph{Estimator.} We use unconstrained least-squares importance fitting
+(uLSIF; \citealp{kanamori2009ulsif}). Let $x^f_1, \dots, x^f_{n_f}$ be the
+features of documents retrieved for factual training claims and
+$x^h_1, \dots, x^h_{n_h}$ those of documents for hallucinated claims, all
+standardised on the pooled sample. The ratio is modelled as a non-negative
+combination of Gaussian kernels centred on $L$ points $c_1, \dots, c_L$ drawn
+from the factual sample:
 \begin{equation}
-\hat\alpha = \max\bigl\{0,\ (\hat H + \lambda I)^{-1} \hat h\bigr\}.
-\label{eq:ulsif-solution}
+\hat r(x) = \sum_{l=1}^{L} \alpha_l\, k_l(x),
+\label{eq:model}
+\end{equation}
+where $k_l(x) = \exp\bigl(-\lVert x - c_l\rVert^2 / 2\sigma^2\bigr)$.
+uLSIF minimises the squared error $\tfrac12 \E_{\ph}[(\hat r - r)^2]$, which
+equals $\tfrac12 \E_{\ph}[\hat r^2] - \E_{\pf}[\hat r]$ up to a constant.
+With a ridge penalty, the empirical objective is the quadratic program
+\begin{equation}
+\min_{\alpha \in \mathbb{R}^L}\ \tfrac12\, \alpha^\top \hat H \alpha
+  - \hat h^\top \alpha + \tfrac{\lambda}{2}\, \alpha^\top \alpha,
+\label{eq:objective}
+\end{equation}
+where $\hat H_{ll'} = \frac{1}{n_h}\sum_{j} k_l(x^h_j)\, k_{l'}(x^h_j)$ and
+$\hat h_l = \frac{1}{n_f}\sum_{i} k_l(x^f_i)$. Its minimiser has a closed
+form, and negative weights are set to zero:
+\begin{equation}
+\hat\alpha = \max\bigl\{0,\ (\hat H + \lambda I_L)^{-1} \hat h\bigr\}.
+\label{eq:solution}
 \end{equation}
 
-\paragraph{Model selection.} The kernel width $\sigma$
-($0.125$--$4\times$ the median pairwise distance) and $\lambda$
-($10^{-4}$--$10$) minimise the held-out criterion
+\paragraph{Model selection.} The kernel width $\sigma$ and the penalty
+$\lambda$ minimise the held-out uLSIF criterion
 \begin{equation}
-J(\sigma, \lambda) = \tfrac12\, \overline{\hat r(x^h)^2}
-  - \overline{\hat r(x^f)}
-\label{eq:ulsif-cv}
+J(\sigma, \lambda) = \frac{1}{2|\mathcal{H}|}\sum_{j \in \mathcal{H}} \hat r(x^h_j)^2
+  - \frac{1}{|\mathcal{F}|}\sum_{i \in \mathcal{F}} \hat r(x^f_i),
+\label{eq:cv}
 \end{equation}
-over five folds, where the bars average over held-out documents. Folds are
-grouped by claim, so that documents of one claim never straddle folds. No
-detection metric is used.
+averaged over five folds, where $\mathcal{F}$ and $\mathcal{H}$ index the
+held-out factual and hallucinated documents. Folds are grouped by claim, so
+that the documents of one claim never straddle folds, and no detection metric
+enters the selection.
 
-\paragraph{Self-normalisation.} A ratio should average 1 under the
-hallucinated distribution, $\mathbb{E}_h[r] = 1$. uLSIF's fit need not, which
-biases every update. We therefore use
+\paragraph{Normalisation.} A likelihood ratio averages one under its
+denominator distribution, $\E_{\ph}[r] = 1$. The fitted $\hat r$ need not, and
+any offset biases every update in Eq.~\ref{eq:update}. We therefore use
 \begin{equation}
 \tilde r(x) = \hat r(x) \Big/ \frac{1}{n_h}\sum_{j=1}^{n_h} \hat r(x^h_j),
 \label{eq:normalise}
 \end{equation}
-clipped to $[10^{-6}, 10^{6}]$. In the update, Eq.~\ref{eq:update}, the
-ratio $r(e)$ is replaced by $\tilde r(x)$.
+clipped to $[10^{-6}, 10^{6}]$, in place of $r$ in Eq.~\ref{eq:update}.
+Algorithm~\ref{alg:fit} summarises the fit.
 
-\paragraph{Estimators compared.} The pure test, \textbf{DDRE-1D}, fits
-$\hat r(e)$ on exactly BSE's 398 training pairs. Against BSE it changes only
-how the ratio is estimated.
-
-As a retriever-aware variant, \textbf{DDRE-M} uses three features per
-document: entailment, contradiction (from the same NLI pass) and log
-retrieval rank. Its control, \textbf{NB-M}, multiplies per-feature
-histograms (Naive Bayes) on the same features. Both are fitted on an
-entity-disjoint split of FActScore \citep{min-etal-2023-factscore}: 7,382
-facts, each with 10 BM25-retrieved Wikipedia passages.
-
-\section{Stopping by backward induction}
-\label{sec:stopping}
-
-\paragraph{The one-step rule never reads.} At $\CM{=}28$, $\CFA{=}96$, the
-prior $\pi_0 = 0.5$ already sits on the ``factual'' side of the decision
-threshold $28/124 = 0.226$. Flipping the decision requires a log ratio below
-$\operatorname{logit}(0.226) = -1.23$. The strongest negative bin of BSE's
-histogram has $\log r = -0.69$. So no single document can change the
-decision, and the one-step value of reading one is exactly zero.
-
-Eq.~8 therefore never reads, for any $\Cr > 0$; two independent
-implementations agree. BSE's released code instead takes the stop risk of the
-unweighted mean of the ten next posteriors. That gives a continue region of
-$(0.204, 0.769)$, which is why the published system reads documents at all.
-
-\paragraph{The look-ahead for any ratio estimator.} The expectation in Eq.~8
-is over the next document's features under the predictive mixture
-$\pi p_f + (1-\pi) p_h$. Since $p_f = r\, p_h$,
-\begin{equation}
-\mathbb{E}_{\text{next}}[g] = \mathbb{E}_{h}\!\left[(\pi r(x) + 1 - \pi)\, g(\pi')\right],
-\label{eq:identity}
-\end{equation}
-which needs only the estimator's ratio and its own hallucinated training
-sample. For $g = \Rstop$ the weight cancels the posterior's denominator:
-$(\pi r + 1 - \pi)\Rstop(\pi') = \min\{(1-\pi)\CM,\ \pi r \CFA\}$.
-\begin{itemize}
-\item For BSE's histogram, Eq.~\ref{eq:identity} reproduces Eq.~8 exactly.
-\item For DDRE it gives the same rule, with no borrowed thresholds.
-\end{itemize}
-
-\paragraph{Backward induction.} With $n$ documents read and at most $K$
-available, the optimal expected cost is
-\begin{equation}
-V_n(\pi) = \min\{\Rstop(\pi),\ \Cr + \mathbb{E}_{\text{next}}[V_{n+1}(\pi')]\},
-\end{equation}
-with $V_K = \Rstop$.
-\begin{itemize}
-\item BSE's authors describe this as the optimal solution, but approximate
-it, because induction over discrete features grows exponentially.
-\item Our state is the scalar posterior, so we solve it on a logit grid,
-using Eq.~\ref{eq:identity} for the expectation.
-\item With one document left, it equals Eq.~8.
-\end{itemize}
-Algorithm~\ref{alg:ddre} summarises the whole procedure.
+\paragraph{Variants.} \textbf{DDRE-1D} fits $\tilde r(e)$ on exactly BSE's
+training pairs, so that against BSE it changes only how the ratio is
+estimated. The retriever-aware variant \textbf{DDRE-M} uses
+$x = (e, k, \log \mathrm{rank})$, adding the largest contradiction probability
+$k$ (from the same NLI pass) and the document's retrieval rank. Its control,
+\textbf{NB-M}, multiplies per-feature 10-bin histograms on the same features
+(Naive Bayes).
 
 \begin{algorithm}[t]
-\caption{Sequential hallucination detection with a direct density-ratio
-evidence model (DDRE).}
-\label{alg:ddre}
+\caption{Fitting the direct ratio}
+\label{alg:fit}
 \small
 \begin{algorithmic}[1]
-\Statex \textbf{Offline} (once per estimator)
-\State Fit $\hat r$ by uLSIF (Eqs.~\ref{eq:ulsif-model}--\ref{eq:ulsif-solution}), choosing $(\sigma, \lambda)$ by Eq.~\ref{eq:ulsif-cv}
-\State Self-normalise: $\tilde r \gets \hat r / \overline{\hat r(x^h)}$ (Eq.~\ref{eq:normalise})
-\State Support $\mathcal{S} \gets \{\log \tilde r(x^h_j)\}_{j=1}^{n_h}$, the hallucinated training sample
-\For{$n = K-1, \dots, 0$} \Comment{backward induction}
-  \State $V_n(\pi) \gets \min\{\Rstop(\pi),\ \Cr + \mathbb{E}_{\text{next}}[V_{n+1}(\pi')]\}$, expectation by Eq.~\ref{eq:identity} over $\mathcal{S}$
+\Require features $\{x^f_i\}_{i=1}^{n_f}$, $\{x^h_j\}_{j=1}^{n_h}$ with the claim of each document; grids $\Sigma$, $\Lambda$
+\Ensure normalised ratio $\tilde r$; look-ahead support $\mathcal{S}$
+\State standardise the features on the pooled sample
+\State draw centres $c_1, \dots, c_L$ from the factual sample
+\For{$(\sigma, \lambda) \in \Sigma \times \Lambda$}
+  \For{each of five folds, grouped by claim}
+    \State fit $\hat\alpha$ on the training part (Eq.~\ref{eq:solution})
+    \State evaluate $J$ on the held-out part (Eq.~\ref{eq:cv})
+  \EndFor
 \EndFor
-\Statex \textbf{Online} (one claim $c$, ranked documents $d_1, \dots, d_K$)
-\State $\pi \gets \pi_0$
-\For{$n = 0, \dots, K-1$}
-  \If{$\Rstop(\pi) \le \Cr + \mathbb{E}_{\text{next}}[V_{n+1}(\pi')]$} \textbf{break} \EndIf
-  \State $x \gets$ NLI features of $(d_{n+1}, c)$ \Comment{one NLI pass per span}
-  \State $\pi \gets \pi\, \tilde r(x) / \bigl(\pi\, \tilde r(x) + 1 - \pi\bigr)$ \Comment{Eq.~\ref{eq:update}}
-\EndFor
-\State \Return $\pi$; a sentence takes the minimum over its claims and is factual iff $(1-P)\CM < P\,\CFA$
+\State $(\sigma^\star, \lambda^\star) \gets$ the pair with the smallest mean $J$
+\State refit $\hat\alpha$ on all data with $(\sigma^\star, \lambda^\star)$
+\State $\tilde r \gets$ normalise $\hat r$ (Eq.~\ref{eq:normalise})
+\State $\mathcal{S} \gets \{\tilde r(x^h_j)\}_{j=1}^{n_h}$
+\State \Return $\tilde r$, $\mathcal{S}$
 \end{algorithmic}
 \end{algorithm}
 
-For BSE at $\CM{=}28$, $\CFA{=}96$, $\Cr{=}1$ and $K{=}10$ it continues while
-$\pi \in (0.034, 0.813)$. Every method in our comparisons is stopped by this
-rule, so they differ only in $r$.
+\section{Stopping with an Arbitrary Ratio Estimator}
+\label{sec:stopping}
 
-\section{Evaluation protocol}
-\label{sec:protocol}
+Eq.~\ref{eq:onestep} requires an expectation under the predictive density
+$q_\pi$, which a histogram supplies through its bin frequencies. A direct
+ratio estimator supplies no densities. The following identity shows that it
+does not need them.
 
-\paragraph{Cost and quality.}
-\begin{itemize}
-\item \textbf{Cost:} NLI calls per sentence; documents per sentence is
-reported too.
-\item \textbf{Quality:} balanced average precision (AP), the mean of the AP
-for the factual class and the AP for the hallucinated class.
-\end{itemize}
-We use AP rather than the trapezoidal PR-AUC of BSE's code for one reason.
-On ties, the trapezoid rewards coarse scores. A constant score gets $0.75$
-balanced trapezoidal PR-AUC but $0.5$ balanced AP, and BSE's histogram
-posteriors are heavily tied.
+\begin{proposition}
+\label{prop:identity}
+For any integrable function $g$ and any $\pi \in [0, 1]$,
+\begin{equation}
+\E_{x \sim q_\pi}[g(x)] = \E_{x \sim \ph}\bigl[(\pi\, r(x) + 1 - \pi)\, g(x)\bigr].
+\label{eq:identity}
+\end{equation}
+In particular, writing $\pi'(x)$ for the posterior after observing $x$,
+\begin{equation}
+\begin{split}
+&(\pi\, r(x) + 1 - \pi)\, R(\pi'(x)) \\
+&\quad= \min\bigl\{(1 - \pi)\CM,\ \pi\, r(x)\, \CFA\bigr\}.
+\end{split}
+\label{eq:closed}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+Since $\pf = r\, \ph$, we have $q_\pi = (\pi r + 1 - \pi)\, \ph$, which gives
+Eq.~\ref{eq:identity}. By Eq.~\ref{eq:update},
+$1 - \pi'(x) = (1 - \pi)/(\pi r(x) + 1 - \pi)$ and
+$\pi'(x) = \pi r(x)/(\pi r(x) + 1 - \pi)$; substituting both into
+Eq.~\ref{eq:risk} gives Eq.~\ref{eq:closed}.
+\end{proof}
+
+Proposition~\ref{prop:identity} lets any ratio estimator evaluate the
+look-ahead by averaging over its own hallucinated training sample, the support
+$\mathcal{S}$ returned by Algorithm~\ref{alg:fit}. With BSE's histogram, the
+same computation reproduces Eq.~\ref{eq:onestep} exactly.
+
+\paragraph{The one-step rule can be inert.} The one-step rule values a document
+only through its chance of changing the decision.
+
+\begin{proposition}
+\label{prop:inert}
+Suppose the current decision is ``factual'' ($\pi > \tau$) and no single
+document can reverse it, that is, $\pi'(x) > \tau$ for every $x$. Then
+$\E_{q_\pi}[R(\pi'(x))] = R(\pi)$, so Eq.~\ref{eq:onestep} holds for no
+$\Cr > 0$, and the rule reads no document.
+\end{proposition}
+
+\begin{proof}
+On $\{\pi > \tau\}$ the risk is linear, $R(\pi) = (1 - \pi)\CM$. The
+posterior is a martingale under the predictive density: by
+Eq.~\ref{eq:identity}, $\E_{q_\pi}[\pi'(x)] = \E_{\ph}[\pi r(x)] = \pi$.
+Hence $\E_{q_\pi}[R(\pi'(x))] = (1 - \E_{q_\pi}[\pi'(x)])\,\CM = R(\pi)$.
+\end{proof}
+
+At BSE's main setting, $(\CM, \CFA) = (28, 96)$, the threshold is
+$\tau = 28/124 = 0.226$, and the prior $\pi_0 = 0.5$ already lies on the
+factual side. Reversing the decision in one step requires a log ratio below
+$\operatorname{logit}(\tau) = -1.23$, but the most negative bin of BSE's
+histogram has $\log r = -0.69$. By Proposition~\ref{prop:inert}, the published
+rule therefore reads no document at this setting, for any $\Cr > 0$; two
+independent implementations confirm this. BSE's released code instead
+evaluates $R$ at the \emph{unweighted mean} of the ten possible next
+posteriors. This heuristic continues while $\pi \in (0.204, 0.769)$, which is
+why the released system reads documents at all.
+
+\paragraph{Backward induction.} The optimal rule looks ahead over all remaining
+documents. With $n$ documents read and at most $K$ available, the minimal
+expected cost $V_n$ satisfies
+\begin{equation}
+V_n(\pi) = \min\bigl\{R(\pi),\ \Cr + \E_{q_{\pi}}[V_{n+1}(\pi'(x))]\bigr\},
+\label{eq:bellman}
+\end{equation}
+with $V_K = R$. \citet{wang-etal-2023-hallucination} describe this solution
+but approximate it, because induction over discrete features grows
+exponentially with $K$. Our state is the scalar posterior, so we solve
+Eq.~\ref{eq:bellman} on a fine logit grid and evaluate every expectation with
+Eq.~\ref{eq:identity}. For $K = 1$ the rule coincides with
+Eq.~\ref{eq:onestep}. For BSE at $(28, 96)$, $\Cr = 1$ and $K = 10$, it reads
+while $\pi \in (0.034, 0.813)$. Every method in our comparisons is stopped by
+this rule (Algorithm~\ref{alg:detect}), so the methods differ only in the
+ratio.
+
+\begin{algorithm}[t]
+\caption{Sequential detection of one claim}
+\label{alg:detect}
+\small
+\begin{algorithmic}[1]
+\Require claim $c$; documents $d_1, \dots, d_K$ in retrieval order; ratio $\tilde r$ and support $\mathcal{S}$ (Algorithm~\ref{alg:fit}); costs $\CM$, $\CFA$, $\Cr$
+\Ensure probability $\pi$ that $c$ is factual
+\State $V_K \gets R$ \Comment{offline}
+\For{$n = K-1, \dots, 0$}
+  \State $V_n \gets$ Eq.~\ref{eq:bellman}, averaging over $\mathcal{S}$ by Eq.~\ref{eq:identity}
+\EndFor
+\State $\pi \gets \pi_0$
+\For{$n = 0, \dots, K-1$}
+  \If{$V_n(\pi) = R(\pi)$} \Comment{stopping is optimal}
+    \State \textbf{break}
+  \EndIf
+  \State $x \gets \phi(c, d_{n+1})$ \Comment{NLI on each span}
+  \State $\pi \gets \pi\, \tilde r(x) / \bigl(\pi\, \tilde r(x) + 1 - \pi\bigr)$
+\EndFor
+\State \Return $\pi$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Experimental Setup}
+\label{sec:setup}
+
+\paragraph{Methods.} We compare BSE (Eq.~\ref{eq:bse-ratio}) with DDRE-1D.
+Both are fitted on BSE's released training pairs
+\citep{wang-etal-2023-hallucination}, 199 per class, and both are stopped by
+backward induction. As references we report \emph{BSE-official}, which uses
+the released code's look-ahead, and \emph{fixed-$k$}, BSE's own ``Maximum''
+baseline, which reads the first $k$ documents and scores a claim by their
+largest entailment. NB-M and DDRE-M are fitted on an entity-disjoint split of
+FActScore \citep{min-etal-2023-factscore}: 7,382 facts with ten
+BM25-retrieved Wikipedia passages each. NLI features come from BSE's
+DeBERTa-v3 checkpoint \citep{he2023debertav3,laurer2024less} in float16 with
+BSE's segmentation; before every scoring run, the training pairs must
+reproduce earlier scores bit for bit.
+
+\begin{table}[t]
+\centering\small
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}lrrrc@{}}
+\toprule
+Dataset & Units & Halluc. & Clusters & $K$ \\
+\midrule
+SelfCheckGPT & 1,525 & 1,108 & 190 & 10 \\
+FActScore (test) & 1,260 & 605 & 86 & 10 \\
+Factcheck-Bench & 271 & 98 & 92 & 5 \\
+ExpertQA & 11,389 & 596 & 483 & 5 \\
+BingCheck & 3,623 & 942 & 396 & 3 \\
+\midrule
+HELM (confirmatory) & 3,736 & 1,978 & 229 & 10 \\
+\bottomrule
+\end{tabular}
+\caption{Evaluation data. Units are sentences (claims for BingCheck); clusters
+are the bootstrap resampling units (passages, entities, responses, question
+authors or articles); $K$ is the maximum number of documents per claim.}
+\label{tab:data}
+\end{table}
+
+\paragraph{Data.} Table~\ref{tab:data} lists the evaluation sets. Five were
+used during development and are therefore \emph{exploratory}: the SelfCheckGPT
+held-out split with BSE's saved web pages
+\citep{manakul-etal-2023-selfcheckgpt}, the FActScore test entities with BM25
+Wikipedia evidence, Factcheck-Bench \citep{wang-etal-2024-factcheck}, ExpertQA
+\citep{malaviya-etal-2024-expertqa} and BingCheck \citep{li-etal-2024-self}.
+The confirmatory set is HELM \citep{su-etal-2024-unsupervised}: sentences
+written by seven LLMs to continue Wikipedia articles, each labelled by two
+annotators. Each HELM sentence is a single claim, and its evidence is the ten
+highest-ranked BM25 passages from a 2023 Wikipedia snapshot, retrieved with
+the article title and the sentence as the query.
+
+\paragraph{Quality and cost.} We measure detection by balanced average
+precision,
+\begin{equation}
+\mathrm{bAP} = \tfrac12\bigl(\mathrm{AP}_{\mathrm{fact}} + \mathrm{AP}_{\mathrm{hal}}\bigr),
+\label{eq:bap}
+\end{equation}
+where $\mathrm{AP}_{\mathrm{fact}}$ ranks sentences by $P$ and
+$\mathrm{AP}_{\mathrm{hal}}$ by $1 - P$. We prefer AP to the trapezoidal
+PR-AUC of BSE's code, which rewards tied scores: a constant score obtains
+$0.75$ balanced trapezoidal PR-AUC but $0.5$ bAP, and histogram posteriors are
+heavily tied. Cost is the number of NLI calls per sentence.
 
 \paragraph{Cost--quality curves.} Each method is run at every combination of
-$K \in \{1,\dots,10\}$ (maximum documents per claim) and
-$\Cr \in \{0.125, 0.25, 0.5, 1\}$, at both of BSE's cost settings, 28/96 and
-14/24. Its curve is the step envelope of these operating points: the best AP
-reachable within a given cost.
-\begin{itemize}
-\item \textbf{Primary endpoint:} the \emph{AUC-gap}, the mean AP difference
-between two envelopes over their shared cost range.
-\item \textbf{Cost saving (G1):} NLI calls saved at the reference method's AP.
-\item \textbf{Quality gain (G2):} AP gained at the reference method's cost.
-\end{itemize}
+$K' \in \{1, \dots, K\}$ documents and $\Cr \in \{0.125, 0.25, 0.5, 1\}$, at
+both of BSE's cost settings. Method $m$ thus yields operating points
+$(\kappa_s, q_s)$ of mean NLI calls and bAP, and its curve is the step
+envelope
+\begin{equation}
+Q_m(\kappa) = \max\{q_s : \kappa_s \le \kappa\},
+\label{eq:envelope}
+\end{equation}
+the best quality available within a cost $\kappa$. When method $m$ is
+compared with a baseline $b$, the primary endpoint is the area gap over their
+shared cost range $[\kappa_{\mathrm{lo}}, \kappa_{\mathrm{hi}}]$:
+\begin{equation}
+\Delta_{\mathrm{AUC}} = \frac{1}{\kappa_{\mathrm{hi}} - \kappa_{\mathrm{lo}}}
+  \int_{\kappa_{\mathrm{lo}}}^{\kappa_{\mathrm{hi}}} \bigl(Q_m(\kappa) - Q_b(\kappa)\bigr)\, d\kappa.
+\label{eq:auc}
+\end{equation}
+For G1 we report the NLI calls saved at the baseline's operating quality,
+and for G2 the bAP gained at its operating cost, both read off the envelopes.
+The operating point is $K' = K$ and $\Cr = 1$.
 
-\paragraph{Baseline and statistics.}
-\begin{itemize}
-\item \textbf{Fixed-$k$ baseline:} read the first $k$ documents and take the
-maximum entailment, BSE's own ``Maximum'' baseline.
-\item \textbf{Intervals:} a paired cluster bootstrap (10,000 replicates)
-resamples whole passages, entities, responses or articles. Every method is
-evaluated on the same draws.
-\end{itemize}
-
-\paragraph{Exploratory vs confirmatory.} Five datasets had been used during
-development, so results on them are \emph{exploratory}. These are the
-SelfCheckGPT held-out split \citep{manakul-etal-2023-selfcheckgpt}, the
-FActScore test entities, Factcheck-Bench \citep{wang-etal-2024-factcheck},
-ExpertQA \citep{malaviya-etal-2024-expertqa} and BingCheck
-\citep{li-etal-2024-self}.
-
-The confirmatory test uses HELM \citep{su-etal-2024-unsupervised}. Its
-hypotheses, endpoints and decision rule were merged as a preregistration
-\citep{nosek2018preregistration} before any retrieval, NLI scoring or
-detector touched it.
+\paragraph{Statistics and preregistration.} Intervals come from a paired
+cluster bootstrap with 10,000 replicates, in which every method is evaluated
+on the same resampled clusters. The HELM hypotheses, endpoints and decision
+rule were merged as a preregistration \citep{nosek2018preregistration} before
+any retrieval, NLI scoring or detector touched HELM. The two hypotheses, H1
+(DDRE-1D above BSE) and H2 (DDRE-1D above fixed-$k$), are each tested at both
+cost settings with one-sided bootstrap $p$-values and Holm's correction
+\citep{holm1979simple}. A test is supported if Holm rejects and the 5th
+percentile of $\Delta_{\mathrm{AUC}}$ is positive.
 
 \section{Results}
 \label{sec:results}
 
-\subsection{Exploratory results (five used datasets)}
+\subsection{Preregistered Test on HELM}
+\label{sec:helm}
 
-Table~\ref{tab:explore} gives the AUC-gaps.
-\begin{itemize}
-\item \textbf{DDRE-1D vs BSE:} the gap is positive on all five datasets at
-both cost settings, and every interval excludes zero.
-\item \textbf{Fixed-$k$:} BSE's envelope lies below the fixed-$k$ baseline on
-four of five datasets at 28/96, while DDRE-1D's lies at or above it.
-\item \textbf{Effect sizes} are small (at most 0.041 AP). ExpertQA carries
-almost no signal for any method (AP $\approx 0.51$).
-\end{itemize}
+\begin{table}[t]
+\centering\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llccc@{}}
+\toprule
+Comparison & $(\CM, \CFA)$ & $\Delta_{\mathrm{AUC}}$ & 5th pct. & $p$ \\
+\midrule
+H1a: vs.\ BSE & (28, 96) & \textbf{+0.043} & +0.036 & $<10^{-4}$ \\
+H1b: vs.\ BSE & (14, 24) & \textbf{+0.037} & +0.030 & $<10^{-4}$ \\
+H2a: vs.\ fixed-$k$ & (28, 96) & \textbf{+0.008} & +0.002 & 0.012 \\
+H2b: vs.\ fixed-$k$ & (14, 24) & \textbf{+0.016} & +0.010 & $<10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\caption{Preregistered test on HELM: area gap in bAP between the
+cost--quality envelopes of DDRE-1D and each comparator. $p$ is one-sided
+(10,000 cluster-bootstrap replicates over 229 articles). All four tests are
+supported after Holm's correction.}
+\label{tab:helm}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/helm_envelopes.pdf}
+\caption{Cost--quality envelopes on HELM: bAP against NLI calls per sentence,
+over all operating points, at both cost settings.}
+\label{fig:helm}
+\end{figure}
+
+Both preregistered hypotheses are confirmed (Table~\ref{tab:helm}).
+Figure~\ref{fig:helm} shows why: over the whole range of NLI budgets, the
+envelope of DDRE-1D lies above that of BSE, and it also lies above the
+fixed-$k$ baseline, which in turn lies above BSE.
+
+The secondary endpoints translate the area gap into the three goals. At
+$(28, 96)$, the cheapest BSE operating point that reaches BSE's operating
+quality needs 3.85 NLI calls per sentence; DDRE-1D reaches the same quality
+with 1.16, a saving of 2.68 calls (95\% CI [1.86, 3.49]), or 70\%
+(\textbf{G1}). At $(14, 24)$ the saving is 1.43 calls [0.72, 1.48], or 59\%.
+At BSE's operating cost, DDRE-1D's bAP is higher by 0.024 [0.016, 0.036] at
+$(28, 96)$ and by 0.035 [0.025, 0.046] at $(14, 24)$ (\textbf{G2}).
 
 \begin{table}[t]
 \centering\small
 \setlength{\tabcolsep}{3pt}
 \begin{tabular}{@{}lcccc@{}}
 \toprule
- & \multicolumn{2}{c}{DDRE-1D $-$ BSE} & \multicolumn{2}{c}{DDRE-1D $-$ fixed-$k$} \\
-Dataset & 28/96 & 14/24 & 28/96 & 14/24 \\
+Method & bAP & Acc. & NLI calls & Brier \\
+\midrule
+BSE-official & 0.736 & 0.736 & 2.98 & 0.205 \\
+BSE & 0.762 & 0.744 & 5.46 & 0.233 \\
+DDRE-1D & 0.766 & 0.752 & 5.87 & 0.213 \\
+NB-M & \textbf{0.804} & \textbf{0.770} & 4.68 & \textbf{0.196} \\
+DDRE-M & 0.782 & 0.755 & \textbf{2.44} & 0.217 \\
+\bottomrule
+\end{tabular}
+\caption{HELM at the operating point ($K = 10$, $\Cr = 1$,
+$(\CM, \CFA) = (28, 96)$). Lower Brier score is better.}
+\label{tab:operating}
+\end{table}
+
+Table~\ref{tab:operating} reports the operating point itself. There, DDRE-1D
+reads slightly more than BSE (5.87 vs.\ 5.46 NLI calls) for a slightly higher
+bAP. Its advantage lies in reaching any given quality more cheaply along the
+curve, not in reading fewer documents at one fixed setting. Its Brier score is
+lower than BSE's (\textbf{G3}), although not lower than BSE-official's, which
+reads fewer documents and stays closer to the prior.
+
+\paragraph{Robustness.} H1 holds in every preregistered sensitivity analysis:
+when the 22\% of passages that come from the source article are removed
+($\Delta_{\mathrm{AUC}} = +0.038$ and $+0.032$), on the six generators
+described by HELM's authors ($+0.043$ and $+0.037$), and for each of the seven
+generators separately ($+0.026$ to $+0.051$). H2 is narrower: at $(28, 96)$
+it is not supported on the six-generator subset ($+0.005$), and two of the
+seven generators are slightly negative there (Appendix~\ref{app:helm}).
+
+\subsection{Consistency on Exploratory Datasets}
+
+\begin{table}[t]
+\centering\small
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+ & \multicolumn{2}{c}{vs.\ BSE} & \multicolumn{2}{c}{vs.\ fixed-$k$} \\
+\cmidrule(lr){2-3}\cmidrule(l){4-5}
+Dataset & (28, 96) & (14, 24) & (28, 96) & (14, 24) \\
 \midrule
 SelfCheckGPT & \textbf{+.023} & \textbf{+.020} & \textbf{+.013} & \textbf{+.019} \\
 FActScore & \textbf{+.031} & \textbf{+.026} & +.004 & \textbf{+.010} \\
@@ -385,217 +590,168 @@ ExpertQA & \textbf{+.003} & \textbf{+.004} & \textbf{+.003} & \textbf{+.002} \\
 BingCheck & \textbf{+.012} & \textbf{+.013} & \textbf{+.010} & \textbf{+.016} \\
 \bottomrule
 \end{tabular}
-\caption{Exploratory AUC-gaps in balanced AP. Bold: the 95\% cluster-bootstrap
-interval excludes 0.}
+\caption{Area gap $\Delta_{\mathrm{AUC}}$ of DDRE-1D on the exploratory
+datasets. Bold: the 95\% cluster-bootstrap interval excludes zero.}
 \label{tab:explore}
 \end{table}
 
-\subsection{Preregistered confirmatory test on HELM}
-\label{sec:helm}
+The exploratory datasets point the same way (Table~\ref{tab:explore}). The
+area gap over BSE is positive on all five datasets at both cost settings, with
+every interval excluding zero, and DDRE-1D lies at or above fixed-$k$ in nine
+of ten comparisons. The effects are smaller than on HELM. On ExpertQA no
+method separates the classes well (bAP $\approx 0.51$), so its gaps are small
+by construction.
 
-\paragraph{Data.} HELM has 3,736 sentences continuing Wikipedia articles,
-1,978 of them hallucinated, from seven LLMs. Two annotators labelled each
-sentence. The sentences come from 229 articles, which are the bootstrap
-clusters.
-
-\paragraph{Protocol.}
-\begin{itemize}
-\item \textbf{Units:} each sentence is a single claim; HELM releases no
-decompositions.
-\item \textbf{Evidence:} the top 10 BM25 passages from a 2023 Wikipedia
-snapshot, with the article title and the sentence as the query.
-\item \textbf{Hypotheses:} H1, DDRE-1D's curve lies above BSE's; H2, it lies
-above the fixed-$k$ baseline's.
-\item \textbf{Decision rule:} each is tested at both cost settings, with
-Holm's correction \citep{holm1979simple} over the four one-sided tests.
-\end{itemize}
-
-\begin{table}[t]
-\centering\small
-\setlength{\tabcolsep}{3pt}
-\begin{tabular}{@{}llccc@{}}
-\toprule
-Test & $\CM/\CFA$ & AUC-gap & 5th pct. & $p$ \\
-\midrule
-H1a: vs BSE & 28/96 & \textbf{+0.043} & +0.036 & $<10^{-4}$ \\
-H1b: vs BSE & 14/24 & \textbf{+0.037} & +0.030 & $<10^{-4}$ \\
-H2a: vs fixed-$k$ & 28/96 & \textbf{+0.008} & +0.002 & 0.012 \\
-H2b: vs fixed-$k$ & 14/24 & \textbf{+0.016} & +0.010 & $<10^{-4}$ \\
-\bottomrule
-\end{tabular}
-\caption{Preregistered test on HELM: DDRE-1D against BSE and against fixed-$k$
-maximum entailment. One-sided cluster-bootstrap $p$ (10,000 replicates over
-229 articles). All four are supported after Holm's correction.}
-\label{tab:helm}
-\end{table}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{figures/helm_envelopes.pdf}
-\caption{HELM cost--quality envelopes (balanced AP against NLI calls per
-sentence) over all $(K, \Cr)$ operating points.}
-\label{fig:helm}
-\end{figure}
-
-\paragraph{Decision.} Both hypotheses are confirmed (Table~\ref{tab:helm},
-Figure~\ref{fig:helm}).
-
-\paragraph{Secondary endpoints, at 28/96 unless stated.}
-\begin{itemize}
-\item \textbf{G1 (cost):} at BSE's AP, DDRE-1D needs 2.68 fewer NLI calls per
-sentence (95\% CI [1.86, 3.49]); 1.43 [0.72, 1.48] fewer at 14/24. BSE's
-cheapest operating point that reaches that AP needs 3.85 calls (2.43 at
-14/24), against DDRE-1D's 1.16 (1.00), i.e.\ 70\% (59\%) fewer.
-\item \textbf{G2 (detection):} at BSE's cost, its AP is higher by +0.024
-[0.016, 0.036]; by +0.035 [0.025, 0.046] at 14/24.
-\item \textbf{G3 (calibration):} its Brier score is lower at both operating
-points (0.213 vs.\ 0.233; 0.198 vs.\ 0.211).
-\end{itemize}
-
-\paragraph{Robustness.}
-\begin{itemize}
-\item \textbf{H1:} it holds when passages from the source article (22\% of
-the evidence) are removed, on the six generators described by HELM's
-authors, and for each of the seven generators separately (+0.026 to +0.051).
-\item \textbf{H2:} it is narrower. At 28/96 it is not supported on the
-six-generator subset, and two of seven generators are slightly negative
-there.
-\end{itemize}
-
-\paragraph{Where the advantage lies.} At BSE's operating point itself
-($K{=}10$, $\Cr{=}1$), DDRE-1D reads slightly more (5.87 vs.\ 5.46 NLI calls)
-for slightly higher AP (0.766 vs.\ 0.762). Its advantage is in reaching a
-given quality more cheaply along the curve.
-
-\subsection{What did not work}
+\subsection{What Did Not Work}
 \label{sec:negative}
 
-\paragraph{Retriever-aware DDRE.} DDRE-M lies below its histogram control
-NB-M on HELM (AUC-gap $-0.024$ and $-0.033$) and on most exploratory
-datasets. Adding contradiction and rank helps the histogram estimator: NB-M
-has the highest AP on HELM. It does not help uLSIF. So we do not support the
-retriever-aware variant.
+\paragraph{Retriever-aware features.} Adding contradiction and retrieval rank
+helps the histogram estimator: NB-M has the highest bAP on HELM
+(Table~\ref{tab:operating}). It does not help uLSIF. DDRE-M lies below its
+histogram control NB-M on HELM ($\Delta_{\mathrm{AUC}} = -0.024$ and $-0.033$)
+and on most exploratory datasets, so we do not support the retriever-aware
+variant.
 
-\paragraph{BSE vs.\ the simple baseline.} BSE's envelope lies below fixed-$k$
-maximum entailment on HELM ($-0.041$ and $-0.028$) and on most exploratory
-datasets.
+\paragraph{BSE and the simple baseline.} BSE's envelope lies below fixed-$k$
+maximum entailment on HELM ($-0.041$ and $-0.028$) and on four of the five
+exploratory datasets. Claims about the efficiency of sequential detectors
+should be made against this baseline.
 
-\paragraph{Earlier configurations.} Before the single-factor design above,
-two configurations failed:
-\begin{itemize}
-\item a 1-D DDRE whose stopping band and kernel width were tuned over 640
-validation configurations;
-\item a multivariate DDRE run under BSE's stopping band.
-\end{itemize}
-They gave cost or quality gains on single datasets. Neither transferred, and
-the second was not confirmed by a preregistered test on ExpertQA and
-BingCheck. Both differed from BSE in more than the likelihood ratio. All
-are reported in the repository.
+\paragraph{Earlier configurations.} Before adopting the single-factor design
+above, we evaluated a one-dimensional ratio whose stopping band and kernel
+width were tuned over 640 validation configurations, and a multivariate ratio
+run under BSE's stopping band. Both differed from BSE in more than the ratio.
+Their gains did not transfer across datasets, and the second was not
+confirmed by an earlier preregistered test on ExpertQA and BingCheck
+(Appendix~\ref{app:history}).
 
-\section{Related work}
+\section{Conclusion}
 
-\paragraph{Hallucination detection.}
-\begin{itemize}
-\item \textbf{Sampling-based:} SelfCheckGPT
-\citep{manakul-etal-2023-selfcheckgpt} compares sampled generations.
-\item \textbf{Retrieval-based:} FActScore and Factcheck-GPT score atomic
-claims against retrieved evidence
-\citep{min-etal-2023-factscore,wang-etal-2024-factcheck,wei2024longform}.
-\item \textbf{Internal-state:} MIND and HELM use the model's own internal
-states \citep{su-etal-2024-unsupervised}.
-\end{itemize}
-BSE \citep{wang-etal-2023-hallucination} is, to our knowledge, the only one
-that decides adaptively how many documents to read. We change its evidence
-model and its stopping computation.
-See \citet{ji2023survey} for a survey.
+Estimating BSE's likelihood ratio directly, with everything else held fixed,
+moves its cost--quality curve upward. Under a preregistered test, the direct
+ratio reaches BSE's detection quality with 70\% fewer NLI calls and lies above
+a simple fixed-$k$ baseline that BSE does not beat. The quality gains are
+modest, about 0.04 bAP across the curve, and they appear along the curve
+rather than at a single operating point; evaluations of sequential detectors
+should therefore report curves and include the fixed-$k$ baseline. BSE's
+published one-step look-ahead is inert at its own costs, and the
+backward-induction rule we derive applies to any ratio estimator.
 
-\paragraph{Sequential decisions.} Sequential analysis
-\citep{wald1945sequential} and one-step approximations to Bayesian stopping
-\citep{cardillo1968suboptimal} underlie BSE. Our backward induction is the
-exact finite-horizon solution for a scalar posterior.
-
-\paragraph{Density-ratio estimation.}
-\begin{itemize}
-\item \textbf{Direct estimators:} KLIEP \citep{sugiyama2007kliep}, uLSIF
-\citep{kanamori2009ulsif}, RuLSIF \citep{yamada2011rulsif} and
-probabilistic classification \citep{bickel2009discriminative}.
-\item \textbf{Unified view:} these are instances of density-ratio matching
-under a Bregman divergence \citep{sugiyama2012bregman,sugiyama2012density}.
-\end{itemize}
-They are used for covariate shift, two-sample tests and outlier detection.
-Using them as the evidence model of a sequential detector is, to our
-knowledge, new.
-
-\section{Discussion}
-
-\paragraph{What the results support.} A directly estimated likelihood ratio
-improves BSE's cost--quality trade-off, and the effect replicated under a
-preregistered test. The gain in quality is modest, about 0.04 AP across the curve. The cost
-saving at equal quality is larger: 70\% fewer NLI calls than BSE on HELM at
-28/96, from 3.85 to 1.16 per sentence.
-
-\paragraph{Why curves, not one operating point.} A better-estimated ratio
-does not, by itself, shorten the walk to a fixed stopping region. Its benefit
-shows when cost is allowed to vary, so evaluations of sequential detectors
-should report curves, not a single operating point.
-
-\paragraph{Implications for deployment.} In retrieval-augmented
-assistants, such as enterprise customer-service systems, NLI scoring of
-retrieved evidence dominates a detector's per-response compute. The
-estimator itself costs little: a histogram lookup, or a kernel sum over 100
-centres. At equal detection quality, the direct ratio needed 70\% fewer NLI
-calls than BSE on HELM. That suggests a proportional saving in verification
-compute for such systems.
-
-We did not test this setting. Domain-specific knowledge bases, different
-retrievers and the cost of a wrong answer in customer service may change both
-the size of the saving and the best operating point. A measured evaluation on
-customer-service data, with wall-clock latency, is the natural next step.
-
-\paragraph{Lessons for evaluation.}
-\begin{itemize}
-\item A competitive simple baseline (fixed-$k$ maximum entailment) should
-always be included; BSE does not beat it.
-\item The stopping rule needs care. BSE's published Eq.~8 is degenerate at
-its own costs, while its code works by a heuristic.
-\end{itemize}
+For deployed assistants such as customer-service systems, where NLI scoring of
+retrieved evidence dominates the cost of verifying a response, these savings
+suggest a proportional reduction in verification compute. We did not test
+that setting; an evaluation on enterprise data with measured latency is the
+natural next step.
 
 \section*{Limitations}
 
-\begin{itemize}
-\item \textbf{Effect sizes} are small, and H2 at 28/96 is narrow.
-\item \textbf{Exploratory datasets:} five datasets were used during
-development. Only HELM is confirmatory.
-\item \textbf{Protocol differences:} on HELM, evidence comes from our own
-BM25 retrieval over a Wikipedia snapshot, not live web search. Sentences are
-not decomposed into claims.
-\item \textbf{HELM labels:}
-\begin{itemize}
-\item annotators also consulted Google;
-\item the handling of ``unverifiable'' sentences in the binary labels is
-undocumented;
-\item the released counts differ from the paper's;
-\item no licence is stated.
-\end{itemize}
-We contacted the authors on 17 October 2026.
-\item \textbf{Training mismatch:} BSE and DDRE-1D are fitted on BSE's 398
-training pairs. These pairs are scored on whole premises, while test
-documents are scored as the maximum over spans. Both methods inherit this
-mismatch.
-\item \textbf{Application domain:} we evaluated on general-domain and
-Wikipedia-grounded data only, not on enterprise or customer-service data.
-\item \textbf{Cost} is counted in NLI calls and documents. We did not
-measure wall-clock time; estimator overhead is small next to the NLI model
-but unmeasured.
-\end{itemize}
+The effects are modest, and H2 at $(28, 96)$ is narrow. Only HELM is
+confirmatory; the other five datasets were used during development. On HELM we
+retrieved evidence ourselves from a Wikipedia snapshot instead of by live web
+search, and sentences were not decomposed into claims. HELM's annotators also
+consulted Google, the treatment of ``unverifiable'' sentences in its binary
+labels is undocumented, its released counts differ from those in its paper,
+and it states no licence; we contacted its authors on 17 October 2026. BSE and
+DDRE-1D are fitted on BSE's 398 training pairs, which are scored on whole
+premises, whereas test documents are scored as the maximum over spans; both
+methods share this mismatch. We count cost in NLI calls and did not measure
+wall-clock time. The estimator's own cost, a histogram lookup or a kernel sum
+over 100 centres, is small next to NLI scoring, but we have not measured it.
+
+\section*{Ethics Statement}
+
+All datasets are public research releases, used under their terms and not
+redistributed; for releases without a stated licence we contacted the authors.
+The detectors flag possibly false claims and do not alter model outputs. A
+detector of modest accuracy can miss hallucinations or flag correct
+statements, so in deployment it should support, not replace, human review of
+consequential responses.
 
 \section*{Reproducibility}
 
-Code, preregistrations, amendments, decision records and results summaries are
-in the repository \pending{URL}. Every artifact is identified by its SHA-256
-digest, and every run was made once from a reviewed commit. No dataset is
-redistributed.
+Code, preregistrations, amendments, decision records and result summaries are
+available at \pending{URL}. Every artifact is identified by its SHA-256 digest,
+and every run was made once from a reviewed commit.
 
 \bibliography{refs}
+
+\appendix
+
+\section{BSE: Paper and Released Code}
+\label{app:deviations}
+
+BSE's released code differs from the paper in several details. We follow the
+code, which produced the published numbers; our reproduction matches the
+published results at $(\CM, \CFA) = (28, 96)$, for example a nonfactual PR-AUC
+of 0.860 against 0.865 and 6.47 against 6.22 documents per sentence. In the
+code, spans are 400 \emph{words} with a stride of 300, rather than tokens;
+logits are divided by a temperature of 5 before the softmax; the three-class
+NLI output is used through its entailment probability; training pairs and test
+documents are discretised by two different rules; the training pairs (199 per
+class, not 200) are scored on the whole premise, whereas test documents are
+scored as the maximum over spans; and the look-ahead averages the ten possible
+next posteriors with uniform weights instead of applying
+Eq.~\ref{eq:onestep}. At $(14, 24)$ our reproduction reads 16\% more documents
+than reported. We therefore stop every method by backward induction and report
+BSE-official only as a reference.
+
+\section{Fitted Estimators}
+\label{app:fit}
+
+All direct estimators use $L = 100$ centres,
+$\sigma \in \{0.125, 0.25, 0.5, 1, 2, 4\}$ times the median pairwise distance,
+and $\lambda \in \{10^{-4}, 10^{-3}, \dots, 10\}$. Cross-validation selected,
+in standardised units, $\sigma = 0.50$ and $\lambda = 0.1$ for DDRE-1D, and
+$\sigma = 0.55$ and $\lambda = 0.01$ for DDRE-M. No selected value lies on the
+edge of its grid. After normalisation, every direct ratio averages one over
+its hallucinated training documents.
+
+\section{Additional HELM Results}
+\label{app:helm}
+
+\begin{table}[h]
+\centering\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}lrrcccc@{}}
+\toprule
+ & & & \multicolumn{2}{c}{vs.\ BSE} & \multicolumn{2}{c}{vs.\ fixed-$k$} \\
+\cmidrule(lr){4-5}\cmidrule(l){6-7}
+Generator & $n$ & Hal. & (28,96) & (14,24) & (28,96) & (14,24) \\
+\midrule
+falcon40b & 521 & 261 & +.034 & +.031 & +.005 & +.014 \\
+gptj7b & 572 & 400 & +.049 & +.043 & +.009 & +.019 \\
+llamabase7b & 565 & 322 & +.036 & +.034 & $-$.001 & +.014 \\
+llamachat13b & 476 & 147 & +.032 & +.026 & +.011 & +.019 \\
+llamachat7b & 497 & 189 & +.045 & +.036 & +.021 & +.021 \\
+mpt7b & 539 & 274 & +.051 & +.042 & +.029 & +.033 \\
+opt7b & 566 & 385 & +.038 & +.031 & $-$.007 & +.008 \\
+\bottomrule
+\end{tabular}
+\caption{Observed area gaps of DDRE-1D on HELM, by generator.}
+\label{tab:generators}
+\end{table}
+
+Table~\ref{tab:generators} gives the area gaps by generator. Removing the 8,395
+source-article passages (22\% of the evidence) leaves both hypotheses
+confirmed ($\Delta_{\mathrm{AUC}}$ against BSE $+0.038$ and $+0.032$; against
+fixed-$k$ $+0.016$ and $+0.022$). Restricting the test to the six generators
+described in HELM's paper confirms H1 ($+0.043$ and $+0.037$) and supports H2
+only at $(14, 24)$ ($+0.012$); at $(28, 96)$ the gap is $+0.005$ with a 5th
+percentile of $-0.001$.
+
+\section{Development History}
+\label{app:history}
+
+Our first estimator was a one-dimensional uLSIF ratio fitted on BSE's training
+pairs. Its cross-validated configuration could not match BSE's quality on
+validation data at any stopping band, so a stopping band and kernel width were
+selected from 640 validation configurations. On the SelfCheckGPT held-out split
+it read 20.7\% fewer documents than BSE at similar quality, but its ratio was
+not normalised (mean 0.736 under the hallucinated class), and on FActScore it
+read 9.4\% more documents. A multivariate ratio run under BSE's stopping band
+then improved quality on Factcheck-Bench but not on two other datasets, and a
+preregistered test of it on ExpertQA and BingCheck did not confirm it. These
+results motivated the single-factor design of this paper. All of them, with
+their preregistrations and amendments, are in the repository.
 
 \end{document}
