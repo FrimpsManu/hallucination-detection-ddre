@@ -7,7 +7,8 @@
 1. Tectonic compiles ``main.tex`` (keeping ``main.aux``), so that equation,
    section, table and figure numbers come from LaTeX itself.
 2. A copy of the source is simplified for pandoc: resolved ``\\ref``,
-   numbered display equations, run-in paragraph heads and PNG figures.
+   inlined table fragments, numbered display equations, run-in paragraph
+   heads and PNG figures.
 3. pandoc converts it with the ACL citation style.
 4. The .docx is rewritten to ACL geometry and typography.
 
@@ -21,7 +22,7 @@
 - 10 pt captions and references; page numbers centred in the footer.
 
 The LaTeX PDF remains the authoritative version; this file is for reading and
-commenting. Requires tectonic, pandoc and rsvg-convert.
+commenting. Requires tectonic, pandoc and pdftoppm (poppler).
 """
 
 import re
@@ -33,7 +34,6 @@ import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
 CSL_BASE = "https://raw.githubusercontent.com/citation-style-language/styles/master/"
 CSL_AUTHOR_YEAR = CSL_BASE + "association-for-computational-linguistics.csl"
 # Numbered style; its bibliography is re-sorted by author, then year, so the
@@ -68,6 +68,8 @@ def simplify(tex, numbers):
             raise SystemExit(f"unresolved \\ref{{{key}}}")
         return numbers[key]
 
+    tex = re.sub(r"\\input\{([^}]*)\}",
+                 lambda m: (HERE / m.group(1)).read_text(), tex)
     tex = re.sub(r"\\ref\{([^}]*)\}", ref, tex)
 
     def equation(m):
@@ -83,11 +85,19 @@ def simplify(tex, numbers):
         lab = re.search(r"\\label\{([^}]*)\}", body)
         if not lab or "\\caption{" not in body:
             return m.group(0)
-        name = "Table" if env == "table" else "Figure"
+        name = "Table" if env.startswith("table") else "Figure"
         body = body.replace("\\caption{", f"\\caption{{{name} {numbers[lab.group(1)]}: ", 1)
         return f"\\begin{{{env}}}{body}\\end{{{env}}}"
 
-    tex = re.sub(r"\\begin\{(figure\*?|table)\}(.*?)\\end\{\1\}", caption, tex, flags=re.S)
+    tex = re.sub(r"\\begin\{(figure\*?|table\*?)\}(.*?)\\end\{\1\}", caption, tex, flags=re.S)
+    tex = re.sub(r"\\addlinespace(\[[^\]]*\])?", "", tex)
+    tex = re.sub(r"\\multicolumn\{(\d+)\}\{@\{\}l\}", r"\\multicolumn{\1}{l}", tex)
+    tex = tex.replace("Test & $(\\CM, \\CFA)$ &", "Test & Costs &")  # math headers do not wrap
+    # Page-wide floats (except Figure 1, which relayout puts under the title)
+    # are fenced by marker paragraphs that relayout turns into section breaks.
+    tex = re.sub(r"\\begin\{(figure|table)\*\}(.*?)\\end\{\1\*\}",
+                 lambda m: m.group(0) if "figures/example" in m.group(2)
+                 else f"\n\n{WIDE_BEGIN}\n\n{m.group(0)}\n\n{WIDE_END}\n\n", tex, flags=re.S)
     tex = re.sub(r"\\paragraph\{([^}]*)\}", r"\\textbf{\1} ", tex)
     tex = re.sub(r"\\cmidrule(\([a-z]*\))?\{[^}]*\}", "", tex)   # pandoc misreads trim options
     tex = re.sub(r"\\begin\{algorithm\}.*?\\end\{algorithm\}",
@@ -254,11 +264,14 @@ def section(cols, footer_rid, continuous):
 
 
 COLUMN_TWIPS = round(7.7 * CM)
+TEXT_TWIPS = round(16.0 * CM)
+WIDE_BEGIN, WIDE_END = "@@WIDE-BEGIN@@", "@@WIDE-END@@"
 
 
-def fit_table(m):
-    """Fixed column widths that fill the 7.7 cm column; the label column wider.
-    Cell widths honour gridSpan; tcW is written first in tcPr (schema order)."""
+def fit_table(m, total=COLUMN_TWIPS):
+    """Fixed column widths that fill ``total`` (the 7.7 cm column by default);
+    the label column wider. Cell widths honour gridSpan; tcW is written first
+    in tcPr (schema order)."""
     tbl = m.group(0)
     n = len(re.findall(r"<w:gridCol\b", tbl))
     if n == 0:
@@ -271,15 +284,15 @@ def fit_table(m):
             span = re.search(r'<w:gridSpan w:val="(\d+)"', tc)
             k = int(span.group(1)) if span else 1
             text = "".join(re.findall(r"<(?:w|m):t[^>]*>([^<]*)</(?:w|m):t>", tc))
+            width = len(text.strip()) * (1.6 if "<m:oMath" in tc else 1)  # math sets wide
             if k == 1 and col < n:
-                longest[col] = max(longest[col], len(text.strip()))
+                longest[col] = max(longest[col], round(width))
             col += k
     weights = [min(x, 14) + 5 for x in longest]   # cap long labels, floor short numbers
     if n == 1:
         weights = [1]
-    widths = [round(COLUMN_TWIPS * w / sum(weights)) for w in weights]
-    rest = widths[-1]
-    tbl = re.sub(r"<w:tblW [^/]*/>", f'<w:tblW w:w="{COLUMN_TWIPS}" w:type="dxa"/>'
+    widths = [round(total * w / sum(weights)) for w in weights]
+    tbl = re.sub(r"<w:tblW [^/]*/>", f'<w:tblW w:w="{total}" w:type="dxa"/>'
                  '<w:tblLayout w:type="fixed"/>', tbl, count=1)
     grid = "".join(f'<w:gridCol w:w="{w}"/>' for w in widths)
     tbl = re.sub(r"<w:tblGrid>.*?</w:tblGrid>", f"<w:tblGrid>{grid}</w:tblGrid>", tbl, flags=re.S)
@@ -347,6 +360,25 @@ def relayout(doc, footer_rid):
     head, sep, tail = doc.partition("</w:sectPr></w:pPr></w:p>")   # end of title section
     doc = head + sep + re.sub(r'cx="(\d+)" cy="(\d+)"', fit, tail)
     doc = doc.replace('<w:drawing  data-teaser="1">', "<w:drawing>")
+    # Page-wide floats: a one-column section between two continuous breaks,
+    # images and tables at the full text width ("<w:tbl >" keeps the column
+    # pass below from refitting them).
+    brk = ('<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="20" w:lineRule="exact"/>'
+           + "{}</w:pPr></w:p>")
+
+    def wide(m):
+        body = re.sub(r'cx="(\d+)" cy="(\d+)"',
+                      lambda k: f'cx="{TEXT_EMU}" cy="{int(int(k.group(2)) * TEXT_EMU / int(k.group(1)))}"',
+                      m.group(1))
+        body = re.sub(r"<w:tbl>.*?</w:tbl>", lambda t: fit_table(t, TEXT_TWIPS), body, flags=re.S)
+        return (brk.format(section(2, footer_rid, True)) + body.replace("<w:tbl>", "<w:tbl >")
+                + brk.format(section(1, footer_rid, True)))
+
+    marker = r'<w:p>(?:(?!</w:p>).)*?{}(?:(?!</w:p>).)*?</w:p>'
+    doc = re.sub(marker.format(WIDE_BEGIN) + r"(.*?)" + marker.format(WIDE_END), wide, doc,
+                 flags=re.S)
+    if WIDE_BEGIN in doc or WIDE_END in doc:
+        raise SystemExit("unmatched page-wide float markers")
     # Tables: explicit widths filling the column, first (label) column wider.
     doc = re.sub(r"<w:tbl>.*?</w:tbl>", fit_table, doc, flags=re.S)
     # Paragraphs with inline math: left-aligned, since some renderers stretch
@@ -406,12 +438,10 @@ def main():
         for name in ("main.tex", "refs.bib", "acl.sty", "acl_natbib.bst"):
             shutil.copy(HERE / name, tmp / name)
         shutil.copytree(HERE / "figures", tmp / "figures")
+        shutil.copytree(HERE / "tables", tmp / "tables")
         subprocess.run(["tectonic", "--keep-intermediates", "main.tex"], cwd=tmp, check=True,
                        capture_output=True)
         numbers = labels((tmp / "main.aux").read_text())
-        for svg in (ROOT / "docs" / "figures").glob("*.svg"):
-            subprocess.run(["rsvg-convert", "-f", "png", "-z", "2", "-o",
-                            str(tmp / "figures" / f"{svg.stem}.png"), str(svg)], check=True)
         for pdf in (tmp / "figures").glob("*.pdf"):
             if not (tmp / "figures" / f"{pdf.stem}.png").exists():
                 subprocess.run(["pdftoppm", "-png", "-r", "250", "-singlefile", str(pdf),
