@@ -77,14 +77,15 @@ def rule_b(tags):
     return 1 if "factual" in tags else None
 
 
-def read_records(path=RELEASE_FILE):
+def read_records(path=None):
+    path = RELEASE_FILE if path is None else path
     if not Path(path).exists() or sha256_path(path) != RELEASE_SHA256:
         raise FactoryDataRefused(f"{path} is not the pinned FACTORY release file")
     with open(path, encoding="utf-8") as handle:
         return [json.loads(line) for line in handle]
 
 
-def load_factory(path=RELEASE_FILE, rule=rule_a):
+def load_factory(path=None, rule=rule_a):
     """(units, counts). Unit IDs are 0-based line numbers; clusters number the
     questions in order of first appearance."""
     records = read_records(path)
@@ -112,8 +113,9 @@ def totals(units, counts):
             "clusters": len({u.cluster for u in units})}
 
 
-def check_expected(units, counts, expected=EXPECTED):
+def check_expected(units, counts, expected=None):
     """Gate G0 (§7)."""
+    expected = EXPECTED if expected is None else expected
     got = totals(units, counts)
     bad = {k: (got[k], v) for k, v in expected.items() if got[k] != v}
     if bad:
