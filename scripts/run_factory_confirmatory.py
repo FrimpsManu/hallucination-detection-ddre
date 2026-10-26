@@ -54,8 +54,10 @@ from src.factscore_data import sha256_path  # noqa: E402
 
 MAX_DOCS = HC.MAX_DOCS
 PINS = {
-    "factory_evidence": (F.ROOT / "factory_evidence_top10.jsonl", "PENDING_RETRIEVAL"),
-    "factory_features": (F.ROOT / "factory_features_float16.sqlite", "PENDING_SCORING"),
+    "factory_evidence": (F.ROOT / "factory_evidence_top10.jsonl",
+                         "c9bcf9cf42338b07653025a9f0010f04d30fa18a65d6aa7a25314090337f7ac8"),
+    "factory_features": (F.ROOT / "factory_features_float16.sqlite",
+                         "d00eb4ecf0041147e470f5c0e55fe604dbf7a4f810772023461f2f652a97b66b"),
     "helm_evidence": HC.PINS["helm_evidence"],
     "helm_features": HC.PINS["helm_features"],
     **{k: v for k, v in HC.PINS.items() if k not in ("helm_evidence", "helm_features")},
