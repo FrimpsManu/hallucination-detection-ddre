@@ -49,7 +49,7 @@ from src.factscore_data import sha256_path  # noqa: E402
 DTYPE = "float16"  # preregistration §3
 MAX_DOCS = 10
 EVIDENCE = (H.ROOT / "factory_evidence_top10.jsonl",
-            "PENDING_RETRIEVAL")  # pinned once retrieval has run (§8 step 2)
+            "c9bcf9cf42338b07653025a9f0010f04d30fa18a65d6aa7a25314090337f7ac8")
 EVIDENCE_MANIFEST = H.ROOT / "factory_evidence_manifest.json"
 
 
