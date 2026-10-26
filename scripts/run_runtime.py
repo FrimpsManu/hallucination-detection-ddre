@@ -22,6 +22,7 @@ import argparse
 import csv
 import json
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -91,6 +92,15 @@ def git_state():
         return {"commit": None, "branch": None, "dirty": None}
 
 
+def power_source():
+    try:
+        out = subprocess.check_output(["pmset", "-g", "ps"], text=True)
+    except Exception:
+        return None
+    m = re.search(r"Now drawing from '([^']+)'", out)
+    return m.group(1) if m else None
+
+
 def verify_inputs(out, dry_run):
     problems = []
     if not (PROJECT_ROOT / T.PROTOCOL_PATH).exists():
@@ -106,6 +116,8 @@ def verify_inputs(out, dry_run):
                 problems.append(f"{path} already exists; the measurement runs once")
         if git_state()["dirty"] is not False:
             problems.append("the working tree is not clean")
+        if power_source() != "AC Power":
+            problems.append(f"power source is {power_source()!r}; protocol §6 needs mains power")
     if problems:
         raise RuntimeRefused("V1:\n  " + "\n  ".join(problems))
     return json.loads(HC.HELM_FEATURES_MANIFEST.read_text())
@@ -252,8 +264,17 @@ def fit_times(reader, wang_root, record, sup_stored):
                        for r in rows], [x["hypothesis"] for x in pairs])
     (f, fg), (h, hg) = docs["factual"], docs["hallucinated"]
 
+    from src.baseline_core import discretize_nbc_score
+
     def bse():
-        est = E.HistogramEvidence.fit([d["e"] for d in f], [d["e"] for d in h])
+        # build_nbc_histograms' binning (Wang's NBC bins, +1 Laplace), on scores
+        # already read, so neither fit is timed reading the cache.
+        pos, neg = [1] * 10, [1] * 10
+        for d in f:
+            pos[discretize_nbc_score(d["e"])] += 1
+        for d in h:
+            neg[discretize_nbc_score(d["e"])] += 1
+        est = E.HistogramEvidence(pos, neg)
         return est, S.Support.from_histogram(est.pos_hist, est.neg_hist)
 
     def ddre():
@@ -301,7 +322,8 @@ def versions():
     import torch
     import transformers
 
-    return {"macos": platform.mac_ver()[0], "machine": platform.machine(),
+    return {"power_source": power_source(), "macos": platform.mac_ver()[0],
+            "machine": platform.machine(),
             "python": platform.python_version(), "numpy": numpy.__version__,
             "torch": torch.__version__, "transformers": transformers.__version__}
 

@@ -3,6 +3,7 @@
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -156,6 +157,13 @@ class Script(unittest.TestCase):
         with self.assertRaises(RT.CheckFailed) as e:
             RT.check_live(dict(ok, documents=2), 0, replay, Reader(), "c", "u")
         self.assertEqual(e.exception.check, "V3")
+
+    def test_power_source(self):
+        out = "Now drawing from 'AC Power'\n -InternalBattery-0 100%; charged\n"
+        with mock.patch.object(RT.subprocess, "check_output", return_value=out):
+            self.assertEqual(RT.power_source(), "AC Power")
+        with mock.patch.object(RT.subprocess, "check_output", side_effect=OSError):
+            self.assertIsNone(RT.power_source())
 
     def test_pins_are_full_digests(self):
         self.assertEqual(set(RT.PINS), {"estimators", "helm_evidence", "helm_features",
