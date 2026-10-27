@@ -1,4 +1,4 @@
-# Direct Density Ratio Estimation for Efficient Retriever-aware Hallucination Detection in Large Language Models
+# Efficient Hallucination Detection via Direct Density-Ratio Estimation
 
 LLMs can state false things fluently and confidently. Retrieval-based
 detectors check each claim against evidence documents. Their cost grows with
@@ -26,35 +26,55 @@ detection:
 Here "factuality" means detecting hallucinated claims. The method does not
 change what the LLM writes.
 
-## Main result (preregistered, confirmed)
+## Main result (two preregistered tests)
 
-On **HELM** (Su et al., Findings of ACL 2024), the test was preregistered in
-[`docs/helm_preregistration.md`](docs/helm_preregistration.md) before any
-detector touched the data, and run once. HELM has 3,736 LLM-generated
-sentences from seven LLMs, 1,978 of them hallucinated, with human labels.
+Each test was preregistered before any detector touched its data, and run
+once:
+- **HELM** (Su et al., Findings of ACL 2024): 3,736 sentences from seven
+  2023 LLMs, 1,978 hallucinated, in 229 articles.
+- **FACTORY** (Chen et al., 2025): 2,983 sentences from six 2025
+  retrieval-augmented LLMs, 1,045 hallucinated, in 1,373 questions.
 
-| Hypothesis | C_M/C_FA | AUC-gap (balanced AP) | 5th percentile | Result |
-|---|---|---|---|---|
-| DDRE-1D's cost–quality curve lies above BSE's | 28/96 | **+0.043** | +0.036 | **confirmed** |
-| | 14/24 | **+0.037** | +0.030 | **confirmed** |
-| DDRE-1D's curve lies above fixed-k max entailment's | 28/96 | **+0.008** | +0.002 | **confirmed** |
-| | 14/24 | **+0.016** | +0.010 | **confirmed** |
+Entries are AUC-gaps in balanced AP (5th percentile in brackets).
 
-Both comparisons pass Holm's correction over the four one-sided tests
-(10,000-replicate cluster bootstrap over 229 articles).
+| Hypothesis | C_M/C_FA | HELM | FACTORY |
+|---|---|---|---|
+| **H1:** DDRE-1D's cost–quality curve lies above BSE's | 28/96 | **+0.043** [+0.036] confirmed | **+0.011** [+0.004] confirmed |
+| | 14/24 | **+0.037** [+0.030] confirmed | **+0.010** [+0.003] confirmed |
+| **H2:** DDRE-1D's curve lies above fixed-k max entailment's | 28/96 | **+0.008** [+0.002] confirmed | −0.002 [−0.005] not confirmed |
+| | 14/24 | **+0.016** [+0.010] confirmed | −0.000 [−0.005] not confirmed |
+
+**Statistics:** Holm's correction over the four one-sided tests per dataset,
+with a 10,000-replicate cluster bootstrap. The FACTORY test passed its
+preregistered informativeness check: the evidence separates the labels
+above chance.
 
 **What the curves mean for the goals:**
-- **G1:** at BSE's quality, DDRE-1D needs 2.7 fewer NLI calls per sentence at
-  28/96 (95% CI [1.9, 3.5]).
-- **G2:** at BSE's cost, its average precision is +0.024 higher [0.016, 0.036].
-- **G3:** it has a lower Brier score at both operating points.
+- **G1, cost.** At BSE's quality on HELM, DDRE-1D needs 2.7 fewer NLI calls
+  per sentence at 28/96 (95% CI [1.9, 3.5]): 70% fewer. On FACTORY it needs
+  1.0 fewer at 28/96 and none fewer at 14/24.
+- **G1, measured time.** On HELM, that saving is **70% (28/96) and 59%
+  (14/24) less running time per sentence** at equal quality. NLI is over
+  99.8% of the time, and the estimator adds under 0.4 ms per sentence.
+- **G2, detection.** At BSE's cost, average precision is higher by +0.024
+  [0.016, 0.036] on HELM, and by +0.003 and +0.014 on FACTORY.
+- **G3, calibration.** DDRE-1D has a lower Brier score at both operating
+  points on both datasets.
 
 **Caveats:**
-- The advantage holds along the cost–quality curve. At Wang's exact
-  operating point, DDRE-1D reads slightly more documents than BSE.
-- Effects are modest.
+- **Along the curve, not at one point.** The advantage holds along the
+  cost–quality curve. At Wang's exact operating point, DDRE-1D reads more
+  documents than BSE, and is then 9–14% slower and more accurate.
+- **Modest effects.** They are about four times smaller on FACTORY, where
+  every detector is weak (balanced AP about 0.57). Its labels rest on web
+  search, while our evidence is Wikipedia.
+- **Against fixed-k.** DDRE-1D beats fixed-k max entailment on HELM and ties
+  with it on FACTORY. BSE is below it on both.
 
-Full results: [`docs/helm_results_summary.md`](docs/helm_results_summary.md).
+**Full results:**
+- [`docs/helm_results_summary.md`](docs/helm_results_summary.md);
+- [`docs/factory_results_summary.md`](docs/factory_results_summary.md);
+- [`docs/runtime_results.md`](docs/runtime_results.md).
 
 ### What else we found
 
@@ -65,12 +85,13 @@ Full results: [`docs/helm_results_summary.md`](docs/helm_results_summary.md).
   method by **backward induction**, the Bayes-optimal rule that the paper
   names as ideal ([plan amendment 1](docs/research_plan_v2.md)).
 - **A simple baseline is strong.** Reading the first k documents and taking
-  the maximum entailment beats BSE at equal cost on most datasets, HELM
-  included. DDRE-1D beats it (H2 above).
+  the maximum entailment beats BSE at equal cost on most datasets, HELM and
+  FACTORY included. DDRE-1D beats it on HELM and ties with it on FACTORY, where
+  one document already gives most of the attainable quality.
 - **The retriever-aware variant is not supported.** DDRE-M is uLSIF on
   entailment, contradiction and retrieval rank. It lies below its own
   histogram control (Naive-Bayes histograms on the same features) on HELM and
-  on most exploratory datasets.
+  on most exploratory datasets, and is level with it on FACTORY.
 - **Earlier configurations did not hold up.** These include a 1-D DDRE tuned
   over 640 configurations, and a multivariate model under BSE's stopping
   band. A preregistered test on ExpertQA and BingCheck did not confirm them.
@@ -104,6 +125,9 @@ paper, Wang's released code and this repository are listed in
 | [`docs/v2_budget_results.md`](docs/v2_budget_results.md) | Exploratory budget-knob curves and the fixed-k contrasts (amendment 2) |
 | [`docs/helm_preregistration.md`](docs/helm_preregistration.md) | The confirmatory test, frozen before any detector touched HELM |
 | [`docs/helm_results_summary.md`](docs/helm_results_summary.md) | The confirmatory results |
+| [`docs/runtime_protocol.md`](docs/runtime_protocol.md), [`docs/runtime_results.md`](docs/runtime_results.md) | Running time on HELM: protocol and results |
+| [`docs/factory_preregistration.md`](docs/factory_preregistration.md) | The second confirmatory test, frozen before any detector touched FACTORY |
+| [`docs/factory_results_summary.md`](docs/factory_results_summary.md) | Its results, with exploratory follow-ups |
 | [`docs/naming.md`](docs/naming.md) | Method, goal and gate names; map of historical names |
 
 **Earlier work, kept as it was run:**
@@ -119,7 +143,7 @@ paper, Wang's released code and this repository are listed in
 
 ```bash
 python -m pip install -r requirements.txt
-python -m unittest discover -s tests          # ~1,650 tests, under a minute, no data needed
+python -m unittest discover -s tests          # ~1,690 tests, under a minute, no data needed
 python scripts/prepare_wang_data.py           # Wang et al.'s released data -> data/wang/
 ```
 
@@ -143,6 +167,11 @@ above. Each script below:
 | HELM retrieval | `scripts/retrieve_helm_evidence.py` | `helm_evidence_top10.jsonl` |
 | HELM NLI features | `scripts/score_helm_features.py` | `helm_features_float16.sqlite` |
 | HELM confirmatory test | `scripts/run_helm_confirmatory.py` | `helm_confirmatory_result_float16.json` |
+| HELM running time | `scripts/run_runtime.py` | `runtime/runtime_result.json` |
+| FACTORY retrieval | `scripts/retrieve_factory_evidence.py` | `factory_evidence_top10.jsonl` |
+| FACTORY NLI features | `scripts/score_factory_features.py` | `factory_features_float16.sqlite` |
+| FACTORY confirmatory test | `scripts/run_factory_confirmatory.py` | `factory_confirmatory_result_float16.json` |
+| FACTORY exploratory follow-ups | `scripts/explore_factory_followups.py` | `exploratory/factory_followups.json` |
 | Figures | `scripts/plot_v2_curves.py`, `scripts/plot_v2_budget.py`, `scripts/plot_helm_curves.py` | `docs/figures/*.svg` |
 
 **Runtime:** NLI scoring runs Wang's DeBERTa-v3 checkpoint
@@ -152,11 +181,14 @@ Apple MPS. Everything after scoring runs from cached features.
 ## Data
 
 Datasets used: SelfCheckGPT, as released by Wang et al.; FActScore;
-Factcheck-Bench; ExpertQA; BingCheck; HELM.
+Factcheck-Bench; ExpertQA; BingCheck; HELM; FACTORY.
 
 No dataset is redistributed in this repository. Please follow each source's
-terms and cite it. BingCheck and HELM state no licence; their authors were
-contacted for permission (October 2026).
+terms and cite it.
+- **FACTORY** is CC BY-NC 4.0 and is used for research only.
+- **BingCheck and HELM** state no licence. Their authors were contacted in
+  October 2026. We use both for research only, with citation, and do not
+  redistribute them.
 
 ## How this work was done
 
@@ -176,8 +208,8 @@ contacted for permission (October 2026).
 ```bibtex
 @misc{manufrimpong2026ddre,
   author = {Manu-Frimpong, Augustine},
-  title  = {Direct Density Ratio Estimation for Efficient Retriever-aware
-            Hallucination Detection in Large Language Models},
+  title  = {Efficient Hallucination Detection via Direct Density-Ratio
+            Estimation},
   year   = {2026},
   note   = {Code and research record: https://github.com/FrimpsManu/hallucination-detection-ddre}
 }
