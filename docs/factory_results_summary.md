@@ -220,6 +220,6 @@ tests.
 | `~/ddre-artifacts/confirmatory-v3/factory/factory_features_float16.sqlite` | `d00eb4ecf0041147e470f5c0e55fe604dbf7a4f810772023461f2f652a97b66b` |
 | `~/ddre-artifacts/confirmatory-v3/factory/factory_confirmatory_result_float16.json` | `55efea0501cf78e57bcbca157fa15f03f387ef261b16b471229ba9e2788eaeb6` |
 | `~/ddre-artifacts/confirmatory-v3/factory/factory_confirmatory_predictions_float16.csv` | `7e1a5c03811edebfe871940c7e0c307ae9b769a7914841770a72b116f6d21079` |
-| `~/ddre-artifacts/confirmatory-v3/factory/exploratory/factory_followups.json` | written from clean `main` after this PR (§7) |
+| `~/ddre-artifacts/confirmatory-v3/factory/exploratory/factory_followups.json` | `7738430a1bead799656f1ee382524fb91fa966f391830626e0dc56d8d39fe30c` (run from clean `main` `1242913`; identical to the draft that produced §7) |
 
 All are read-only.
