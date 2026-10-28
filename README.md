@@ -1,5 +1,9 @@
 # Efficient Hallucination Detection via Direct Density-Ratio Estimation
 
+[![Core Research Tests](https://github.com/FrimpsManu/hallucination-detection-ddre/actions/workflows/core-tests.yml/badge.svg)](https://github.com/FrimpsManu/hallucination-detection-ddre/actions/workflows/core-tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)
+
 LLMs can state false things fluently and confidently. Retrieval-based
 detectors check each claim against evidence documents. Their cost grows with
 every document they read and score with an NLI model.
@@ -199,6 +203,11 @@ terms and cite it.
   dated amendments.
 - **Run once:** every run starts from a clean, reviewed commit and is pinned
   by hash.
+- **Commit IDs:** IDs cited in `docs/` and in the frozen result files refer
+  to the original history, kept at tag
+  [`original-history`](https://github.com/FrimpsManu/hallucination-detection-ddre/tree/original-history).
+  [`docs/history/commit_map.tsv`](docs/history/commit_map.tsv) maps each one
+  to the same commit on `main`.
 - **Honest reporting:** exploratory and confirmatory results are labelled as
   such, and every outcome is reported, including the ones that did not
   support the method.
@@ -217,3 +226,8 @@ terms and cite it.
 
 Please also cite Wang et al. (2023) for BSE and the released data, and the
 authors of each dataset used.
+
+## Licence
+
+The code is released under the [MIT License](LICENSE). The datasets keep
+their own terms (see [Data](#data)); none is redistributed here.
