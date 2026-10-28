@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use this code or research record, please cite it as below."
+title: "Efficient Hallucination Detection via Direct Density-Ratio Estimation"
+authors:
+  - family-names: "Manu-Frimpong"
+    given-names: "Augustine"
+type: software
+license: MIT
+repository-code: "https://github.com/FrimpsManu/hallucination-detection-ddre"
+keywords:
+  - hallucination detection
+  - density-ratio estimation
+  - uLSIF
+  - Bayesian sequential estimation
+  - fact checking
